@@ -54,76 +54,21 @@ export class PostgresWompiBillingRepository implements WompiBillingRepository {
 
   /** Must run inside the worker's tenant-scoped transaction. */
   async applyWebhookStatus(input: ApplyWompiStatusInput): Promise<'applied' | 'duplicate'> {
-    const payments = await this.sql<{ subscription_id: string; status: string }[]>`
-      SELECT subscription_id, status
-      FROM public.payments
-      WHERE reference = ${input.reference}
-        AND provider = 'wompi'
-        AND amount = ${input.amountMinor}
-        AND currency = ${input.currency}
-        AND (provider_transaction_id IS NULL OR provider_transaction_id = ${input.providerTransactionId})
-      FOR UPDATE
-    `;
-    if (payments.length !== 1) throw new Error('WOMPI_TRANSACTION_CORRELATION_MISMATCH');
-
     const businessEventId = sha256Hex(`wompi|${input.providerTransactionId}|${input.status}`);
-    const inserted = await this.sql<{ id: string }[]>`
-      INSERT INTO public.billing_events (
-        id, tenant_id, subscription_id, provider, provider_event_id,
-        event_type, payload_json, occurred_at
-      )
-      SELECT ${input.billingEventId}::uuid, p.tenant_id, p.subscription_id, 'wompi', ${businessEventId},
-        'billing.provider_transaction_status_changed',
-        ${this.sql.json({
-          provider: 'wompi',
-          provider_transaction_id: input.providerTransactionId,
-          reference: input.reference,
-          status: input.status,
-          amount_minor: input.amountMinor,
-          currency: input.currency,
-          webhook_event_id: input.webhookEventId,
-        })},
+    const [row] = await this.sql<{ outcome: 'applied' | 'duplicate' }[]>`
+      SELECT app.apply_wompi_payment_status(
+        ${input.billingEventId}::uuid,
+        ${input.webhookEventId}::uuid,
+        ${businessEventId},
+        ${input.providerTransactionId},
+        ${input.reference},
+        ${input.status},
+        ${input.amountMinor}::bigint,
+        ${input.currency},
         ${input.occurredAt}::timestamptz
-      FROM public.payments AS p
-      WHERE p.reference = ${input.reference}
-        AND p.provider = 'wompi'
-        AND p.amount = ${input.amountMinor}
-        AND p.currency = ${input.currency}
-        AND (p.provider_transaction_id IS NULL OR p.provider_transaction_id = ${input.providerTransactionId})
-      ON CONFLICT (provider, provider_event_id) DO NOTHING
-      RETURNING id
+      ) AS outcome
     `;
-    if (inserted.length === 0) return 'duplicate';
-
-    const localStatus = input.status.toLowerCase();
-    const currentStatus = payments[0].status;
-    const finalStatuses = new Set(['approved', 'declined', 'error', 'voided']);
-    if (!(localStatus === 'pending' && finalStatuses.has(currentStatus))) {
-      await this.sql`
-        UPDATE public.payments
-        SET provider_transaction_id = ${input.providerTransactionId},
-            status = ${localStatus},
-            paid_at = CASE WHEN ${localStatus} = 'approved'
-              THEN COALESCE(paid_at, ${input.occurredAt}::timestamptz) ELSE paid_at END,
-            updated_at = now()
-        WHERE reference = ${input.reference} AND provider = 'wompi'
-      `;
-    }
-
-    const subscriptionId = payments[0].subscription_id;
-    if (input.status === 'APPROVED') {
-      await this.sql`
-        UPDATE public.subscriptions
-        SET status = 'active', updated_at = now()
-        WHERE id = ${subscriptionId}::uuid AND status IN ('trialing','past_due','suspended')
-      `;
-    } else if (input.status === 'DECLINED') {
-      await this.sql`
-        UPDATE public.subscriptions
-        SET status = 'past_due', updated_at = now()
-        WHERE id = ${subscriptionId}::uuid AND status = 'active'
-      `;
-    }
-    return 'applied';
+    if (!row) throw new Error('WOMPI_WEBHOOK_PROCESSING_FAILED');
+    return row.outcome;
   }
 }

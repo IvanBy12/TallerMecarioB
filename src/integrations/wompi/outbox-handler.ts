@@ -1,4 +1,4 @@
-import { WompiAdapter } from './adapter.js';
+import type { WompiProvider } from './adapter.js';
 import {
   subscriptionChargeRequestedSchema,
   type NormalizedWompiTransaction,
@@ -23,7 +23,7 @@ export interface WompiChargeResult {
 /** Handler for the canonical `billing.subscription_charge_requested` outbox event. */
 export async function handleSubscriptionChargeRequested(input: {
   payload: unknown;
-  adapter: WompiAdapter;
+  adapter: WompiProvider;
   repository: WompiBillingRepository;
 }): Promise<WompiChargeResult> {
   const event = subscriptionChargeRequestedSchema.parse(input.payload);
@@ -52,7 +52,7 @@ export async function handleSubscriptionChargeRequested(input: {
 }
 
 export async function reconcileTransaction(
-  adapter: WompiAdapter,
+  adapter: WompiProvider,
   providerTransactionId: string,
   event: SubscriptionChargeRequested,
 ): Promise<NormalizedWompiTransaction> {

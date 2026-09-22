@@ -50,6 +50,14 @@ export interface AcceptanceTokens {
   personalDataAuthToken?: string;
 }
 
+/** Mockable provider boundary consumed by billing/outbox code. */
+export interface WompiProvider {
+  getAcceptanceTokens(): Promise<AcceptanceTokens>;
+  createPaymentSource(input: CreatePaymentSourceInput): Promise<{ id: string; status?: string }>;
+  createTransaction(input: CreateTransactionInput): Promise<NormalizedWompiTransaction>;
+  getTransaction(providerTransactionId: string): Promise<NormalizedWompiTransaction>;
+}
+
 type FetchLike = typeof fetch;
 type Sleep = (milliseconds: number) => Promise<unknown>;
 
@@ -87,7 +95,7 @@ function normalizePaymentSourceId(value: string | number): number {
   return normalized;
 }
 
-export class WompiAdapter {
+export class WompiAdapter implements WompiProvider {
   readonly config: Required<Pick<WompiAdapterConfig,
     'maxAttempts' | 'timeoutMs' | 'baseRetryDelayMs' | 'maxRetryDelayMs'>> & WompiAdapterConfig;
   private readonly fetchImpl: FetchLike;

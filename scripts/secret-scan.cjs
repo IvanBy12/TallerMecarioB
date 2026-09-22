@@ -60,8 +60,8 @@ const ALLOWLIST_MATCHES = new Set([
   'scripts/staging-deploy-drill.cjs:190',
   // server.ts/run.ts: assembles a connection string from process.env at
   // runtime (encodeURIComponent(user)/(password)) -- no literal secret here.
-  'src/api/server.ts:34',
-  'src/worker/run.ts:27',
+  'src/api/server.ts:37',
+  'src/worker/run.ts:88',
 ]);
 
 const SKIP_EXTENSIONS = new Set([

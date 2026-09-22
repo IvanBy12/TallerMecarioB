@@ -134,7 +134,7 @@ async function main() {
     [migrationState] = await testAdmin`
       SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
     `;
-    if (migrationState.count !== 4) throw new Error('FULL_MIGRATION_STATE_INVALID');
+    if (migrationState.count !== 5) throw new Error('FULL_MIGRATION_STATE_INVALID');
 
     await testAdmin`
       SELECT pg_catalog.pg_advisory_lock(

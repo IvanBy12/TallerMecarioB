@@ -24,7 +24,7 @@
     "staging:deploy-drill:ci": "node scripts/staging-deploy-drill.cjs",
     "build": "tsc -p tsconfig.build.json",
     "test:wompi": "node scripts/test-wompi.cjs",
-    "test:wompi:sandbox": "node --env-file=.env scripts/test-wompi.cjs --sandbox",
+    "test:wompi:sandbox": "node --env-file-if-exists=.env scripts/test-wompi.cjs --sandbox",
     "typecheck": "tsc -p tsconfig.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

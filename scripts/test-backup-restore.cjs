@@ -189,7 +189,7 @@ async function main() {
       throw new Error('SOURCE_MIGRATION_FAILED');
     }
     const [migrationState] = await sourceAdmin`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    if (migrationState.count !== 4) throw new Error('CLEAN_MIGRATION_INVALID');
+    if (migrationState.count !== 5) throw new Error('CLEAN_MIGRATION_INVALID');
     process.stdout.write('CLEAN_MIGRATION_PASS\n');
 
     let lastWriteAt;

@@ -12,6 +12,8 @@ const { normalizeWompiTransaction } = require(join(root, 'integrations/wompi/con
 const { createTransactionIntegritySignature, createWebhookChecksum } = require(join(root, 'integrations/wompi/crypto.js'));
 const { verifyWompiWebhook } = require(join(root, 'integrations/wompi/webhook.js'));
 const { handleSubscriptionChargeRequested } = require(join(root, 'integrations/wompi/outbox-handler.js'));
+const { loadWompiConfig } = require(join(root, 'integrations/wompi/config.js'));
+const { subscriptionStatusAfterWompiPayment } = require(join(root, 'integrations/wompi/subscription-state.js'));
 const { registerWompiWebhookRoute } = require(join(root, 'integrations/wompi/routes.js'));
 const { buildApi } = require(join(root, 'api/app.js'));
 
@@ -69,6 +71,25 @@ test('transaction integrity signature uses reference + amount + currency + integ
     reference: 'ORDER-1', amountMinor: 50000, currency: 'COP', integritySecret: 'test_integrity_secret',
   });
   assert.equal(signature, '81f8f348134103a9b1d7e8f0f48c70be9e8156fadf144eeeabe93084f4e6058f');
+});
+
+test('WOMPI_ENABLED defaults false and enabled mode fails fast unless all secrets exist', () => {
+  assert.deepEqual(loadWompiConfig({}), { enabled: false });
+  assert.deepEqual(loadWompiConfig({ WOMPI_ENABLED: 'false' }), { enabled: false });
+
+  const enabled = {
+    WOMPI_ENABLED: 'true', WOMPI_ENVIRONMENT: 'test',
+    WOMPI_PUBLIC_KEY: 'pub_test_unit-only', WOMPI_PRIVATE_KEY: 'prv_test_unit-only',
+    WOMPI_INTEGRITY_SECRET: 'test_integrity_unit-only', WOMPI_EVENTS_SECRET: 'test_events_unit-only',
+  };
+  for (const name of ['WOMPI_PUBLIC_KEY', 'WOMPI_PRIVATE_KEY', 'WOMPI_INTEGRITY_SECRET', 'WOMPI_EVENTS_SECRET']) {
+    const missing = { ...enabled };
+    delete missing[name];
+    assert.throws(() => loadWompiConfig(missing), new RegExp(`${name}_REQUIRED`));
+  }
+  const loaded = loadWompiConfig(enabled);
+  assert.equal(loaded.enabled, true);
+  assert.equal(loaded.baseUrl, 'https://sandbox.wompi.co/v1');
 });
 
 test('adapter creates canonical transaction payload without exposing the private key in results', async () => {
@@ -156,18 +177,44 @@ test('adapter retries 5xx and honors Retry-After for 429, then succeeds', async 
   assert.deepEqual(waits, [5, 1000]);
 });
 
-test('adapter does not blindly retry functional 422 errors', async () => {
+test('adapter treats a duplicate reference 422 as a permanent error and does not retry', async () => {
   let calls = 0;
   const adapter = new WompiAdapter(testConfig, {
     fetch: async () => { calls += 1; return response(422, { error: 'duplicate reference' }); },
   });
-  await assert.rejects(adapter.getTransaction('tx-duplicate'), (error) => {
+  await assert.rejects(adapter.createTransaction({
+    acceptanceToken: 'acceptance-token', amountMinor: 4990000, currency: 'COP',
+    customerEmail: 'billing@example.invalid', paymentMethod: { installments: 1 },
+    reference: transaction().reference, paymentSourceId: '3891', recurrent: true,
+  }), (error) => {
     assert.ok(error instanceof WompiAdapterError);
     assert.equal(error.code, 'WOMPI_VALIDATION_REJECTED');
     assert.equal(error.retryable, false);
     return true;
   });
   assert.equal(calls, 1);
+});
+
+test('adapter retries bounded timeouts and reports WOMPI_TIMEOUT without leaking credentials', async () => {
+  let calls = 0;
+  const adapter = new WompiAdapter({ ...testConfig, maxAttempts: 2, timeoutMs: 5 }, {
+    random: () => 0,
+    sleep: async () => undefined,
+    fetch: async (_url, options) => {
+      calls += 1;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+    },
+  });
+  await assert.rejects(adapter.getTransaction('tx-timeout'), (error) => {
+    assert.ok(error instanceof WompiAdapterError);
+    assert.equal(error.code, 'WOMPI_TIMEOUT');
+    assert.equal(error.retryable, true);
+    assert.equal(error.message.includes(testConfig.privateKey), false);
+    return true;
+  });
+  assert.equal(calls, 2);
 });
 
 test('adapter retries network failures with bounded exponential backoff', async () => {
@@ -214,6 +261,15 @@ test('webhook environment mismatch is rejected before persistence', () => {
     rawBody, headerChecksum: fixture.event.signature.checksum,
     eventSecret: fixture.eventSecret, expectedEnvironment: 'test',
   }), /WOMPI_WEBHOOK_ENVIRONMENT_INVALID/);
+});
+
+test('verified payment statuses use only canonical subscription transitions', () => {
+  assert.equal(subscriptionStatusAfterWompiPayment('trialing', 'PENDING'), 'trialing');
+  assert.equal(subscriptionStatusAfterWompiPayment('trialing', 'APPROVED'), 'active');
+  assert.equal(subscriptionStatusAfterWompiPayment('active', 'DECLINED'), 'past_due');
+  assert.equal(subscriptionStatusAfterWompiPayment('active', 'ERROR'), 'active');
+  assert.equal(subscriptionStatusAfterWompiPayment('active', 'VOIDED'), 'active');
+  assert.equal(subscriptionStatusAfterWompiPayment('cancelled', 'APPROVED'), 'cancelled');
 });
 
 test('outbox charge handler reconciles an existing provider transaction instead of charging twice', async () => {
@@ -268,7 +324,7 @@ test('Fastify webhook route is public, persists once, ACKs duplicates and reject
   const app = await buildApi({
     database: async () => { throw new Error('database auth must not run'); },
     identityProvider: { async verifyRequest() { identityCalls += 1; return null; } },
-    registerRoutes(server) {
+    registerPublicRoutes(server) {
       registerWompiWebhookRoute(server, {
         eventSecret: fixture.eventSecret,
         environment: 'test',

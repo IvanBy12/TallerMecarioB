@@ -113,7 +113,7 @@ async function main() {
     const verify = postgres(dbUrl.toString(), { max: 1, prepare: false, onnotice: () => {} });
     const [{ count }] = await verify`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
     await verify.end({ timeout: 5 });
-    if (count !== 4) throw new Error(`UNEXPECTED_MIGRATION_COUNT_${count}`);
+    if (count !== 5) throw new Error(`UNEXPECTED_MIGRATION_COUNT_${count}`);
     process.stdout.write(`MIGRATION_SUCCEEDED_AFTER_LOCK_RELEASE count=${count}\n`);
 
     testPassed = true;

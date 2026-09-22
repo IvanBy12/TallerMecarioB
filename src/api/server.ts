@@ -1,6 +1,9 @@
 import postgres from 'postgres';
 import { buildApi, getTenantRequestContext } from './app.js';
 import type { IdentityProvider, VerifiedIdentity } from '../identity/identity-provider.js';
+import { loadWompiConfig } from '../integrations/wompi/config.js';
+import { PostgresWompiWebhookRepository } from '../integrations/wompi/repository.js';
+import { registerWompiWebhookRoute } from '../integrations/wompi/routes.js';
 
 /**
  * ADR-006 is accepted but no concrete Clerk adapter exists in this repo yet
@@ -41,6 +44,7 @@ function parseCorsAllowedOrigins(): string[] {
 }
 
 async function main(): Promise<void> {
+  const wompi = loadWompiConfig();
   const port = Number(process.env.PORT ?? 3000);
   const host = process.env.HOST ?? '0.0.0.0';
 
@@ -57,6 +61,15 @@ async function main(): Promise<void> {
     database,
     identityProvider: new UnimplementedIdentityProvider(),
     corsAllowedOrigins: parseCorsAllowedOrigins(),
+    ...(wompi.enabled ? {
+      registerPublicRoutes(server) {
+        registerWompiWebhookRoute(server, {
+          eventSecret: wompi.eventsSecret,
+          environment: wompi.environment,
+          repository: new PostgresWompiWebhookRepository(database),
+        });
+      },
+    } : {}),
     async registerRoutes(server) {
       // Deploy-smoke-test only: proves the full protected-route pipeline
       // (rate limit -> auth -> TenantContext transaction) is wired end to

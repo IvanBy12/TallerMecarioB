@@ -14,12 +14,10 @@ export interface RegisterWompiWebhookOptions {
 export function registerWompiWebhookRoute(app: FastifyInstance, options: RegisterWompiWebhookOptions): void {
   const expectedSecretPrefix = options.environment === 'test' ? 'test_events_' : 'prod_events_';
   if (!options.eventSecret.startsWith(expectedSecretPrefix)) {
-    throw new Error('WOMPI_EVENT_SECRET_ENVIRONMENT_MISMATCH');
+    throw new Error('WOMPI_EVENTS_SECRET_ENVIRONMENT_MISMATCH');
   }
   const createId = options.createId ?? uuidV7;
-  app.post('/api/v1/webhooks/wompi', {
-    config: { publicWebhook: true },
-  }, async (request, reply) => {
+  app.post('/api/v1/webhooks/wompi', async (request, reply) => {
     const headerValue = request.headers['x-event-checksum'];
     const headerChecksum = Array.isArray(headerValue) ? undefined : headerValue;
     let verified;

@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const h = require('./helpers.cjs');
 
@@ -450,6 +451,56 @@ test.describe('bootstrap allowlist', () => {
         (SELECT count(*)::int FROM webhook_processing_attempts WHERE webhook_event_id = ${webhook}::uuid) AS attempts
     `;
     assert.deepEqual(stored, { webhooks: 1, outbox: 1, status: 'APPROVED', attempts: 1 });
+  });
+
+  test('Wompi worker persists payment/subscription transitions and blocks transport/business replay', async () => {
+    const tenant = id();
+    const subscription = id();
+    const approvedPayment = id();
+    const declinedPayment = id();
+    const approvedReference = `ilvox_pay_${approvedPayment}`;
+    const declinedReference = `ilvox_pay_${declinedPayment}`;
+    const approvedTransaction = `tx-${approvedPayment}`;
+    const declinedTransaction = `tx-${declinedPayment}`;
+    await fixture(async (tx) => {
+      await tx`INSERT INTO workshops ${tx({ id: tenant, slug: `w-${tenant}`, legal_name: 'T', display_name: 'T' })}`;
+      await tx`INSERT INTO subscriptions ${tx({ id: subscription, tenant_id: tenant, plan_id: id(), status: 'trialing', current_period_start: new Date(), current_period_end: new Date(Date.now() + 86400000) })}`;
+      await tx`INSERT INTO payments ${tx({ id: approvedPayment, tenant_id: tenant, subscription_id: subscription, environment: 'test', reference: approvedReference, amount: 4990000 })}`;
+      await tx`INSERT INTO payments ${tx({ id: declinedPayment, tenant_id: tenant, subscription_id: subscription, environment: 'test', reference: declinedReference, amount: 4990000 })}`;
+    });
+
+    const apply = async (reference, transaction, status) => {
+      const businessId = createHash('sha256').update(`wompi|${transaction}|${status}`).digest('hex');
+      let outcome;
+      await h.inTx(worker, tenant, async (tx) => {
+        [outcome] = await tx`
+          SELECT app.apply_wompi_payment_status(
+            ${id()}::uuid, ${id()}::uuid, ${businessId}, ${transaction}, ${reference}, ${status},
+            4990000::bigint, 'COP', ${new Date('2026-09-19T03:00:00.000Z')}::timestamptz
+          ) AS outcome
+        `;
+      });
+      return outcome.outcome;
+    };
+
+    assert.equal(await apply(approvedReference, approvedTransaction, 'PENDING'), 'applied');
+    assert.equal(await apply(approvedReference, approvedTransaction, 'PENDING'), 'duplicate');
+    assert.equal(await apply(approvedReference, approvedTransaction, 'APPROVED'), 'applied');
+    assert.equal(await apply(declinedReference, declinedTransaction, 'DECLINED'), 'applied');
+    // An older APPROVED transport replay is a business duplicate and cannot reactivate the subscription.
+    assert.equal(await apply(approvedReference, approvedTransaction, 'APPROVED'), 'duplicate');
+
+    const [stored] = await admin`
+      SELECT
+        (SELECT status FROM payments WHERE id = ${approvedPayment}) AS approved_status,
+        (SELECT status FROM payments WHERE id = ${declinedPayment}) AS declined_status,
+        (SELECT status FROM subscriptions WHERE id = ${subscription}) AS subscription_status,
+        (SELECT count(*)::int FROM billing_events WHERE tenant_id = ${tenant}) AS billing_events
+    `;
+    assert.deepEqual(stored, {
+      approved_status: 'approved', declined_status: 'declined',
+      subscription_status: 'past_due', billing_events: 3,
+    });
   });
 });
 

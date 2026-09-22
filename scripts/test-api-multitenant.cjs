@@ -92,7 +92,7 @@ async function main() {
     const [migrationState] = await testAdmin`
       SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
     `;
-    if (migrationState.count !== 4) throw new Error('CLEAN_MIGRATION_INVALID');
+    if (migrationState.count !== 5) throw new Error('CLEAN_MIGRATION_INVALID');
     process.stdout.write('CLEAN_MIGRATION_PASS\n');
 
     await testAdmin.unsafe(

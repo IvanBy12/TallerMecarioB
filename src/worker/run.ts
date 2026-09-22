@@ -4,7 +4,17 @@ import {
   processClaimedJob,
   requeueStalled,
   type OutboxHandler,
+  PermanentDispatchError,
 } from './outbox-worker.js';
+import { WompiAdapter } from '../integrations/wompi/adapter.js';
+import { PostgresWompiBillingRepository } from '../integrations/wompi/billing-repository.js';
+import { loadWompiConfig, type WompiRuntimeConfig } from '../integrations/wompi/config.js';
+import { WompiAdapterError } from '../integrations/wompi/errors.js';
+import { handleSubscriptionChargeRequested } from '../integrations/wompi/outbox-handler.js';
+import {
+  PostgresWompiWebhookAttemptRepository,
+  processWompiWebhookOutbox,
+} from '../integrations/wompi/webhook-processor.js';
 
 /**
  * ADR-007: API and worker ship from the same image, started with a
@@ -14,7 +24,58 @@ import {
  * treats an unregistered `event_type` as a permanent failure (dead_letter),
  * never a crash, so the process stays up either way.
  */
-const HANDLERS: Record<string, OutboxHandler> = {};
+function rethrowClassifiedWompiError(error: unknown): never {
+  const permanentMessage = error instanceof Error && [
+    'WOMPI_TRANSACTION_CORRELATION_MISMATCH',
+    'WOMPI_NORMALIZED_EVENT_INVALID',
+    'WOMPI_WEBHOOK_EVENT_ID_MISSING',
+  ].includes(error.message);
+  if ((error instanceof WompiAdapterError && !error.retryable) || permanentMessage
+    || (error instanceof Error && error.name === 'ZodError')) {
+    throw new PermanentDispatchError(error instanceof Error ? error.message : 'WOMPI_PERMANENT_ERROR');
+  }
+  throw error;
+}
+
+function createWompiHandlers(
+  config: Extract<WompiRuntimeConfig, { enabled: true }>,
+  database: postgres.Sql,
+): Record<string, OutboxHandler> {
+  const adapter = new WompiAdapter({
+    environment: config.environment,
+    baseUrl: config.baseUrl,
+    publicKey: config.publicKey,
+    privateKey: config.privateKey,
+    integritySecret: config.integritySecret,
+  });
+  const attempts = new PostgresWompiWebhookAttemptRepository(database);
+  return {
+    'billing.subscription_charge_requested': async (event, tx) => {
+      try {
+        await handleSubscriptionChargeRequested({
+          payload: event.payload,
+          adapter,
+          repository: new PostgresWompiBillingRepository(tx),
+        });
+      } catch (error) {
+        rethrowClassifiedWompiError(error);
+      }
+    },
+    'billing.provider_transaction_status_changed': async (event, tx) => {
+      try {
+        await processWompiWebhookOutbox({
+          payload: event.payload,
+          tenantSql: tx,
+          attempts,
+          attemptNumber: event.attempts,
+          workerId: `worker-${process.pid}`,
+        });
+      } catch (error) {
+        rethrowClassifiedWompiError(error);
+      }
+    },
+  };
+}
 
 function databaseUrlFromEnv(): string {
   if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
@@ -28,6 +89,7 @@ function databaseUrlFromEnv(): string {
 }
 
 async function main(): Promise<void> {
+  const wompi = loadWompiConfig();
   const runtimeRole = process.env.DB_RUNTIME_ROLE ?? 'tallermecario_worker';
   const database = postgres(databaseUrlFromEnv(), {
     max: Number(process.env.DB_POOL_MAX ?? 5),
@@ -37,6 +99,7 @@ async function main(): Promise<void> {
   const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 2000);
   const batchSize = Number(process.env.WORKER_BATCH_SIZE ?? 10);
   const stallSeconds = Number(process.env.WORKER_STALL_SECONDS ?? 300);
+  const handlers = wompi.enabled ? createWompiHandlers(wompi, database) : {};
 
   let running = true;
   const shutdown = async (signal: string) => {
@@ -55,7 +118,7 @@ async function main(): Promise<void> {
       const jobs = await claimBatch(database, batchSize);
       for (const job of jobs) {
         if (!running) break;
-        await processClaimedJob({ database, handlers: HANDLERS }, job);
+        await processClaimedJob({ database, handlers }, job);
       }
     } catch (error) {
       process.stderr.write(`worker cycle error: ${error instanceof Error ? error.message : String(error)}\n`);
