@@ -22,6 +22,13 @@
       "when": 1790042094025,
       "tag": "0002_sprint0_db_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790050297199,
+      "tag": "0003_outbox_worker",
+      "breakpoints": true
     }
   ]
 }

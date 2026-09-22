@@ -11,6 +11,13 @@
     "test:db:sprint0:ci": "node scripts/test-cross-row.cjs",
     "test:api:multitenant": "node --env-file=.env scripts/test-api-multitenant.cjs",
     "test:api:multitenant:ci": "node scripts/test-api-multitenant.cjs",
+    "test:media:r2": "node --env-file=.env scripts/test-media-r2.cjs",
+    "test:media:r2:ci": "node scripts/test-media-r2.cjs",
+    "test:api:security": "node --env-file=.env scripts/test-api-security.cjs",
+    "test:api:security:ci": "node scripts/test-api-security.cjs",
+    "security:dependency-audit": "npm audit",
+    "security:secret-scan": "node scripts/secret-scan.cjs",
+    "test:db:backup-restore": "node --env-file=.env scripts/test-backup-restore.cjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -27,8 +34,11 @@
   },
   "homepage": "https://github.com/IvanBy12/TallerMecarioB#readme",
   "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/helmet": "^13.1.1",
+    "@fastify/rate-limit": "^11.2.0",
     "drizzle-orm": "^0.45.2",
-    "fastify": "^5.6.2",
+    "fastify": "^5.12.5",
     "postgres": "^3.4.9"
   },
   "devDependencies": {

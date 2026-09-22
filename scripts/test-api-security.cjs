@@ -1,5 +1,8 @@
 'use strict';
 
+// Sprint 0: health/readiness, CORS, rate limiting and security headers.
+// Same disposable-database pattern as scripts/test-api-multitenant.cjs.
+
 const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { mkdtempSync, rmSync } = require('node:fs');
@@ -48,7 +51,7 @@ function runChild(args, env) {
     cwd: process.cwd(),
     env,
     stdio: 'inherit',
-    timeout: 45000,
+    timeout: 60000,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`CHILD_PROCESS_FAILED_${result.status}`);
@@ -59,8 +62,8 @@ async function main() {
   assertLocal(sourceUrl);
 
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
-  const databaseName = `tallermecario_api_e2e_${suffix}`;
-  const loginRole = `tm_api_e2e_${suffix}`;
+  const databaseName = `tallermecario_security_e2e_${suffix}`;
+  const loginRole = `tm_security_e2e_${suffix}`;
   const loginPassword = `rt_${randomUUID()}`;
   const testUrl = new URL(sourceUrl.toString());
   testUrl.pathname = `/${databaseName}`;
@@ -72,7 +75,7 @@ async function main() {
   let testPassed = false;
   let cleanupPassed = false;
   let originalRoles = new Set();
-  const compiledRoot = mkdtempSync(join(tmpdir(), 'tallermecario-api-test-'));
+  const compiledRoot = mkdtempSync(join(tmpdir(), 'tallermecario-security-test-'));
 
   try {
     const [server] = await maintenance`SELECT pg_catalog.current_database() AS database`;
@@ -101,26 +104,30 @@ async function main() {
     loginCreated = true;
     await testAdmin.unsafe(`GRANT tallermecario_api TO ${loginRole}`);
 
-    runChild([
-      resolve('node_modules/typescript/bin/tsc'),
-      '-p',
-      'tsconfig.json',
-      '--noEmit',
-      'false',
-      '--rootDir',
-      'src',
-      '--outDir',
-      compiledRoot,
-    ], process.env);
+    runChild(
+      [
+        resolve('node_modules/typescript/bin/tsc'),
+        '-p',
+        'tsconfig.json',
+        '--noEmit',
+        'false',
+        '--rootDir',
+        'src',
+        '--outDir',
+        compiledRoot,
+      ],
+      process.env,
+    );
 
     runChild(
-      ['--test', '--test-concurrency=1', '--test-timeout=15000', 'tests/api/multitenant.test.cjs'],
+      ['--test', '--test-concurrency=1', '--test-timeout=30000', 'tests/api/security.test.cjs'],
       {
         ...process.env,
         TEST_DATABASE_URL_ADMIN: testUrl.toString(),
         TEST_RUNTIME_LOGIN: loginRole,
         TEST_RUNTIME_PASSWORD: loginPassword,
         TEST_API_APP_MODULE: join(compiledRoot, 'api', 'app.js'),
+        TEST_API_HEALTH_MODULE: join(compiledRoot, 'api', 'health.js'),
         NODE_PATH: resolve('node_modules'),
       },
     );
@@ -146,7 +153,7 @@ async function main() {
       }
     }
 
-    if (compiledRoot.startsWith(join(tmpdir(), 'tallermecario-api-test-'))) {
+    if (compiledRoot.startsWith(join(tmpdir(), 'tallermecario-security-test-'))) {
       rmSync(compiledRoot, { recursive: true, force: true });
     }
 
@@ -161,7 +168,7 @@ async function main() {
     await maintenance.end({ timeout: 5 });
   }
 
-  if (!testPassed) throw new Error('API_MULTITENANT_TEST_FAILED');
+  if (!testPassed) throw new Error('API_SECURITY_TEST_FAILED');
   if (!cleanupPassed) throw new Error('TEST_DATABASE_CLEANUP_FAILED');
   process.stdout.write('FIXTURE_CLEANUP_PASS\n');
 }
@@ -171,9 +178,9 @@ main().catch((error) => {
     'DATABASE_CONFIGURATION_REQUIRED',
     'REFUSING_NON_LOCAL_DATABASE',
     'DATABASE_CONNECTION_FAILED',
-    'API_MULTITENANT_TEST_FAILED',
+    'API_SECURITY_TEST_FAILED',
     'TEST_DATABASE_CLEANUP_FAILED',
   ]);
-  process.stderr.write(`${safeMessages.has(error.message) ? error.message : 'API_MULTITENANT_TEST_RUN_FAILED'}\n`);
+  process.stderr.write(`${safeMessages.has(error.message) ? error.message : 'API_SECURITY_TEST_RUN_FAILED'}\n`);
   process.exitCode = 1;
 });

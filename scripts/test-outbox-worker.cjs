@@ -2,7 +2,7 @@
 
 const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
-const { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { mkdtempSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const postgres = require('postgres');
@@ -38,8 +38,7 @@ function databaseUrlFromEnvironment() {
 }
 
 function assertLocal(url) {
-  const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
-  if (!localHosts.has(url.hostname)) {
+  if (!['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname)) {
     throw new Error('REFUSING_NON_LOCAL_DATABASE');
   }
 }
@@ -49,23 +48,10 @@ function runChild(args, env) {
     cwd: process.cwd(),
     env,
     stdio: 'inherit',
-    timeout: 45000,
+    timeout: 60000,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`CHILD_PROCESS_FAILED_${result.status}`);
-}
-
-function makeMigrationSubset(entryCount) {
-  const root = mkdtempSync(join(tmpdir(), 'tallermecario-migrations-'));
-  const meta = join(root, 'meta');
-  mkdirSync(meta);
-  const journal = JSON.parse(readFileSync(resolve('drizzle/meta/_journal.json'), 'utf8'));
-  journal.entries = journal.entries.slice(0, entryCount);
-  writeFileSync(join(meta, '_journal.json'), `${JSON.stringify(journal, null, 2)}\n`);
-  for (const entry of journal.entries) {
-    copyFileSync(resolve(`drizzle/${entry.tag}.sql`), join(root, `${entry.tag}.sql`));
-  }
-  return root;
 }
 
 async function main() {
@@ -73,8 +59,8 @@ async function main() {
   assertLocal(sourceUrl);
 
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
-  const databaseName = `tallermecario_cross_row_${suffix}`;
-  const loginRole = `tm_test_api_${suffix}`;
+  const databaseName = `tallermecario_outbox_e2e_${suffix}`;
+  const loginRole = `tm_outbox_e2e_${suffix}`;
   const loginPassword = `rt_${randomUUID()}`;
   const testUrl = new URL(sourceUrl.toString());
   testUrl.pathname = `/${databaseName}`;
@@ -83,13 +69,13 @@ async function main() {
   let testAdmin;
   let databaseCreated = false;
   let loginCreated = false;
-  let originalRoles = new Set();
   let testPassed = false;
   let cleanupPassed = false;
-  const temporaryMigrationFolders = [];
+  let originalRoles = new Set();
+  const compiledRoot = mkdtempSync(join(tmpdir(), 'tallermecario-outbox-test-'));
 
   try {
-    const [server] = await maintenance`SELECT pg_catalog.current_database() AS database, pg_catalog.inet_server_addr()::text AS address`;
+    const [server] = await maintenance`SELECT pg_catalog.current_database() AS database`;
     if (!server) throw new Error('DATABASE_CONNECTION_FAILED');
     process.stdout.write('DB_ENV_CONNECTED\n');
 
@@ -100,80 +86,43 @@ async function main() {
 
     await maintenance.unsafe(`CREATE DATABASE ${databaseName}`);
     databaseCreated = true;
-
     testAdmin = postgres(testUrl.toString(), { max: 1, prepare: false, onnotice: () => {} });
 
-    const migration0000 = makeMigrationSubset(1);
-    const migration0000To0001 = makeMigrationSubset(2);
-    temporaryMigrationFolders.push(migration0000, migration0000To0001);
-
-    runChild(['scripts/migrate.cjs'], {
-      ...process.env,
-      DATABASE_URL: testUrl.toString(),
-      MIGRATIONS_FOLDER: migration0000,
-    });
-    let [migrationState] = await testAdmin`
-      SELECT (SELECT count(*)::int FROM drizzle.__drizzle_migrations) AS count,
-        to_regprocedure('app.enforce_workshop_primary_location()') IS NOT NULL AS has_0001
-    `;
-    if (migrationState.count !== 1 || migrationState.has_0001) throw new Error('MIGRATION_0000_STATE_INVALID');
-
-    runChild(['scripts/migrate.cjs'], {
-      ...process.env,
-      DATABASE_URL: testUrl.toString(),
-      MIGRATIONS_FOLDER: migration0000To0001,
-    });
-    [migrationState] = await testAdmin`
-      SELECT (SELECT count(*)::int FROM drizzle.__drizzle_migrations) AS count,
-        to_regprocedure('app.enforce_workshop_primary_location()') IS NOT NULL AS has_0001
-    `;
-    if (migrationState.count !== 2 || !migrationState.has_0001) throw new Error('MIGRATION_UPGRADE_INVALID');
-    process.stdout.write('UPGRADE_0000_TO_0001_PASS\n');
-
     runChild(['scripts/migrate.cjs'], { ...process.env, DATABASE_URL: testUrl.toString() });
-    [migrationState] = await testAdmin`
-      SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
+    const [migrationState] = await testAdmin`
+      SELECT count(*)::int AS count,
+        to_regprocedure('app.worker_complete_outbox_event(uuid,text,text,integer)') IS NOT NULL AS has_0003
+      FROM drizzle.__drizzle_migrations
     `;
-    if (migrationState.count !== 4) throw new Error('FULL_MIGRATION_STATE_INVALID');
+    if (migrationState.count !== 4 || !migrationState.has_0003) throw new Error('CLEAN_MIGRATION_INVALID');
+    process.stdout.write('CLEAN_MIGRATION_PASS\n');
 
-    await testAdmin`
-      SELECT pg_catalog.pg_advisory_lock(
-        pg_catalog.hashtextextended('tallermecario:migration-runner', 0)
-      )
-    `;
-    let blockedRunner;
-    try {
-      blockedRunner = spawnSync(process.execPath, ['scripts/migrate.cjs'], {
-        cwd: process.cwd(),
-        env: { ...process.env, DATABASE_URL: testUrl.toString() },
-        encoding: 'utf8',
-        timeout: 15000,
-      });
-    } finally {
-      await testAdmin`
-        SELECT pg_catalog.pg_advisory_unlock(
-          pg_catalog.hashtextextended('tallermecario:migration-runner', 0)
-        )
-      `;
-    }
-    if (blockedRunner.error || blockedRunner.status !== 1
-      || !blockedRunner.stderr.includes('MIGRATION_LOCK_UNAVAILABLE')) {
-      throw new Error('MIGRATION_LOCK_TEST_FAILED');
-    }
-    runChild(['scripts/migrate.cjs'], { ...process.env, DATABASE_URL: testUrl.toString() });
-    process.stdout.write('MIGRATION_RUNNER_EXCLUSION_PASS\n');
-
+    // Single login, member of BOTH runtime roles: the test file switches
+    // `connection: { role }` per postgres-js pool to act as api (enqueue) or
+    // worker (claim/process) without ever storing a persistent role password.
     await testAdmin.unsafe(
       `CREATE ROLE ${loginRole} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '${loginPassword}'`,
     );
     loginCreated = true;
     await testAdmin.unsafe(`GRANT tallermecario_api, tallermecario_worker TO ${loginRole}`);
 
-    const testArgs = ['--test', '--test-concurrency=1', '--test-timeout=15000'];
+    runChild([
+      resolve('node_modules/typescript/bin/tsc'),
+      '-p',
+      'tsconfig.json',
+      '--noEmit',
+      'false',
+      '--rootDir',
+      'src',
+      '--outDir',
+      compiledRoot,
+    ], process.env);
+
+    const testArgs = ['--test', '--test-concurrency=1', '--test-timeout=20000'];
     if (process.env.TEST_NAME_PATTERN) {
       testArgs.push(`--test-name-pattern=${process.env.TEST_NAME_PATTERN}`);
     }
-    testArgs.push('tests/db/cross-row-integrity.test.cjs', 'tests/db/sprint0-db-gates.test.cjs');
+    testArgs.push('tests/worker/outbox-worker.test.cjs');
     runChild(
       testArgs,
       {
@@ -181,17 +130,14 @@ async function main() {
         TEST_DATABASE_URL_ADMIN: testUrl.toString(),
         TEST_RUNTIME_LOGIN: loginRole,
         TEST_RUNTIME_PASSWORD: loginPassword,
+        TEST_OUTBOX_PUBLISH_MODULE: join(compiledRoot, 'outbox', 'publish.js'),
+        TEST_OUTBOX_WORKER_MODULE: join(compiledRoot, 'worker', 'outbox-worker.js'),
+        NODE_PATH: resolve('node_modules'),
       },
     );
     testPassed = true;
   } finally {
     if (testAdmin) await testAdmin.end({ timeout: 5 }).catch(() => undefined);
-
-    for (const folder of temporaryMigrationFolders) {
-      if (folder.startsWith(join(tmpdir(), 'tallermecario-migrations-'))) {
-        rmSync(folder, { recursive: true, force: true });
-      }
-    }
 
     if (loginCreated) {
       await maintenance.unsafe(`DROP ROLE IF EXISTS ${loginRole}`).catch(() => undefined);
@@ -205,35 +151,28 @@ async function main() {
       await maintenance.unsafe(`DROP DATABASE IF EXISTS ${databaseName}`).catch(() => undefined);
     }
 
-    for (const role of [
-      'tallermecario_migrator',
-      'tallermecario_api',
-      'tallermecario_worker',
-      'tallermecario_bootstrap_resolver',
-      'tallermecario_schema_owner',
-    ]) {
+    for (const role of [...CANONICAL_ROLES].reverse()) {
       if (!originalRoles.has(role)) {
         await maintenance.unsafe(`DROP ROLE IF EXISTS ${role}`).catch(() => undefined);
       }
+    }
+
+    if (compiledRoot.startsWith(join(tmpdir(), 'tallermecario-outbox-test-'))) {
+      rmSync(compiledRoot, { recursive: true, force: true });
     }
 
     if (databaseCreated) {
       const [remaining] = await maintenance`
         SELECT
           EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = ${databaseName}) AS database_present,
-          EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = ${loginRole}) AS login_present,
-          EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname LIKE 'tallermecario_cross_row_%') AS fixture_database_present,
-          EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname LIKE 'tm_test_api_%') AS fixture_login_present
+          EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = ${loginRole}) AS login_present
       `;
-      cleanupPassed = !remaining.database_present
-        && !remaining.login_present
-        && !remaining.fixture_database_present
-        && !remaining.fixture_login_present;
+      cleanupPassed = !remaining.database_present && !remaining.login_present;
     }
     await maintenance.end({ timeout: 5 });
   }
 
-  if (!testPassed) throw new Error('CROSS_ROW_TESTS_FAILED');
+  if (!testPassed) throw new Error('OUTBOX_WORKER_TEST_FAILED');
   if (!cleanupPassed) throw new Error('TEST_DATABASE_CLEANUP_FAILED');
   process.stdout.write('FIXTURE_CLEANUP_PASS\n');
 }
@@ -243,9 +182,9 @@ main().catch((error) => {
     'DATABASE_CONFIGURATION_REQUIRED',
     'REFUSING_NON_LOCAL_DATABASE',
     'DATABASE_CONNECTION_FAILED',
-    'CROSS_ROW_TESTS_FAILED',
+    'OUTBOX_WORKER_TEST_FAILED',
     'TEST_DATABASE_CLEANUP_FAILED',
   ]);
-  process.stderr.write(`${safeMessages.has(error.message) ? error.message : 'CROSS_ROW_TEST_RUN_FAILED'}\n`);
+  process.stderr.write(`${safeMessages.has(error.message) ? error.message : 'OUTBOX_WORKER_TEST_RUN_FAILED'}\n`);
   process.exitCode = 1;
 });
