@@ -4,6 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node scripts/migrate.cjs",
+    "test:db:cross-row": "node --env-file=.env scripts/test-cross-row.cjs",
+    "test:db:sprint0": "node --env-file=.env scripts/test-cross-row.cjs",
+    "test:db:sprint0:ci": "node scripts/test-cross-row.cjs",
+    "test:api:multitenant": "node --env-file=.env scripts/test-api-multitenant.cjs",
+    "test:api:multitenant:ci": "node scripts/test-api-multitenant.cjs",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -20,6 +28,7 @@
   "homepage": "https://github.com/IvanBy12/TallerMecarioB#readme",
   "dependencies": {
     "drizzle-orm": "^0.45.2",
+    "fastify": "^5.6.2",
     "postgres": "^3.4.9"
   },
   "devDependencies": {
