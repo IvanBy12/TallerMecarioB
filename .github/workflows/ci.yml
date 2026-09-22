@@ -64,6 +64,12 @@ jobs:
       - name: API health/readiness, CORS, rate limiting, security headers
         run: npm run test:api:security:ci
 
+      - name: Outbox worker regression
+        run: npm run test:outbox:ci
+
+      - name: Wompi contract and integration regression
+        run: npm run test:wompi
+
       - name: Concurrent-migration lock protection
         run: npm run test:db:migration-lock:ci
 

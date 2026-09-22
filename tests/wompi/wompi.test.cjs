@@ -92,6 +92,50 @@ test('WOMPI_ENABLED defaults false and enabled mode fails fast unless all secret
   assert.equal(loaded.baseUrl, 'https://sandbox.wompi.co/v1');
 });
 
+test('adapter reads both acceptance_token fields from the documented merchant response', async () => {
+  const adapter = new WompiAdapter(testConfig, {
+    fetch: async () => response(200, { data: {
+      presigned_acceptance: {
+        acceptance_token: 'acceptance-test-only',
+        permalink: 'https://example.invalid/terms.pdf',
+        type: 'END_USER_POLICY',
+      },
+      presigned_personal_data_auth: {
+        acceptance_token: 'personal-auth-test-only',
+        permalink: 'https://example.invalid/privacy.pdf',
+        type: 'PERSONAL_DATA_AUTH',
+      },
+    } }),
+  });
+  assert.deepEqual(await adapter.getAcceptanceTokens(), {
+    acceptanceToken: 'acceptance-test-only',
+    personalDataAuthToken: 'personal-auth-test-only',
+  });
+});
+
+test('adapter rejects token-only and empty acceptance_token merchant fields without retry', async () => {
+  for (const field of ['presigned_acceptance', 'presigned_personal_data_auth']) {
+    for (const invalid of [{ token: 'incorrect-test-only' }, { acceptance_token: '' }]) {
+      let calls = 0;
+      const data = {
+        presigned_acceptance: { acceptance_token: 'acceptance-test-only' },
+        presigned_personal_data_auth: { acceptance_token: 'personal-auth-test-only' },
+        [field]: invalid,
+      };
+      const adapter = new WompiAdapter(testConfig, {
+        fetch: async () => { calls += 1; return response(200, { data }); },
+      });
+      await assert.rejects(adapter.getAcceptanceTokens(), error => {
+        assert.ok(error instanceof WompiAdapterError);
+        assert.equal(error.code, 'WOMPI_RESPONSE_INVALID');
+        assert.equal(error.retryable, false);
+        return true;
+      });
+      assert.equal(calls, 1);
+    }
+  }
+});
+
 test('adapter creates canonical transaction payload without exposing the private key in results', async () => {
   let request;
   const adapter = new WompiAdapter(testConfig, {

@@ -22,10 +22,11 @@ export const wompiPaymentSourceResponseSchema = z.object({
   }).passthrough(),
 }).passthrough();
 
+// Provider fields: https://docs.wompi.co/docs/colombia/tokens-de-aceptacion/
 export const wompiMerchantResponseSchema = z.object({
   data: z.object({
-    presigned_acceptance: z.object({ token: z.string().min(1) }).passthrough(),
-    presigned_personal_data_auth: z.object({ token: z.string().min(1) }).passthrough().optional(),
+    presigned_acceptance: z.object({ acceptance_token: z.string().min(1) }).passthrough(),
+    presigned_personal_data_auth: z.object({ acceptance_token: z.string().min(1) }).passthrough().optional(),
   }).passthrough(),
 }).passthrough();
 

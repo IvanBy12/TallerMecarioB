@@ -23,6 +23,7 @@
     "staging:deploy-drill": "node --env-file=.env scripts/staging-deploy-drill.cjs",
     "staging:deploy-drill:ci": "node scripts/staging-deploy-drill.cjs",
     "build": "tsc -p tsconfig.build.json",
+    "test:outbox:ci": "node scripts/test-outbox-worker.cjs",
     "test:wompi": "node scripts/test-wompi.cjs",
     "test:wompi:sandbox": "node --env-file-if-exists=.env scripts/test-wompi.cjs --sandbox",
     "typecheck": "tsc -p tsconfig.json",

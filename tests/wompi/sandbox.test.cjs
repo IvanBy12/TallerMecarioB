@@ -30,6 +30,7 @@ const adapter = new WompiAdapter({
 test('Wompi sandbox creates, queries and deduplicates a test transaction without card data', async () => {
   const tokens = await adapter.getAcceptanceTokens();
   assert.ok(tokens.acceptanceToken);
+  assert.ok(tokens.personalDataAuthToken);
 
   const reference = `ilvox_pay_${uuidV7()}`;
   const created = await adapter.createTransaction({

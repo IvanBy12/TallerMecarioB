@@ -126,8 +126,8 @@ export class WompiAdapter implements WompiProvider {
     const response = await this.request('GET', `/merchants/${encodeURIComponent(this.config.publicKey)}`, undefined,
       wompiMerchantResponseSchema, false);
     return {
-      acceptanceToken: response.data.presigned_acceptance.token,
-      personalDataAuthToken: response.data.presigned_personal_data_auth?.token,
+      acceptanceToken: response.data.presigned_acceptance.acceptance_token,
+      personalDataAuthToken: response.data.presigned_personal_data_auth?.acceptance_token,
     };
   }
 
