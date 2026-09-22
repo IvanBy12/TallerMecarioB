@@ -1,5 +1,11 @@
 'use strict';
 
+// Sprint 0: media/R2 flow end-to-end (ADR-003). Same disposable-database
+// pattern as scripts/test-api-multitenant.cjs: throwaway DB + throwaway
+// NOBYPASSRLS login + compiled TS + node --test, all torn down in `finally`
+// regardless of outcome. R2 object cleanup happens inside the test file
+// itself (it is the one that knows which object_keys it created).
+
 const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { mkdtempSync, rmSync } = require('node:fs');
@@ -43,24 +49,31 @@ function assertLocal(url) {
   }
 }
 
+function requireR2Env() {
+  const required = ['R2_ENDPOINT', 'R2_REGION', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
+  const missing = required.filter((key) => !process.env[key]);
+  if (missing.length > 0) throw new Error('R2_CONFIGURATION_MISSING');
+}
+
 function runChild(args, env) {
   const result = spawnSync(process.execPath, args, {
     cwd: process.cwd(),
     env,
     stdio: 'inherit',
-    timeout: 45000,
+    timeout: 60000,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`CHILD_PROCESS_FAILED_${result.status}`);
 }
 
 async function main() {
+  requireR2Env();
   const sourceUrl = databaseUrlFromEnvironment();
   assertLocal(sourceUrl);
 
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
-  const databaseName = `tallermecario_api_e2e_${suffix}`;
-  const loginRole = `tm_api_e2e_${suffix}`;
+  const databaseName = `tallermecario_media_e2e_${suffix}`;
+  const loginRole = `tm_media_e2e_${suffix}`;
   const loginPassword = `rt_${randomUUID()}`;
   const testUrl = new URL(sourceUrl.toString());
   testUrl.pathname = `/${databaseName}`;
@@ -72,7 +85,7 @@ async function main() {
   let testPassed = false;
   let cleanupPassed = false;
   let originalRoles = new Set();
-  const compiledRoot = mkdtempSync(join(tmpdir(), 'tallermecario-api-test-'));
+  const compiledRoot = mkdtempSync(join(tmpdir(), 'tallermecario-media-test-'));
 
   try {
     const [server] = await maintenance`SELECT pg_catalog.current_database() AS database`;
@@ -101,26 +114,31 @@ async function main() {
     loginCreated = true;
     await testAdmin.unsafe(`GRANT tallermecario_api TO ${loginRole}`);
 
-    runChild([
-      resolve('node_modules/typescript/bin/tsc'),
-      '-p',
-      'tsconfig.json',
-      '--noEmit',
-      'false',
-      '--rootDir',
-      'src',
-      '--outDir',
-      compiledRoot,
-    ], process.env);
+    runChild(
+      [
+        resolve('node_modules/typescript/bin/tsc'),
+        '-p',
+        'tsconfig.json',
+        '--noEmit',
+        'false',
+        '--rootDir',
+        'src',
+        '--outDir',
+        compiledRoot,
+      ],
+      process.env,
+    );
 
     runChild(
-      ['--test', '--test-concurrency=1', '--test-timeout=15000', 'tests/api/multitenant.test.cjs'],
+      ['--test', '--test-concurrency=1', '--test-timeout=30000', 'tests/media/upload-flow.test.cjs'],
       {
         ...process.env,
         TEST_DATABASE_URL_ADMIN: testUrl.toString(),
         TEST_RUNTIME_LOGIN: loginRole,
         TEST_RUNTIME_PASSWORD: loginPassword,
         TEST_API_APP_MODULE: join(compiledRoot, 'api', 'app.js'),
+        TEST_MEDIA_ROUTES_MODULE: join(compiledRoot, 'media', 'routes.js'),
+        TEST_MEDIA_R2_MODULE: join(compiledRoot, 'media', 'r2.js'),
         NODE_PATH: resolve('node_modules'),
       },
     );
@@ -146,7 +164,7 @@ async function main() {
       }
     }
 
-    if (compiledRoot.startsWith(join(tmpdir(), 'tallermecario-api-test-'))) {
+    if (compiledRoot.startsWith(join(tmpdir(), 'tallermecario-media-test-'))) {
       rmSync(compiledRoot, { recursive: true, force: true });
     }
 
@@ -161,7 +179,7 @@ async function main() {
     await maintenance.end({ timeout: 5 });
   }
 
-  if (!testPassed) throw new Error('API_MULTITENANT_TEST_FAILED');
+  if (!testPassed) throw new Error('MEDIA_R2_TEST_FAILED');
   if (!cleanupPassed) throw new Error('TEST_DATABASE_CLEANUP_FAILED');
   process.stdout.write('FIXTURE_CLEANUP_PASS\n');
 }
@@ -171,9 +189,10 @@ main().catch((error) => {
     'DATABASE_CONFIGURATION_REQUIRED',
     'REFUSING_NON_LOCAL_DATABASE',
     'DATABASE_CONNECTION_FAILED',
-    'API_MULTITENANT_TEST_FAILED',
+    'R2_CONFIGURATION_MISSING',
+    'MEDIA_R2_TEST_FAILED',
     'TEST_DATABASE_CLEANUP_FAILED',
   ]);
-  process.stderr.write(`${safeMessages.has(error.message) ? error.message : 'API_MULTITENANT_TEST_RUN_FAILED'}\n`);
+  process.stderr.write(`${safeMessages.has(error.message) ? error.message : 'MEDIA_R2_TEST_RUN_FAILED'}\n`);
   process.exitCode = 1;
 });
