@@ -63,3 +63,35 @@ jobs:
 
       - name: API health/readiness, CORS, rate limiting, security headers
         run: npm run test:api:security:ci
+
+      - name: Concurrent-migration lock protection
+        run: npm run test:db:migration-lock:ci
+
+  staging:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Sprint 0: no real cloud staging account is provisioned for this
+      # project yet (see docs/ADR-007 -- portability principle, not a
+      # decided provider). This drill IS staging for now: it builds the
+      # ADR-007 image, brings up an isolated, disposable docker-compose
+      # stack (own Postgres, own network, its own generated secrets -- see
+      # staging.env.example), runs migrations through the concurrency-safe
+      # lock, deploys the API, smoke-tests it, then proves a bad deploy is
+      # detected and rolled back. Everything is torn down at the end
+      # regardless of outcome.
+      - name: Build image, deploy to local "staging", migrate, smoke test, rollback drill
+        run: npm run staging:deploy-drill:ci

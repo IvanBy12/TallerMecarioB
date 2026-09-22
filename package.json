@@ -18,6 +18,11 @@
     "security:dependency-audit": "npm audit",
     "security:secret-scan": "node scripts/secret-scan.cjs",
     "test:db:backup-restore": "node --env-file=.env scripts/test-backup-restore.cjs",
+    "test:db:migration-lock": "node --env-file=.env scripts/test-migration-lock.cjs",
+    "test:db:migration-lock:ci": "node scripts/test-migration-lock.cjs",
+    "staging:deploy-drill": "node --env-file=.env scripts/staging-deploy-drill.cjs",
+    "staging:deploy-drill:ci": "node scripts/staging-deploy-drill.cjs",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

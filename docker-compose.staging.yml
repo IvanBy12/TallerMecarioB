@@ -1,0 +1,64 @@
+# Local "staging" simulation (Sprint 0 -- no real cloud staging account is
+# configured for this project yet). Everything here is ephemeral: no named
+# volume, torn down with `docker compose down` after every drill. Secrets
+# come from `staging.env` (gitignored, generated per-run by
+# scripts/staging-deploy-drill.cjs) -- never from the project's real `.env`.
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${STAGING_POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${STAGING_POSTGRES_ADMIN_PASSWORD}
+      POSTGRES_DB: ${STAGING_POSTGRES_DB}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "${STAGING_POSTGRES_HOST_PORT}:5432"
+
+  migrate:
+    image: ${STAGING_API_IMAGE}
+    command: ["node", "scripts/migrate.cjs"]
+    environment:
+      DATABASE_URL: postgresql://${STAGING_POSTGRES_ADMIN_USER}:${STAGING_POSTGRES_ADMIN_PASSWORD}@postgres:5432/${STAGING_POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  provision-runtime-login:
+    image: ${STAGING_API_IMAGE}
+    command: ["node", "scripts/provision-staging-runtime-login.cjs"]
+    environment:
+      DATABASE_URL: postgresql://${STAGING_POSTGRES_ADMIN_USER}:${STAGING_POSTGRES_ADMIN_PASSWORD}@postgres:5432/${STAGING_POSTGRES_DB}
+      STAGING_RUNTIME_DB_PASSWORD: ${STAGING_RUNTIME_DB_PASSWORD}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    image: ${STAGING_API_IMAGE}
+    command: ["node", "dist/api/server.js"]
+    environment:
+      DATABASE_URL: postgresql://tallermecario_staging_runtime:${STAGING_RUNTIME_DB_PASSWORD}@postgres:5432/${STAGING_POSTGRES_DB}
+      DB_RUNTIME_ROLE: tallermecario_api
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      CORS_ALLOWED_ORIGINS: ""
+    ports:
+      - "${STAGING_API_HOST_PORT}:3000"
+    depends_on:
+      provision-runtime-login:
+        condition: service_completed_successfully
+
+  worker:
+    image: ${STAGING_API_IMAGE}
+    command: ["node", "dist/worker/run.js"]
+    environment:
+      DATABASE_URL: postgresql://tallermecario_staging_runtime:${STAGING_RUNTIME_DB_PASSWORD}@postgres:5432/${STAGING_POSTGRES_DB}
+      DB_RUNTIME_ROLE: tallermecario_worker
+      WORKER_POLL_INTERVAL_MS: "2000"
+    depends_on:
+      provision-runtime-login:
+        condition: service_completed_successfully
