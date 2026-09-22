@@ -47,6 +47,21 @@ const ALLOWLIST_MATCHES = new Set([
   // placeholder credential for an ephemeral CI-only loopback database, not a
   // real secret -- same convention as the Postgres Docker image's own docs.
   '.github/workflows/ci.yml:30',
+  // docker-compose.staging.yml: `${VAR}` compose variable interpolation,
+  // not a literal credential -- the real values live only in the gitignored,
+  // per-run-generated `staging.env` (see staging.env.example).
+  'docker-compose.staging.yml:25',
+  'docker-compose.staging.yml:34',
+  'docker-compose.staging.yml:44',
+  'docker-compose.staging.yml:59',
+  // staging-deploy-drill.cjs: the literal string "wrong-password" used on
+  // purpose to deploy a broken config and prove the rollback drill detects
+  // and recovers from it -- not a real credential.
+  'scripts/staging-deploy-drill.cjs:190',
+  // server.ts/run.ts: assembles a connection string from process.env at
+  // runtime (encodeURIComponent(user)/(password)) -- no literal secret here.
+  'src/api/server.ts:34',
+  'src/worker/run.ts:27',
 ]);
 
 const SKIP_EXTENSIONS = new Set([
