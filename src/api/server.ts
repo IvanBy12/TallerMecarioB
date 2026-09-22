@@ -1,0 +1,93 @@
+import postgres from 'postgres';
+import { buildApi, getTenantRequestContext } from './app.js';
+import type { IdentityProvider, VerifiedIdentity } from '../identity/identity-provider.js';
+
+/**
+ * ADR-006 is accepted but no concrete Clerk adapter exists in this repo yet
+ * -- only the `IdentityProvider` interface. Wiring the real Clerk JWT
+ * verifier is a separate, undocumented-here piece of work. This stub keeps
+ * the contract ("verifies the request; never supplies tenant/membership")
+ * and always denies, so every protected route still correctly 401s instead
+ * of the server refusing to boot. It exists only so this container can run
+ * end to end (health/readiness/CORS/rate-limit/DB) before that adapter
+ * lands; replace it there, not here.
+ */
+class UnimplementedIdentityProvider implements IdentityProvider {
+  async verifyRequest(): Promise<VerifiedIdentity | null> {
+    return null;
+  }
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name}_REQUIRED`);
+  return value;
+}
+
+function databaseUrlFromEnv(): string {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+  const host = requiredEnv('PGHOST');
+  const port = process.env.PGPORT ?? '5432';
+  const database = requiredEnv('PGDATABASE');
+  const user = requiredEnv('PGUSER');
+  const password = requiredEnv('PGPASSWORD');
+  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(database)}`;
+}
+
+function parseCorsAllowedOrigins(): string[] {
+  const raw = process.env.CORS_ALLOWED_ORIGINS;
+  if (!raw) return [];
+  return raw.split(',').map((origin) => origin.trim()).filter(Boolean);
+}
+
+async function main(): Promise<void> {
+  const port = Number(process.env.PORT ?? 3000);
+  const host = process.env.HOST ?? '0.0.0.0';
+
+  // ADR-009: runtime connects NOBYPASSRLS, never as owner/migrator. The
+  // login role authenticates; `connection.role` then `SET ROLE`s into the
+  // actual runtime role for every session this pool opens.
+  const runtimeRole = process.env.DB_RUNTIME_ROLE ?? 'tallermecario_api';
+  const database = postgres(databaseUrlFromEnv(), {
+    max: Number(process.env.DB_POOL_MAX ?? 10),
+    connection: { role: runtimeRole },
+  });
+
+  const app = await buildApi({
+    database,
+    identityProvider: new UnimplementedIdentityProvider(),
+    corsAllowedOrigins: parseCorsAllowedOrigins(),
+    async registerRoutes(server) {
+      // Deploy-smoke-test only: proves the full protected-route pipeline
+      // (rate limit -> auth -> TenantContext transaction) is wired end to
+      // end in the deployed artifact. Not a product endpoint.
+      server.get('/api/v1/__whoami', async (request) => {
+        const context = getTenantRequestContext(request);
+        return { tenantId: context.tenant.tenantId };
+      });
+    },
+  });
+
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    app.log?.info?.(`received ${signal}, shutting down`);
+    try {
+      await app.close();
+    } finally {
+      await database.end({ timeout: 5 });
+      process.exit(0);
+    }
+  };
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  await app.listen({ port, host });
+  process.stdout.write(`api listening on ${host}:${port}\n`);
+}
+
+main().catch((error) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(1);
+});
