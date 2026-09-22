@@ -39,6 +39,7 @@ export interface RateLimitOptions {
 export interface BuildApiOptions {
   database: postgres.Sql;
   identityProvider: IdentityProvider;
+  registerPublicRoutes?: (app: FastifyInstance) => void | Promise<void>;
   registerRoutes?: (app: FastifyInstance) => void | Promise<void>;
   /** Security Baseline §16: explicit allowlist, never `*` with credentials. Empty = no browser cross-origin caller allowed. */
   corsAllowedOrigins?: string[];
@@ -50,7 +51,7 @@ export interface BuildApiOptions {
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { max: 300, timeWindow: '1 minute' };
 const DEFAULT_READINESS_TIMEOUT_MS = 2000;
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(
     readonly statusCode: number,
     readonly code: string,
@@ -61,6 +62,13 @@ class ApiError extends Error {
 }
 
 const requestStates = new WeakMap<FastifyRequest, RequestState>();
+const rawRequestBodies = new WeakMap<FastifyRequest, Buffer>();
+
+export function getRawRequestBody(request: FastifyRequest): Buffer {
+  const body = rawRequestBodies.get(request);
+  if (!body) throw new ApiError(400, 'RAW_BODY_UNAVAILABLE', 'Raw request body is unavailable.');
+  return body;
+}
 
 async function finishTransaction(
   request: FastifyRequest,
@@ -87,6 +95,17 @@ export function getTenantRequestContext(request: FastifyRequest): TenantRequestC
 
 export async function buildApi(options: BuildApiOptions): Promise<FastifyInstance> {
   const app = fastify({ logger: false });
+
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (request, body, done) => {
+    const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body);
+    rawRequestBodies.set(request, rawBody);
+    try {
+      done(null, JSON.parse(rawBody.toString('utf8')));
+    } catch (error) {
+      done(error as Error, undefined);
+    }
+  });
 
   app.setErrorHandler(async (error, request, reply) => {
     const known = error instanceof ApiError;
@@ -157,6 +176,8 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
     const ready = await checkDatabaseReady(options.database, options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS);
     return reply.code(ready ? 200 : 503).send({ status: ready ? 'ready' : 'not_ready', checks: { database: ready } });
   });
+
+  if (options.registerPublicRoutes) await options.registerPublicRoutes(app);
 
   // Everything else lives in its own encapsulated context: the tenant
   // transaction hooks below must never run for /health/*.

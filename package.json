@@ -23,6 +23,8 @@
     "staging:deploy-drill": "node --env-file=.env scripts/staging-deploy-drill.cjs",
     "staging:deploy-drill:ci": "node scripts/staging-deploy-drill.cjs",
     "build": "tsc -p tsconfig.build.json",
+    "test:wompi": "node scripts/test-wompi.cjs",
+    "test:wompi:sandbox": "node --env-file=.env scripts/test-wompi.cjs --sandbox",
     "typecheck": "tsc -p tsconfig.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -44,7 +46,8 @@
     "@fastify/rate-limit": "^11.2.0",
     "drizzle-orm": "^0.45.2",
     "fastify": "^5.12.5",
-    "postgres": "^3.4.9"
+    "postgres": "^3.4.9",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",

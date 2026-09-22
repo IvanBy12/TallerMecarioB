@@ -36,6 +36,7 @@ const BOOTSTRAP_FUNCTIONS = [
   'bootstrap_resolve_wompi_payment_by_reference',
   'bootstrap_resolve_wompi_payment_by_transaction',
   'bootstrap_claim_outbox_events',
+  'ingest_verified_wompi_webhook',
 ];
 
 test.before(async () => {
@@ -388,6 +389,67 @@ test.describe('bootstrap allowlist', () => {
       await conn.unsafe('ROLLBACK').catch(() => {});
       conn.release();
     }
+  });
+
+  test('verified Wompi ingress resolves tenant server-side and deduplicates webhook + outbox atomically', async () => {
+    const tenant = id();
+    const subscription = id();
+    const payment = id();
+    const webhook = id();
+    const outbox = id();
+    const reference = `ilvox_pay_${payment}`;
+    const transaction = `tx-${payment}`;
+    const providerEventId = 'a'.repeat(64);
+    const payloadHash = 'b'.repeat(64);
+    const occurredAt = new Date('2026-09-19T03:00:00.000Z');
+    const payload = {
+      event: 'transaction.updated', environment: 'test',
+      data: { transaction: {
+        id: transaction, reference, status: 'APPROVED', amount_in_cents: 4990000, currency: 'COP',
+      } },
+      signature: { properties: ['transaction.id'], checksum: 'c'.repeat(64) },
+      timestamp: 1789786800, sent_at: occurredAt.toISOString(),
+    };
+    await fixture(async (tx) => {
+      await tx`INSERT INTO workshops ${tx({ id: tenant, slug: `w-${tenant}`, legal_name: 'T', display_name: 'T' })}`;
+      await tx`INSERT INTO subscriptions ${tx({ id: subscription, tenant_id: tenant, plan_id: id(), status: 'trialing', current_period_start: new Date(), current_period_end: new Date(Date.now() + 86400000) })}`;
+      await tx`INSERT INTO payments ${tx({ id: payment, tenant_id: tenant, subscription_id: subscription, environment: 'test', reference, amount: 4990000 })}`;
+    });
+
+    const [first] = await api`
+      SELECT * FROM app.ingest_verified_wompi_webhook(
+        ${webhook}::uuid, ${outbox}::uuid, ${providerEventId}, ${payloadHash},
+        ${api.json(payload)}, ${api.json({ x_event_checksum: 'c'.repeat(64) })},
+        'test', ${reference}, ${transaction}, 'APPROVED', ${occurredAt}::timestamptz
+      )
+    `;
+    assert.deepEqual(first, { webhook_event_id: webhook, inserted: true, tenant_id: tenant });
+
+    const [duplicate] = await api`
+      SELECT * FROM app.ingest_verified_wompi_webhook(
+        ${id()}::uuid, ${id()}::uuid, ${providerEventId}, ${payloadHash},
+        ${api.json(payload)}, ${api.json({ x_event_checksum: 'c'.repeat(64) })},
+        'test', ${reference}, ${transaction}, 'APPROVED', ${occurredAt}::timestamptz
+      )
+    `;
+    assert.deepEqual(duplicate, { webhook_event_id: webhook, inserted: false, tenant_id: tenant });
+
+    await worker`
+      SELECT app.append_wompi_webhook_attempt(
+        ${id()}::uuid, ${webhook}::uuid, 1, 'succeeded', ${occurredAt}::timestamptz,
+        ${new Date(occurredAt.getTime() + 25)}::timestamptz,
+        NULL, NULL, 'worker-test', 'request-test'
+      )
+    `;
+
+    const [stored] = await admin`
+      SELECT
+        (SELECT count(*)::int FROM webhook_events WHERE provider = 'wompi' AND provider_event_id = ${providerEventId}) AS webhooks,
+        (SELECT count(*)::int FROM outbox_events WHERE idempotency_key = ${webhook}::uuid) AS outbox,
+        (SELECT payload_json->>'status' FROM outbox_events WHERE idempotency_key = ${webhook}::uuid) AS status,
+        (SELECT count(*)::int FROM webhook_processing_attempts WHERE webhook_event_id = ${webhook}::uuid) AS attempts
+    `;
+    assert.deepEqual(stored, { webhooks: 1, outbox: 1, status: 'APPROVED', attempts: 1 });
   });
 });
 
