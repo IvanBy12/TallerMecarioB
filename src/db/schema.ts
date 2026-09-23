@@ -271,6 +271,41 @@ export const users = pgTable(
   ],
 );
 
+/**
+ * S1-03 — estado técnico de sincronización de identidad por sujeto externo
+ * (global, sin tenant_id). Guarda solo la posición del último evento del
+ * proveedor aplicado (monotonicidad), el ciclo de vida local derivado y el
+ * tombstone; nunca el perfil ni el payload del proveedor. Sin grants runtime:
+ * solo funciones SECURITY DEFINER allowlisted (migración 0007).
+ */
+export const identitySyncStates = pgTable(
+  'identity_sync_states',
+  {
+    id: pk(),
+    identityProvider: varchar('identity_provider', { length: 32 }).notNull(),
+    externalSubject: varchar('external_subject', { length: 255 }).notNull(),
+    userId: uuid('user_id').references(() => users.id),
+    lifecycleState: varchar('lifecycle_state', { length: 16 }).notNull().default('active'),
+    lastEventId: varchar('last_event_id', { length: 128 }).notNull(),
+    lastEventType: varchar('last_event_type', { length: 64 }).notNull(),
+    lastEventOccurredAt: ts('last_event_occurred_at').notNull(),
+    lastEventRank: smallint('last_event_rank').notNull(),
+    deletedAt: ts('deleted_at'),
+    ...timestamps(),
+  },
+  (t) => [
+    unique('identity_sync_states_identity_key').on(t.identityProvider, t.externalSubject),
+    index('identity_sync_states_user_idx').on(t.userId),
+    enumCheck('identity_sync_states_provider_check', t.identityProvider, ['clerk']),
+    enumCheck('identity_sync_states_lifecycle_check', t.lifecycleState, ['active', 'blocked', 'deleted']),
+    rawCheck('identity_sync_states_rank_check', 'last_event_rank IN (0, 1)'),
+    rawCheck(
+      'identity_sync_states_tombstone_check',
+      "(lifecycle_state = 'deleted') = (deleted_at IS NOT NULL)",
+    ),
+  ],
+);
+
 export const memberships = pgTable(
   'memberships',
   {
