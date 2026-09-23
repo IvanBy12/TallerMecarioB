@@ -55,11 +55,24 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: RBAC matrix and TenantContext core (S1-02, no database)
+        run: |
+          npm run test:authz
+          npm run test:tenant-context-core
+
       - name: Clean migration and PostgreSQL suite
         run: npm run test:db:sprint0:ci
 
+      - name: RBAC and TenantContext PostgreSQL foundations (S1-02)
+        run: |
+          npm run test:authz:db:ci
+          npm run test:tenant-context:db:ci
+
       - name: Fastify multitenant API
         run: npm run test:api:multitenant:ci
+
+      - name: TenantContext + RBAC request lifecycle (S1-02)
+        run: npm run test:tenant-context:api:ci
 
       - name: API health/readiness, CORS, rate limiting, security headers
         run: npm run test:api:security:ci

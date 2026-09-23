@@ -34,6 +34,8 @@
     "test:authz:db:ci": "node scripts/test-authz-db.cjs",
     "test:tenant-context:db": "node --env-file=.env scripts/test-tenant-context-db.cjs",
     "test:tenant-context:db:ci": "node scripts/test-tenant-context-db.cjs",
+    "test:tenant-context:api": "node --env-file=.env scripts/test-tenant-context-api.cjs",
+    "test:tenant-context:api:ci": "node scripts/test-tenant-context-api.cjs",
     "rbac:generate-seed-sql": "node scripts/generate-rbac-seed-sql.cjs",
     "rbac:check-doc-parity": "node scripts/check-rbac-matrix-doc.cjs",
     "typecheck": "tsc -p tsconfig.json",
