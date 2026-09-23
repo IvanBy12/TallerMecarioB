@@ -11,6 +11,7 @@ import type {
   VerifiedIdentity,
   VerifiedIdentityProfile,
 } from '../identity/identity-provider.js';
+import { IdentityProfileNotFoundError } from '../identity/identity-provider.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
 import { checkDatabaseReady } from './health.js';
 
@@ -28,7 +29,17 @@ export interface TenantRequestContext {
 
 export interface IdentityOnlyRequestContext {
   identity: VerifiedIdentity;
+}
+
+export interface IdentityProfileRequestContext {
+  identity: VerifiedIdentity;
   profile: VerifiedIdentityProfile;
+}
+
+declare module 'fastify' {
+  interface FastifyContextConfig {
+    identityProfile?: 'required';
+  }
 }
 
 interface ActiveMembershipRow {
@@ -67,6 +78,7 @@ export class ApiError extends Error {
     readonly statusCode: number,
     readonly code: string,
     message: string,
+    readonly headers?: Readonly<Record<string, string>>,
   ) {
     super(message);
   }
@@ -74,6 +86,7 @@ export class ApiError extends Error {
 
 const requestStates = new WeakMap<FastifyRequest, RequestState>();
 const identityOnlyStates = new WeakMap<FastifyRequest, IdentityOnlyRequestContext>();
+const identityProfileStates = new WeakMap<FastifyRequest, IdentityProfileRequestContext>();
 const rawRequestBodies = new WeakMap<FastifyRequest, Buffer>();
 
 export function getRawRequestBody(request: FastifyRequest): Buffer {
@@ -109,6 +122,14 @@ export function getIdentityOnlyRequestContext(request: FastifyRequest): Identity
   const state = identityOnlyStates.get(request);
   if (!state) {
     throw new ApiError(500, 'IDENTITY_CONTEXT_UNAVAILABLE', 'Identity context is unavailable.');
+  }
+  return state;
+}
+
+export function getIdentityProfileRequestContext(request: FastifyRequest): IdentityProfileRequestContext {
+  const state = identityProfileStates.get(request);
+  if (!state) {
+    throw new ApiError(500, 'IDENTITY_PROFILE_CONTEXT_UNAVAILABLE', 'Identity profile context is unavailable.');
   }
   return state;
 }
@@ -159,6 +180,10 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
     const statusCode = mapped?.statusCode ?? 500;
     const code = mapped?.code ?? 'INTERNAL_ERROR';
     const message = mapped?.message ?? 'The request could not be completed.';
+
+    for (const [name, value] of Object.entries(mapped?.headers ?? {})) {
+      reply.header(name, value);
+    }
 
     await reply.code(statusCode).send({
       error: { code, message, request_id: request.id },
@@ -259,18 +284,31 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
           throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
         }
 
-        let profile: VerifiedIdentityProfile;
-        try {
-          profile = await options.identityProvider.getIdentityProfile(identity);
-        } catch {
-          throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
-        }
+        identityOnlyStates.set(request, { identity });
 
-        if (!profile.emailVerified) {
-          throw new ApiError(403, 'IDENTITY_EMAIL_UNVERIFIED', 'A verified email address is required.');
-        }
+        if (request.routeOptions.config.identityProfile === 'required') {
+          let profile: VerifiedIdentityProfile;
+          try {
+            profile = await options.identityProvider.getIdentityProfile(identity);
+          } catch (error) {
+            if (error instanceof IdentityProfileNotFoundError
+              || (error as { code?: string })?.code === 'IDENTITY_PROFILE_NOT_FOUND') {
+              throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
+            }
+            throw new ApiError(
+              503,
+              'IDENTITY_PROVIDER_UNAVAILABLE',
+              'The identity provider is temporarily unavailable.',
+              { 'retry-after': '5' },
+            );
+          }
 
-        identityOnlyStates.set(request, { identity, profile });
+          if (profile.emailVerified !== true) {
+            throw new ApiError(403, 'IDENTITY_EMAIL_UNVERIFIED', 'A verified email address is required.');
+          }
+
+          identityProfileStates.set(request, { identity, profile });
+        }
       });
 
       await registerIdentityOnlyRoutes(identityOnlyApp);

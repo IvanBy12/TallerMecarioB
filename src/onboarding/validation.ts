@@ -43,23 +43,12 @@ export const onboardingRequestSchema = z.object({
     taxId: optionalText(40),
     phone: optionalText(32),
     email: email.optional(),
-    timezone: normalizedText(64).optional().default('America/Bogota'),
-    currency: z.string()
-      .transform((value) => value.trim().toUpperCase())
-      .refine((value) => /^[A-Z]{3}$/u.test(value), 'must be a three-letter currency code')
-      .optional()
-      .default('COP'),
   }).strict(),
   primaryLocation: z.object({
     name: normalizedText(160),
     addressLine: normalizedText(500),
     city: normalizedText(120),
     department: normalizedText(120),
-    countryCode: z.string()
-      .transform((value) => value.trim().toUpperCase())
-      .refine((value) => /^[A-Z]{2}$/u.test(value), 'must be an ISO country code')
-      .optional()
-      .default('CO'),
     phone: optionalText(32),
   }).strict(),
 }).strict();

@@ -8,7 +8,7 @@ import type { OnboardingRequest, VerifiedProfileInput } from './validation.js';
 interface ProvisionedUserRow {
   user_id: string;
   user_status: 'active' | 'disabled';
-  created: boolean;
+  provisioned: boolean;
 }
 
 interface ActiveMembershipRow {
@@ -34,6 +34,8 @@ export interface CreateWorkshopInput {
   profile: VerifiedProfileInput;
   payload: OnboardingRequest;
   requestId: string;
+  ipAddress: string;
+  userAgent: string | null;
   slugFactory?: (displayName: string) => string;
 }
 
@@ -78,7 +80,7 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
       `;
 
       const users = await sql<ProvisionedUserRow[]>`
-        SELECT user_id, user_status, created
+        SELECT user_id, user_status, provisioned
         FROM app.bootstrap_provision_user(
           ${input.identity.identityProvider},
           ${input.identity.externalSubject},
@@ -131,24 +133,23 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
 
       await sql`
         INSERT INTO public.workshops (
-          id, slug, legal_name, display_name, tax_id, phone, email,
-          timezone, currency, status
+          id, slug, legal_name, display_name, tax_id, phone, email, status
         ) VALUES (
           ${tenantId}, ${slug}, ${input.payload.workshop.legalName},
           ${input.payload.workshop.displayName}, ${input.payload.workshop.taxId ?? null},
           ${input.payload.workshop.phone ?? null}, ${input.payload.workshop.email ?? null},
-          ${input.payload.workshop.timezone}, ${input.payload.workshop.currency}, 'trialing'
+          'trialing'
         )
       `;
 
       await sql`
         INSERT INTO public.workshop_locations (
           id, tenant_id, name, address_line, city, department,
-          country_code, phone, is_primary
+          phone, is_primary
         ) VALUES (
           ${locationId}, ${tenantId}, ${input.payload.primaryLocation.name},
           ${input.payload.primaryLocation.addressLine}, ${input.payload.primaryLocation.city},
-          ${input.payload.primaryLocation.department}, ${input.payload.primaryLocation.countryCode},
+          ${input.payload.primaryLocation.department},
           ${input.payload.primaryLocation.phone ?? null}, true
         )
       `;
@@ -167,22 +168,26 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
       await sql`
         INSERT INTO public.audit_logs (
           id, tenant_id, actor_type, actor_user_id, actor_membership_id,
-          action, outcome, entity_type, entity_id, after_json, request_id
+          action, outcome, entity_type, entity_id, after_json, request_id,
+          ip_address, user_agent
         ) VALUES
           (
             ${uuidV7()}, ${tenantId}, 'user', ${user.user_id}, ${membershipId},
             'workshop.created', 'success', 'workshop', ${tenantId},
-            ${JSON.stringify({ status: 'trialing' })}::jsonb, ${input.requestId}
+            ${JSON.stringify({ status: 'trialing' })}::jsonb, ${input.requestId},
+            ${input.ipAddress}::inet, ${input.userAgent}
           ),
           (
             ${uuidV7()}, ${tenantId}, 'user', ${user.user_id}, ${membershipId},
             'membership.activated', 'success', 'membership', ${membershipId},
-            ${JSON.stringify({ status: 'active' })}::jsonb, ${input.requestId}
+            ${JSON.stringify({ status: 'active' })}::jsonb, ${input.requestId},
+            ${input.ipAddress}::inet, ${input.userAgent}
           ),
           (
             ${uuidV7()}, ${tenantId}, 'user', ${user.user_id}, ${membershipId},
             'role.assigned', 'success', 'membership_role', ${membershipId},
-            ${JSON.stringify({ role_code: 'owner' })}::jsonb, ${input.requestId}
+            ${JSON.stringify({ role_code: 'owner' })}::jsonb, ${input.requestId},
+            ${input.ipAddress}::inet, ${input.userAgent}
           )
       `;
 

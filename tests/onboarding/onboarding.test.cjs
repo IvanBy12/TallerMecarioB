@@ -5,7 +5,12 @@ const { randomUUID } = require('node:crypto');
 const test = require('node:test');
 const postgres = require('postgres');
 
-const { buildApi, getTenantRequestContext } = require(process.env.TEST_API_APP_MODULE);
+const {
+  buildApi,
+  getIdentityOnlyRequestContext,
+  getIdentityProfileRequestContext,
+  getTenantRequestContext,
+} = require(process.env.TEST_API_APP_MODULE);
 const { registerOnboardingRoutes } = require(process.env.TEST_ONBOARDING_ROUTES_MODULE);
 
 const adminUrl = process.env.TEST_DATABASE_URL_ADMIN;
@@ -71,15 +76,12 @@ function validPayload(label = 'Central') {
       taxId: `NIT-${randomUUID().slice(0, 8)}`,
       phone: '+57 300 123 4567',
       email: `${label.toLowerCase().replace(/[^a-z]/g, '')}@example.test`,
-      timezone: 'America/Bogota',
-      currency: 'cop',
     },
     primaryLocation: {
       name: 'Sede principal',
       addressLine: 'Carrera 7 # 12-34',
       city: 'Bogotá',
       department: 'Cundinamarca',
-      countryCode: 'co',
       phone: '+57 601 555 0101',
     },
   };
@@ -89,12 +91,13 @@ function auth(token) {
   return { authorization: `Bearer ${token}` };
 }
 
-async function postOnboarding(identity, payload = validPayload()) {
+async function postOnboarding(identity, payload = validPayload(), injectOptions = {}) {
   return app.inject({
     method: 'POST',
     url: '/api/v1/onboarding/workshops',
     headers: auth(identity.token),
     payload,
+    ...injectOptions,
   });
 }
 
@@ -189,6 +192,172 @@ test('V04/V05: audit_logs retains ENABLE + FORCE RLS and tenant-only runtime INS
   assert.match(insert.with_check, /tenant_id = app\.current_tenant_id/);
 });
 
+test('P4: bootstrap resolver column privileges match the S1-01 allowlist exactly', async () => {
+  const privileges = await admin`
+    SELECT table_name, column_name, privilege_type
+    FROM information_schema.column_privileges
+    WHERE table_schema = 'public'
+      AND grantee = 'tallermecario_bootstrap_resolver'
+      AND table_name IN ('users', 'audit_logs')
+    ORDER BY table_name, column_name, privilege_type
+  `;
+  const userColumns = await admin`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'users'
+  `;
+  const expected = [
+    ...userColumns.map(({ column_name }) => `users.${column_name}.SELECT`),
+    ...['id', 'identity_provider', 'external_subject', 'email', 'full_name', 'status']
+      .map((column) => `users.${column}.INSERT`),
+    ...[
+      'id', 'tenant_id', 'actor_type', 'actor_user_id', 'action', 'outcome',
+      'entity_type', 'entity_id', 'metadata_json', 'request_id',
+    ].map((column) => `audit_logs.${column}.INSERT`),
+  ].sort();
+  const actual = privileges
+    .map((row) => `${row.table_name}.${row.column_name}.${row.privilege_type}`)
+    .sort();
+  assert.deepEqual(actual, expected);
+  assert.equal(actual.includes('users.email.UPDATE'), false);
+  assert.equal(actual.includes('users.full_name.UPDATE'), false);
+  assert.equal(actual.includes('users.updated_at.UPDATE'), false);
+});
+
+test('P1: profile lookup is opt-in and tenant routes do not request it', async () => {
+  const token = `profile-opt-in-${randomUUID()}`;
+  const subject = `profile-opt-in-${randomUUID()}`;
+  const calls = { verify: 0, profile: 0 };
+  const countingProvider = {
+    async verifyRequest(request) {
+      calls.verify += 1;
+      return request.headers.authorization === `Bearer ${token}`
+        ? { identityProvider: 'clerk', externalSubject: subject }
+        : null;
+    },
+    async getIdentityProfile() {
+      calls.profile += 1;
+      return { email: `${randomUUID()}@example.test`, emailVerified: true, fullName: 'Opt In' };
+    },
+  };
+  const countingApp = await buildApi({
+    database,
+    identityProvider: countingProvider,
+    rateLimit: { max: 100, timeWindow: '1 minute' },
+    registerIdentityOnlyRoutes(server) {
+      registerOnboardingRoutes(server, { database, rateLimit: { max: 100, timeWindow: '1 minute' } });
+      server.get('/api/v1/__test/identity-only', async (request) => ({
+        subject: getIdentityOnlyRequestContext(request).identity.externalSubject,
+      }));
+      server.get('/api/v1/__test/profile-not-loaded', async (request) => ({
+        profile: getIdentityProfileRequestContext(request).profile.email,
+      }));
+    },
+    registerRoutes(server) {
+      server.get('/api/v1/__test/profile-tenant', async (request) => ({
+        tenantId: getTenantRequestContext(request).tenant.tenantId,
+      }));
+    },
+  });
+  try {
+    const onboarding = await countingApp.inject({
+      method: 'POST', url: '/api/v1/onboarding/workshops',
+      headers: auth(token), payload: validPayload('Profile Opt In'),
+    });
+    assert.equal(onboarding.statusCode, 201);
+    assert.deepEqual(calls, { verify: 1, profile: 1 });
+
+    calls.verify = 0;
+    calls.profile = 0;
+    const identityOnly = await countingApp.inject({
+      method: 'GET', url: '/api/v1/__test/identity-only', headers: auth(token),
+    });
+    assert.equal(identityOnly.statusCode, 200);
+    assert.deepEqual(calls, { verify: 1, profile: 0 });
+
+    calls.verify = 0;
+    calls.profile = 0;
+    const profileNotLoaded = await countingApp.inject({
+      method: 'GET', url: '/api/v1/__test/profile-not-loaded', headers: auth(token),
+    });
+    assert.equal(profileNotLoaded.statusCode, 500);
+    assert.equal(profileNotLoaded.json().error.code, 'IDENTITY_PROFILE_CONTEXT_UNAVAILABLE');
+    assert.deepEqual(calls, { verify: 1, profile: 0 });
+
+    calls.verify = 0;
+    calls.profile = 0;
+    const tenant = await countingApp.inject({
+      method: 'GET', url: '/api/v1/__test/profile-tenant', headers: auth(token),
+    });
+    assert.equal(tenant.statusCode, 200);
+    assert.deepEqual(calls, { verify: 1, profile: 0 });
+  } finally {
+    await countingApp.close();
+  }
+});
+
+test('P2: profile provider outage is a sanitized 503 and does not affect identity-only routes', async () => {
+  const token = `profile-unavailable-${randomUUID()}`;
+  let profileCalls = 0;
+  let failure = 'unavailable';
+  const unavailableProvider = {
+    async verifyRequest(request) {
+      return request.headers.authorization === `Bearer ${token}`
+        ? { identityProvider: 'clerk', externalSubject: `subject-${token}` }
+        : null;
+    },
+    async getIdentityProfile() {
+      profileCalls += 1;
+      if (failure === 'not-found') {
+        throw Object.assign(new Error('provider user does not exist'), {
+          code: 'IDENTITY_PROFILE_NOT_FOUND',
+        });
+      }
+      throw new Error('SDK timeout containing provider internals');
+    },
+  };
+  const unavailableApp = await buildApi({
+    database,
+    identityProvider: unavailableProvider,
+    rateLimit: { max: 100, timeWindow: '1 minute' },
+    registerIdentityOnlyRoutes(server) {
+      registerOnboardingRoutes(server, { database, rateLimit: { max: 100, timeWindow: '1 minute' } });
+      server.get('/api/v1/__test/identity-only-unavailable', async (request) => ({
+        subject: getIdentityOnlyRequestContext(request).identity.externalSubject,
+      }));
+    },
+  });
+  try {
+    const identityOnly = await unavailableApp.inject({
+      method: 'GET', url: '/api/v1/__test/identity-only-unavailable', headers: auth(token),
+    });
+    assert.equal(identityOnly.statusCode, 200);
+    assert.equal(profileCalls, 0);
+
+    const onboarding = await unavailableApp.inject({
+      method: 'POST', url: '/api/v1/onboarding/workshops',
+      headers: auth(token), payload: validPayload('Provider Down'),
+    });
+    assert.equal(onboarding.statusCode, 503);
+    assert.equal(onboarding.json().error.code, 'IDENTITY_PROVIDER_UNAVAILABLE');
+    assert.equal(onboarding.headers['retry-after'], '5');
+    assert.equal(onboarding.body.includes('SDK timeout'), false);
+    assert.equal(profileCalls, 1);
+
+    failure = 'not-found';
+    const missingIdentity = await unavailableApp.inject({
+      method: 'POST', url: '/api/v1/onboarding/workshops',
+      headers: auth(token), payload: validPayload('Provider Missing'),
+    });
+    assert.equal(missingIdentity.statusCode, 401);
+    assert.equal(missingIdentity.json().error.code, 'AUTHENTICATION_REQUIRED');
+    assert.equal(missingIdentity.body.includes('provider user does not exist'), false);
+    assert.equal(profileCalls, 2);
+  } finally {
+    await unavailableApp.close();
+  }
+});
+
 test('T01/T02: authentication is required and an unverified provider email is rejected', async () => {
   const unauthenticated = await app.inject({
     method: 'POST', url: '/api/v1/onboarding/workshops', payload: validPayload(),
@@ -216,6 +385,26 @@ test('T03: strict allowlists reject tenantId, userId, roles, status and internal
     assert.equal(response.statusCode, 400, JSON.stringify({ index, body: response.body }));
     assert.equal(response.json().error.code, 'REQUEST_VALIDATION_FAILED');
   }
+});
+
+test('P5: regional defaults are server-owned and client values are rejected atomically', async () => {
+  const identity = addIdentity('regional-defaults');
+  const payloads = [
+    { ...validPayload(), workshop: { ...validPayload().workshop, timezone: 'UTC' } },
+    { ...validPayload(), workshop: { ...validPayload().workshop, currency: 'USD' } },
+    { ...validPayload(), primaryLocation: { ...validPayload().primaryLocation, countryCode: 'US' } },
+  ];
+  for (const payload of payloads) {
+    const response = await postOnboarding(identity, payload);
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error.code, 'REQUEST_VALIDATION_FAILED');
+  }
+  const [state] = await admin`
+    SELECT
+      (SELECT count(*)::int FROM public.users WHERE external_subject = ${identity.subject}) AS users,
+      (SELECT count(*)::int FROM public.workshops WHERE legal_name = 'Taller Central S.A.S.') AS workshops
+  `;
+  assert.deepEqual(state, { users: 0, workshops: 0 });
 });
 
 test('T04: wrong types, null, NUL, controls and lone surrogates are rejected without coercion', async () => {
@@ -361,7 +550,7 @@ test('T11/V06: concurrent JIT provisioning returns one local user and one global
     database`SELECT * FROM app.bootstrap_provision_user('clerk', ${subject}, ${randomUUID()}::uuid, ${email}, 'JIT User', ${randomUUID()})`,
   ]);
   assert.equal(calls[0][0].user_id, calls[1][0].user_id);
-  assert.equal(calls.flat().filter((row) => row.created).length, 1);
+  assert.equal(calls.flat().filter((row) => row.provisioned).length, 1);
   const [state] = await admin`
     SELECT
       (SELECT count(*)::int FROM public.users WHERE identity_provider = 'clerk' AND external_subject = ${subject}) AS users,
@@ -371,10 +560,9 @@ test('T11/V06: concurrent JIT provisioning returns one local user and one global
   assert.deepEqual(state, { users: 1, audits: 1 });
 });
 
-test('T12: an existing local identity is reconciled and receives owner membership atomically', async () => {
+test('T12/P3: JIT preserves an existing local profile and receives owner membership atomically', async () => {
   const identity = addIdentity('existing');
   const userId = randomUUID();
-  const profile = profilesBySubject.get(identity.subject);
   await admin`INSERT INTO public.users ${admin({
     id: userId,
     identity_provider: 'clerk',
@@ -387,18 +575,21 @@ test('T12: an existing local identity is reconciled and receives owner membershi
   const body = response.json();
   assert.equal(body.membership.role, 'owner');
   const [state] = await admin`
-    SELECT u.email, u.full_name, m.user_id, mr.assigned_by_membership_id, r.code
+    SELECT u.email, u.full_name, m.user_id, mr.assigned_by_membership_id, r.code,
+      (SELECT count(*)::int FROM public.audit_logs a
+        WHERE a.action = 'identity.user_provisioned_jit' AND a.actor_user_id = u.id) AS jit_audits
     FROM public.users u
     JOIN public.memberships m ON m.user_id = u.id
     JOIN public.membership_roles mr ON mr.tenant_id = m.tenant_id AND mr.membership_id = m.id
     JOIN public.roles r ON r.id = mr.role_id
     WHERE u.external_subject = ${identity.subject}
   `;
-  assert.equal(state.email, profile.email.toLowerCase());
-  assert.equal(state.full_name, profile.fullName);
+  assert.equal(state.email, 'old@example.test');
+  assert.equal(state.full_name, 'Old Name');
   assert.equal(state.user_id, userId);
   assert.equal(state.assigned_by_membership_id, body.membership.id);
   assert.equal(state.code, 'owner');
+  assert.equal(state.jit_audits, 0);
 });
 
 test('T13/V07: new identity and valid Unicode create exactly one complete tenant', async () => {
@@ -415,9 +606,21 @@ test('T13/V07: new identity and valid Unicode create exactly one complete tenant
       (SELECT count(*)::int FROM public.workshops WHERE id = ${body.workshop.id}) AS workshops,
       (SELECT count(*)::int FROM public.workshop_locations WHERE tenant_id = ${body.workshop.id} AND is_primary) AS primary_locations,
       (SELECT count(*)::int FROM public.memberships WHERE tenant_id = ${body.workshop.id} AND status = 'active') AS memberships,
-      (SELECT count(*)::int FROM public.membership_roles WHERE tenant_id = ${body.workshop.id}) AS roles
+      (SELECT count(*)::int FROM public.membership_roles WHERE tenant_id = ${body.workshop.id}) AS roles,
+      (SELECT timezone FROM public.workshops WHERE id = ${body.workshop.id}) AS timezone,
+      (SELECT currency FROM public.workshops WHERE id = ${body.workshop.id}) AS currency,
+      (SELECT country_code FROM public.workshop_locations
+        WHERE tenant_id = ${body.workshop.id} AND is_primary) AS country_code
   `;
-  assert.deepEqual(state, { workshops: 1, primary_locations: 1, memberships: 1, roles: 1 });
+  assert.deepEqual(state, {
+    workshops: 1,
+    primary_locations: 1,
+    memberships: 1,
+    roles: 1,
+    timezone: 'America/Bogota',
+    currency: 'COP',
+    country_code: 'CO',
+  });
 });
 
 test('T14: a workshops_slug_key collision retries the complete transaction once', async () => {
@@ -508,15 +711,19 @@ test('T18: a second completed onboarding returns ONBOARDING_ALREADY_COMPLETED', 
   assert.equal(second.json().error.code, 'ONBOARDING_ALREADY_COMPLETED');
 });
 
-test('T19/V09/V10: tenant audit events share actor, membership and request_id with no PII', async () => {
+test('T19/V09/V10/P6: tenant audit events share request context and contain no PII or headers', async () => {
   const identity = addIdentity('audit');
   const payload = validPayload('Audit Secret Name');
-  const response = await postOnboarding(identity, payload);
+  const userAgent = `audit-agent/${'x'.repeat(600)}`;
+  const response = await postOnboarding(identity, payload, {
+    headers: { ...auth(identity.token), 'user-agent': userAgent, cookie: 'secret-cookie' },
+    remoteAddress: '198.51.100.42',
+  });
   assert.equal(response.statusCode, 201);
   const body = response.json();
   const rows = await admin`
     SELECT action, actor_user_id, actor_membership_id, request_id,
-      before_json, after_json, metadata_json
+      before_json, after_json, metadata_json, ip_address, user_agent
     FROM public.audit_logs
     WHERE tenant_id = ${body.workshop.id}
     ORDER BY action
@@ -524,6 +731,8 @@ test('T19/V09/V10: tenant audit events share actor, membership and request_id wi
   assert.deepEqual(rows.map((row) => row.action), ['membership.activated', 'role.assigned', 'workshop.created']);
   assert.ok(rows.every((row) => row.actor_membership_id === body.membership.id));
   assert.ok(rows.every((row) => row.request_id === body.request_id));
+  assert.ok(rows.every((row) => row.ip_address === '198.51.100.42'));
+  assert.ok(rows.every((row) => row.user_agent === userAgent.slice(0, 512)));
   const serialized = JSON.stringify(rows);
   for (const forbidden of [
     identity.subject,
@@ -534,6 +743,9 @@ test('T19/V09/V10: tenant audit events share actor, membership and request_id wi
     payload.workshop.taxId,
     payload.workshop.phone,
     payload.primaryLocation.addressLine,
+    identity.token,
+    'secret-cookie',
+    'authorization',
   ]) assert.equal(serialized.includes(forbidden), false);
 });
 

@@ -11,6 +11,15 @@ export interface VerifiedIdentityProfile {
   fullName: string | null;
 }
 
+/** Provider contract signal: the already-authenticated subject no longer exists. */
+export class IdentityProfileNotFoundError extends Error {
+  readonly code = 'IDENTITY_PROFILE_NOT_FOUND';
+
+  constructor() {
+    super('IDENTITY_PROFILE_NOT_FOUND');
+  }
+}
+
 /**
  * Authentication boundary from ADR-006. Implementations verify the request;
  * they never supply tenant, membership, roles, or permissions.

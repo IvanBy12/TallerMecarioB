@@ -15,10 +15,9 @@ ON CONFLICT (code) DO UPDATE SET
 --> statement-breakpoint
 
 -- The existing ADR-009 bootstrap owner is NOLOGIN and explicitly BYPASSRLS.
--- It receives only the columns required for JIT identity reconciliation and
+-- It receives only the columns required for JIT identity provisioning and
 -- the single append-only audit insert performed by the allowlisted function.
-GRANT INSERT (id, identity_provider, external_subject, email, full_name, status),
-	UPDATE (email, full_name, updated_at)
+GRANT INSERT (id, identity_provider, external_subject, email, full_name, status)
 	ON TABLE public.users TO tallermecario_bootstrap_resolver;
 --> statement-breakpoint
 GRANT INSERT (
@@ -46,7 +45,7 @@ CREATE FUNCTION app.bootstrap_provision_user(
 RETURNS TABLE (
 	user_id uuid,
 	user_status text,
-	created boolean
+	provisioned boolean
 )
 LANGUAGE plpgsql
 VOLATILE
@@ -56,7 +55,7 @@ AS $function$
 DECLARE
 	v_user_id uuid;
 	v_user_status text;
-	v_created boolean;
+	v_provisioned boolean := false;
 BEGIN
 	IF p_identity_provider IS NULL OR p_identity_provider = '' OR pg_catalog.length(p_identity_provider) > 32
 		OR p_external_subject IS NULL OR p_external_subject = '' OR pg_catalog.length(p_external_subject) > 255
@@ -68,20 +67,30 @@ BEGIN
 		RAISE EXCEPTION 'BOOTSTRAP_USER_ARGUMENT_INVALID' USING ERRCODE = '22023';
 	END IF;
 
-	INSERT INTO public.users AS existing_user (
+	INSERT INTO public.users (
 		id, identity_provider, external_subject, email, full_name, status
 	) VALUES (
 		p_proposed_user_id, p_identity_provider, p_external_subject,
 		p_email, p_full_name, 'active'
 	)
-	ON CONFLICT (identity_provider, external_subject) DO UPDATE SET
-		email = EXCLUDED.email,
-		full_name = COALESCE(EXCLUDED.full_name, existing_user.full_name),
-		updated_at = pg_catalog.clock_timestamp()
-	RETURNING existing_user.id, existing_user.status, (existing_user.xmax = 0)
-	INTO v_user_id, v_user_status, v_created;
+	ON CONFLICT ON CONSTRAINT users_identity_key DO NOTHING
+	RETURNING id, status, true
+	INTO v_user_id, v_user_status, v_provisioned;
 
-	IF v_created THEN
+	IF v_user_id IS NULL THEN
+		SELECT id, status
+		INTO v_user_id, v_user_status
+		FROM public.users
+		WHERE identity_provider = p_identity_provider
+			AND external_subject = p_external_subject;
+		v_provisioned := false;
+
+		IF v_user_id IS NULL THEN
+			RAISE EXCEPTION 'BOOTSTRAP_USER_RESULT_MISSING' USING ERRCODE = 'P0001';
+		END IF;
+	END IF;
+
+	IF v_provisioned THEN
 		INSERT INTO public.audit_logs (
 			id, tenant_id, actor_type, actor_user_id, action, outcome,
 			entity_type, entity_id, metadata_json, request_id
@@ -93,7 +102,7 @@ BEGIN
 		);
 	END IF;
 
-	RETURN QUERY SELECT v_user_id, v_user_status, v_created;
+	RETURN QUERY SELECT v_user_id, v_user_status, v_provisioned;
 END
 $function$;
 --> statement-breakpoint
