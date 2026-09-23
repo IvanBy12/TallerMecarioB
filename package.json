@@ -29,6 +29,7 @@
     "test:onboarding": "node --env-file=.env scripts/test-onboarding.cjs",
     "test:onboarding:ci": "node scripts/test-onboarding.cjs",
     "test:authz": "node scripts/test-authz.cjs",
+    "test:tenant-context-core": "node scripts/test-tenant-context-core.cjs",
     "test:authz:db": "node --env-file=.env scripts/test-authz-db.cjs",
     "test:authz:db:ci": "node scripts/test-authz-db.cjs",
     "rbac:generate-seed-sql": "node scripts/generate-rbac-seed-sql.cjs",
