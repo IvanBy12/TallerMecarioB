@@ -4,8 +4,16 @@ import {
   processClaimedJob,
   requeueStalled,
   type OutboxHandler,
+  type PhasedOutboxHandler,
   PermanentDispatchError,
 } from './outbox-worker.js';
+import { ClerkIdentitySnapshotSource } from '../identity/clerk/clerk-identity-provider.js';
+import { clerkConfigured, loadClerkBackendConfig } from '../identity/clerk/config.js';
+import { createIdentityLifecycleHandler, IDENTITY_LIFECYCLE_EVENT_TYPE } from '../identity/sync/lifecycle-sync.js';
+import {
+  createMembershipRevocationHandler,
+  MEMBERSHIP_REVOCATION_EVENT_TYPE,
+} from '../identity/sync/membership-revocation.js';
 import { WompiAdapter } from '../integrations/wompi/adapter.js';
 import { PostgresWompiBillingRepository } from '../integrations/wompi/billing-repository.js';
 import { loadWompiConfig, type WompiRuntimeConfig } from '../integrations/wompi/config.js';
@@ -99,7 +107,21 @@ async function main(): Promise<void> {
   const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 2000);
   const batchSize = Number(process.env.WORKER_BATCH_SIZE ?? 10);
   const stallSeconds = Number(process.env.WORKER_STALL_SECONDS ?? 300);
-  const handlers = wompi.enabled ? createWompiHandlers(wompi, database) : {};
+  const handlers: Record<string, OutboxHandler> = {
+    ...(wompi.enabled ? createWompiHandlers(wompi, database) : {}),
+    // S1-03: per-tenant membership revocation after a provider deletion (no network).
+    [MEMBERSHIP_REVOCATION_EVENT_TYPE]: createMembershipRevocationHandler(),
+  };
+  // S1-03: Clerk lifecycle sync calls the Backend API, so it runs phased
+  // (network strictly outside any DB transaction).
+  const phasedHandlers: Record<string, PhasedOutboxHandler<any>> = clerkConfigured()
+    ? {
+      [IDENTITY_LIFECYCLE_EVENT_TYPE]: createIdentityLifecycleHandler({
+        source: new ClerkIdentitySnapshotSource(loadClerkBackendConfig()),
+        workerId: `worker-${process.pid}`,
+      }),
+    }
+    : {};
 
   let running = true;
   const shutdown = async (signal: string) => {
@@ -118,7 +140,7 @@ async function main(): Promise<void> {
       const jobs = await claimBatch(database, batchSize);
       for (const job of jobs) {
         if (!running) break;
-        await processClaimedJob({ database, handlers }, job);
+        await processClaimedJob({ database, handlers, phasedHandlers }, job);
       }
     } catch (error) {
       process.stderr.write(`worker cycle error: ${error instanceof Error ? error.message : String(error)}\n`);

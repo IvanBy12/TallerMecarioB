@@ -60,8 +60,10 @@ const ALLOWLIST_MATCHES = new Set([
   'scripts/staging-deploy-drill.cjs:190',
   // server.ts/run.ts: assembles a connection string from process.env at
   // runtime (encodeURIComponent(user)/(password)) -- no literal secret here.
-  'src/api/server.ts:46',
-  'src/worker/run.ts:88',
+  // (Line numbers moved when S1-03 wired Clerk into both entrypoints; the
+  // flagged line is the same runtime assembly, re-reviewed.)
+  'src/api/server.ts:50',
+  'src/worker/run.ts:96',
 ]);
 
 const SKIP_EXTENSIONS = new Set([

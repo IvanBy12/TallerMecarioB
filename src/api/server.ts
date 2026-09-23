@@ -5,20 +5,24 @@ import type {
   VerifiedIdentity,
   VerifiedIdentityProfile,
 } from '../identity/identity-provider.js';
+import { ClerkIdentityProvider } from '../identity/clerk/clerk-identity-provider.js';
+import {
+  clerkConfigured,
+  loadClerkAuthenticationConfig,
+  loadClerkWebhookSigningSecret,
+} from '../identity/clerk/config.js';
+import { PostgresClerkWebhookRepository, registerClerkWebhookRoute } from '../identity/webhook-routes.js';
 import { loadWompiConfig } from '../integrations/wompi/config.js';
 import { PostgresWompiWebhookRepository } from '../integrations/wompi/repository.js';
 import { registerWompiWebhookRoute } from '../integrations/wompi/routes.js';
 import { registerOnboardingRoutes } from '../onboarding/routes.js';
 
 /**
- * ADR-006 is accepted but no concrete Clerk adapter exists in this repo yet
- * -- only the `IdentityProvider` interface. Wiring the real Clerk JWT
- * verifier is a separate, undocumented-here piece of work. This stub keeps
- * the contract ("verifies the request; never supplies tenant/membership")
- * and always denies, so every protected route still correctly 401s instead
- * of the server refusing to boot. It exists only so this container can run
- * end to end (health/readiness/CORS/rate-limit/DB) before that adapter
- * lands; replace it there, not here.
+ * Used ONLY when no Clerk variable is configured at all (e.g. the local
+ * docker "staging" drill, which exercises health/readiness/CORS/DB): it
+ * always denies, so every protected route 401s. As soon as any CLERK_*
+ * variable is present the full Clerk configuration is mandatory and the real
+ * ClerkIdentityProvider is used (fail closed on partial configuration).
  */
 class UnimplementedIdentityProvider implements IdentityProvider {
   async verifyRequest(): Promise<VerifiedIdentity | null> {
@@ -54,6 +58,9 @@ function parseCorsAllowedOrigins(): string[] {
 
 async function main(): Promise<void> {
   const wompi = loadWompiConfig();
+  const clerk = clerkConfigured()
+    ? { config: loadClerkAuthenticationConfig(), webhookSigningSecret: loadClerkWebhookSigningSecret() }
+    : null;
   const port = Number(process.env.PORT ?? 3000);
   const host = process.env.HOST ?? '0.0.0.0';
 
@@ -68,17 +75,23 @@ async function main(): Promise<void> {
 
   const app = await buildApi({
     database,
-    identityProvider: new UnimplementedIdentityProvider(),
+    identityProvider: clerk ? new ClerkIdentityProvider(clerk.config) : new UnimplementedIdentityProvider(),
     corsAllowedOrigins: parseCorsAllowedOrigins(),
-    ...(wompi.enabled ? {
-      registerPublicRoutes(server) {
+    registerPublicRoutes(server) {
+      if (wompi.enabled) {
         registerWompiWebhookRoute(server, {
           eventSecret: wompi.eventsSecret,
           environment: wompi.environment,
           repository: new PostgresWompiWebhookRepository(database),
         });
-      },
-    } : {}),
+      }
+      if (clerk) {
+        registerClerkWebhookRoute(server, {
+          signingSecret: clerk.webhookSigningSecret,
+          repository: new PostgresClerkWebhookRepository(database),
+        });
+      }
+    },
     registerIdentityOnlyRoutes(server) {
       registerOnboardingRoutes(server, { database });
     },
