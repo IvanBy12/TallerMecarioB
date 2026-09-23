@@ -1,43 +1,14 @@
 import { z } from 'zod';
+import { canonicalEmailSchema } from '../identity/profile.js';
+import {
+  BIDI_CONTROL_CHARACTERS,
+  codePointLength,
+  hasValidUnicode,
+  PROHIBITED_CONTROL_CHARACTERS,
+  WHITESPACE_RUN,
+} from '../platform/unicode-text.js';
 
-const PROHIBITED_CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/u;
-
-/**
- * Built from numeric code points (never embedded as literal characters or
- * `\u` escapes in this source file) so the bidi-override range
- * U+202A-U+202E and the bidi-isolate range U+2066-U+2069 cannot be
- * silently mangled by any text-processing step between editor and disk --
- * these exact code points are the entire point of the check. Never
- * silently strip them: a hidden one can make displayed text read
- * differently than its byte order (e.g. spoof a file extension or a name).
- */
-const BIDI_CONTROL_CHARACTERS = new RegExp(
-  `[${String.fromCodePoint(0x202a)}-${String.fromCodePoint(0x202e)}${String.fromCodePoint(0x2066)}-${String.fromCodePoint(0x2069)}]`,
-  'u',
-);
-// `\s` in Unicode mode already matches every Unicode White_Space code
-// point (regular spaces, NBSP, the U+2000-200A run, line/paragraph
-// separators, the CJK ideographic space, etc.) -- no need to enumerate them.
-const WHITESPACE_RUN = /\s+/gu;
-
-function hasValidUnicode(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      if (index + 1 >= value.length) return false;
-      const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) return false;
-      index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function codePointLength(value: string): number {
-  return [...value].length;
-}
+export { verifiedProfileSchema, type VerifiedProfileInput } from '../identity/profile.js';
 
 /**
  * Request-body text contract: well-formed Unicode -> NFC -> trim -> collapse
@@ -62,9 +33,7 @@ function normalizedText(maxLength: number) {
 
 const optionalText = (maxLength: number) => normalizedText(maxLength).optional();
 
-const email = normalizedText(320)
-  .transform((value) => value.toLowerCase())
-  .refine((value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value), 'must be an email address');
+const email = canonicalEmailSchema;
 
 // DOC_CONFLICT note (see AGENTS.md §1): the canonical S1-01 validation
 // contract (referenced by the architecture audit as "the spec") was not
@@ -112,33 +81,4 @@ export const onboardingRequestSchema = z.object({
   }).strict(),
 }).strict();
 
-/**
- * Provider-sourced (Clerk) `fullName` never blocks onboarding: this data did
- * not come from the request body, so an invalid name degrades to null
- * instead of a 403/500. Policy: non-string or malformed Unicode (lone
- * surrogate) -> null; NFC; any C0/DEL/C1 control or bidi override/isolate
- * character anywhere -> null (never partially stripped, so a potentially
- * ambiguous name is never silently rewritten); trim + collapse whitespace;
- * empty -> null; truncate to 200 code points. Truncation is Unicode-safe by
- * code point only -- it never splits a surrogate pair, but it does not
- * preserve grapheme clusters (a combining or ZWJ sequence may be cut).
- */
-function normalizeProviderFullName(raw: string | null): string | null {
-  if (typeof raw !== 'string') return null;
-  if (!hasValidUnicode(raw)) return null;
-  const normalized = raw.normalize('NFC');
-  if (PROHIBITED_CONTROL_CHARACTERS.test(normalized) || BIDI_CONTROL_CHARACTERS.test(normalized)) return null;
-  const value = normalized.trim().replace(WHITESPACE_RUN, ' ');
-  if (value.length === 0) return null;
-  const codePoints = [...value];
-  return codePoints.length > 200 ? codePoints.slice(0, 200).join('') : value;
-}
-
-export const verifiedProfileSchema = z.object({
-  email,
-  emailVerified: z.literal(true),
-  fullName: z.string().nullable().transform(normalizeProviderFullName),
-}).strict();
-
 export type OnboardingRequest = z.infer<typeof onboardingRequestSchema>;
-export type VerifiedProfileInput = z.infer<typeof verifiedProfileSchema>;
