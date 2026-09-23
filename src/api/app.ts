@@ -15,6 +15,7 @@ import { IdentityProfileNotFoundError } from '../identity/identity-provider.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
 import { ApiError, mapDomainError } from './errors.js';
 import { checkDatabaseReady } from './health.js';
+import { registerMeRoute } from './me.js';
 import {
   recordVerifiedIdentity,
   setIdentityOnlyRequestContext,
@@ -307,6 +308,7 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
       }
     });
 
+    registerMeRoute(identityOnlyApp, { database: options.database });
     if (options.registerIdentityOnlyRoutes) await options.registerIdentityOnlyRoutes(identityOnlyApp);
   });
 
