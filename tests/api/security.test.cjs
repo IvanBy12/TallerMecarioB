@@ -199,3 +199,39 @@ test('rate limiting exempts /health/* so orchestrator polling is never throttled
     assert.equal(response.statusCode, 200);
   }
 });
+
+test('MEDIUM-02: a per-route config.rateLimit (the automatic @fastify/rate-limit onRoute path, distinct from the manual global hook above) returns 429 RATE_LIMIT_EXCEEDED with Retry-After and request_id -- never 500', async () => {
+  const perRouteApp = await buildApi({
+    database,
+    identityProvider,
+    async registerRoutes(server) {
+      server.get('/api/v1/__test/tight-limit', {
+        config: { rateLimit: { max: 1, timeWindow: '1 minute' } },
+      }, async (request) => {
+        const context = getTenantRequestContext(request);
+        return { tenantId: context.tenant.tenantId };
+      });
+    },
+  });
+  try {
+    const first = await perRouteApp.inject({
+      method: 'GET',
+      url: '/api/v1/__test/tight-limit',
+      headers: { authorization: `Bearer token-${fixture.subject}` },
+    });
+    assert.equal(first.statusCode, 200);
+
+    const second = await perRouteApp.inject({
+      method: 'GET',
+      url: '/api/v1/__test/tight-limit',
+      headers: { authorization: `Bearer token-${fixture.subject}` },
+    });
+    assert.equal(second.statusCode, 429);
+    assert.equal(second.json().error.code, 'RATE_LIMIT_EXCEEDED');
+    assert.ok(second.headers['retry-after'], 'expected a Retry-After header');
+    assert.ok(second.json().error.request_id, 'expected a request_id in the error body');
+    assert.equal('stack' in second.json().error, false);
+  } finally {
+    await perRouteApp.close();
+  }
+});

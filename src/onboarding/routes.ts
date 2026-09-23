@@ -3,6 +3,7 @@ import type postgres from 'postgres';
 import {
   ApiError,
   getIdentityProfileRequestContext,
+  identityAwareRateLimitKey,
 } from '../api/app.js';
 import { createWorkshopForIdentity } from './service.js';
 import { onboardingRequestSchema, verifiedProfileSchema } from './validation.js';
@@ -32,7 +33,7 @@ const onboardingBodySchema = {
       required: ['name', 'addressLine', 'city', 'department'],
       properties: {
         name: textProperty(160),
-        addressLine: textProperty(500),
+        addressLine: textProperty(300),
         city: textProperty(120),
         department: textProperty(120),
         phone: textProperty(32),
@@ -54,7 +55,12 @@ export function registerOnboardingRoutes(
   app.post('/api/v1/onboarding/workshops', {
     bodyLimit: 16 * 1024,
     config: {
-      rateLimit: options.rateLimit ?? { max: 10, timeWindow: '1 minute' },
+      // Bucketed by identity (provider + external subject), not just IP:
+      // this hook runs after the identity-only `onRequest` auth hook has
+      // resolved `identityContext`, so two different callers sharing one
+      // IP (NAT, corporate proxy) never share a bucket. Falls back to IP
+      // only for the sliver of a request that has no resolved identity yet.
+      rateLimit: { ...(options.rateLimit ?? { max: 10, timeWindow: '1 minute' }), keyGenerator: identityAwareRateLimitKey },
       identityProfile: 'required',
     },
     schema: { body: onboardingBodySchema },
@@ -91,6 +97,9 @@ export function registerOnboardingRoutes(
       ...(options.slugFactory ? { slugFactory: options.slugFactory } : {}),
     });
 
-    return reply.code(201).send(result);
+    // LOW-03: the response carries no cache-affecting body-agnostic
+    // metadata worth caching, and the caller must always see a fresh view
+    // of what was just created (never a stale/shared cache entry).
+    return reply.code(201).header('cache-control', 'no-store').send(result);
   });
 }

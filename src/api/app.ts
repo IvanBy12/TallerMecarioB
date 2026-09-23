@@ -89,6 +89,22 @@ const identityOnlyStates = new WeakMap<FastifyRequest, IdentityOnlyRequestContex
 const identityProfileStates = new WeakMap<FastifyRequest, IdentityProfileRequestContext>();
 const rawRequestBodies = new WeakMap<FastifyRequest, Buffer>();
 
+/**
+ * Rate-limit bucket key for a per-route limiter. Once an `identityOnly`/
+ * `identityProfile` hook has resolved a verified identity for this request
+ * (they run as instance-level `onRequest` hooks, ahead of any per-route
+ * hook such as `@fastify/rate-limit`'s automatic `config.rateLimit`
+ * wiring), two different identities behind the same IP get independent
+ * buckets instead of sharing one. Before identity is available, IP is the
+ * only signal there is, so it stays the fallback.
+ */
+export function identityAwareRateLimitKey(request: FastifyRequest): string {
+  const identity = identityProfileStates.get(request)?.identity
+    ?? identityOnlyStates.get(request)?.identity;
+  if (identity) return `identity:${identity.identityProvider}:${identity.externalSubject}`;
+  return `ip:${request.ip}`;
+}
+
 export function getRawRequestBody(request: FastifyRequest): Buffer {
   const body = rawRequestBodies.get(request);
   if (!body) throw new ApiError(400, 'RAW_BODY_UNAVAILABLE', 'Raw request body is unavailable.');
@@ -225,15 +241,28 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
   // a single Sprint-0 instance, revisit with a shared store before scaling
   // horizontally). Routes with stricter documented limits (uploads, OTP,
   // login) override via their own route `config.rateLimit`.
+  //
+  // `errorResponseBuilder` feeds two different call sites: our own manual
+  // `createRateLimit()` hooks below (which only read the returned value's
+  // shape and reply directly -- never throw it) AND `@fastify/rate-limit`'s
+  // own automatic per-route enforcement, wired via `config.rateLimit` on
+  // individual routes (e.g. onboarding, media uploads). That second path
+  // does `throw params.errorResponseBuilder(...)` internally, so it MUST
+  // return a real `Error`; returning a plain object here previously meant
+  // that throw reached our `setErrorHandler` as an unrecognized error and
+  // was reported as 500 INTERNAL_ERROR instead of 429. An `ApiError`
+  // satisfies both call sites: its fields are readable like the old plain
+  // object, and `instanceof ApiError` still maps it to 429 when thrown.
   const rateLimitConfig = options.rateLimit ?? DEFAULT_RATE_LIMIT;
   app.register(rateLimit, {
     global: true,
     max: rateLimitConfig.max,
     timeWindow: rateLimitConfig.timeWindow,
     keyGenerator: (request) => request.ip,
-    errorResponseBuilder: (request) => ({
-      error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests.', request_id: request.id },
-    }),
+    // `Retry-After` is already set on the reply by the plugin itself
+    // (`addHeaders[retryAfter]`, before it throws this); `request_id` is
+    // added by `setErrorHandler` from `request.id`. Nothing else to attach.
+    errorResponseBuilder: () => new ApiError(429, 'RATE_LIMIT_EXCEEDED', 'Too many requests.'),
   });
 
   // Arquitectura Técnica v1 §16: liveness/readiness. Unauthenticated,

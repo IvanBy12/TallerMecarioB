@@ -21,11 +21,49 @@ interface OwnerRoleRow {
   id: string;
 }
 
+interface WorkshopRow {
+  id: string;
+  slug: string;
+  legal_name: string;
+  display_name: string;
+  status: string;
+  timezone: string;
+  currency: string;
+}
+
+interface WorkshopLocationRow {
+  id: string;
+  name: string;
+  city: string;
+  department: string;
+  country_code: string;
+  is_primary: boolean;
+}
+
+interface MembershipRow {
+  id: string;
+  status: string;
+}
+
 export interface OnboardingResult {
-  request_id: string;
-  workshop: { id: string; slug: string; status: 'trialing' };
-  primaryLocation: { id: string; isPrimary: true };
-  membership: { id: string; status: 'active'; role: 'owner' };
+  workshop: {
+    id: string;
+    slug: string;
+    legalName: string;
+    displayName: string;
+    status: string;
+    timezone: string;
+    currency: string;
+  };
+  primaryLocation: {
+    id: string;
+    name: string;
+    city: string;
+    department: string;
+    countryCode: string;
+    isPrimary: true;
+  };
+  membership: { id: string; status: string; roles: ['owner'] };
 }
 
 export interface CreateWorkshopInput {
@@ -43,6 +81,9 @@ interface DatabaseError {
   code?: string;
   constraint_name?: string;
 }
+
+/** Audit contract for the onboarding domain commands (LOW-02): every event carries this reason. */
+const REASON_CODE_WORKSHOP_ONBOARDING = 'workshop_onboarding';
 
 function isDatabaseError(error: unknown, code: string, constraint?: string): boolean {
   const candidate = error as DatabaseError;
@@ -63,13 +104,18 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
   const slugFactory = input.slugFactory ?? createWorkshopSlug;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const sql = await input.database.reserve();
+    // LOW-01: every value below is pure/local and can throw (slugFactory is
+    // caller-injectable) or is otherwise fallible without touching the
+    // database. All of it must be resolved BEFORE `reserve()` so that a
+    // connection is never acquired without an immediately-following `try`
+    // that guarantees its release.
     const tenantId = uuidV7();
     const locationId = uuidV7();
     const membershipId = uuidV7();
     const proposedUserId = uuidV7();
     const slug = slugFactory(input.payload.workshop.displayName);
 
+    const sql = await input.database.reserve();
     try {
       await sql.unsafe('BEGIN');
       await sql`
@@ -131,7 +177,7 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
           set_config('app.request_id', ${input.requestId}, true)
       `;
 
-      await sql`
+      const [workshop] = await sql<WorkshopRow[]>`
         INSERT INTO public.workshops (
           id, slug, legal_name, display_name, tax_id, phone, email, status
         ) VALUES (
@@ -140,9 +186,11 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
           ${input.payload.workshop.phone ?? null}, ${input.payload.workshop.email ?? null},
           'trialing'
         )
+        RETURNING id, slug, legal_name, display_name, status, timezone, currency
       `;
+      if (!workshop) throw new Error('WORKSHOP_INSERT_RESULT_MISSING');
 
-      await sql`
+      const [location] = await sql<WorkshopLocationRow[]>`
         INSERT INTO public.workshop_locations (
           id, tenant_id, name, address_line, city, department,
           phone, is_primary
@@ -152,12 +200,16 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
           ${input.payload.primaryLocation.department},
           ${input.payload.primaryLocation.phone ?? null}, true
         )
+        RETURNING id, name, city, department, country_code, is_primary
       `;
+      if (!location) throw new Error('WORKSHOP_LOCATION_INSERT_RESULT_MISSING');
 
-      await sql`
+      const [membership] = await sql<MembershipRow[]>`
         INSERT INTO public.memberships (id, tenant_id, user_id, status)
         VALUES (${membershipId}, ${tenantId}, ${user.user_id}, 'active')
+        RETURNING id, status
       `;
+      if (!membership) throw new Error('MEMBERSHIP_INSERT_RESULT_MISSING');
 
       await sql`
         INSERT INTO public.membership_roles (
@@ -165,29 +217,54 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
         ) VALUES (${tenantId}, ${membershipId}, ${ownerRoleId}, ${membershipId})
       `;
 
+      // LOW-02: exact allowlisted keys per event, plus the shared
+      // reason_code -- see the S1-01 audit's approved audit contract.
+      //
+      // `sql.json(...)`, not `${JSON.stringify(...)}::jsonb`: postgres.js
+      // tags a `sql.json()` parameter with the jsonb OID end-to-end, so the
+      // driver both serializes it correctly and parses the column back into
+      // an object on every future read. A plain string parameter cast with
+      // `::jsonb` in SQL text serializes fine on write, but the driver then
+      // reads that column back as a raw JSON *string*, not an object --
+      // silently wrong for every consumer of these audit rows.
       await sql`
         INSERT INTO public.audit_logs (
           id, tenant_id, actor_type, actor_user_id, actor_membership_id,
-          action, outcome, entity_type, entity_id, after_json, request_id,
+          action, outcome, entity_type, entity_id, reason_code,
+          before_json, after_json, metadata_json, request_id,
           ip_address, user_agent
         ) VALUES
           (
             ${uuidV7()}, ${tenantId}, 'user', ${user.user_id}, ${membershipId},
             'workshop.created', 'success', 'workshop', ${tenantId},
-            ${JSON.stringify({ status: 'trialing' })}::jsonb, ${input.requestId},
-            ${input.ipAddress}::inet, ${input.userAgent}
+            ${REASON_CODE_WORKSHOP_ONBOARDING},
+            NULL,
+            ${sql.json({
+              status: workshop.status,
+              timezone: workshop.timezone,
+              currency: workshop.currency,
+              primary_location_id: location.id,
+            })},
+            NULL,
+            ${input.requestId}, ${input.ipAddress}::inet, ${input.userAgent}
           ),
           (
             ${uuidV7()}, ${tenantId}, 'user', ${user.user_id}, ${membershipId},
             'membership.activated', 'success', 'membership', ${membershipId},
-            ${JSON.stringify({ status: 'active' })}::jsonb, ${input.requestId},
-            ${input.ipAddress}::inet, ${input.userAgent}
+            ${REASON_CODE_WORKSHOP_ONBOARDING},
+            NULL,
+            ${sql.json({ status: membership.status, user_id: user.user_id })},
+            NULL,
+            ${input.requestId}, ${input.ipAddress}::inet, ${input.userAgent}
           ),
           (
             ${uuidV7()}, ${tenantId}, 'user', ${user.user_id}, ${membershipId},
             'role.assigned', 'success', 'membership_role', ${membershipId},
-            ${JSON.stringify({ role_code: 'owner' })}::jsonb, ${input.requestId},
-            ${input.ipAddress}::inet, ${input.userAgent}
+            ${REASON_CODE_WORKSHOP_ONBOARDING},
+            ${sql.json({ roles: [] })},
+            ${sql.json({ roles: ['owner'] })},
+            ${sql.json({ assigned_by_membership_id: membershipId, bootstrap: true })},
+            ${input.requestId}, ${input.ipAddress}::inet, ${input.userAgent}
           )
       `;
 
@@ -195,10 +272,24 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
       sql.release();
 
       return {
-        request_id: input.requestId,
-        workshop: { id: tenantId, slug, status: 'trialing' },
-        primaryLocation: { id: locationId, isPrimary: true },
-        membership: { id: membershipId, status: 'active', role: 'owner' },
+        workshop: {
+          id: workshop.id,
+          slug: workshop.slug,
+          legalName: workshop.legal_name,
+          displayName: workshop.display_name,
+          status: workshop.status,
+          timezone: workshop.timezone,
+          currency: workshop.currency,
+        },
+        primaryLocation: {
+          id: location.id,
+          name: location.name,
+          city: location.city,
+          department: location.department,
+          countryCode: location.country_code,
+          isPrimary: true,
+        },
+        membership: { id: membership.id, status: membership.status, roles: ['owner'] },
       };
     } catch (error) {
       await rollbackAndRelease(sql);

@@ -17,7 +17,11 @@ ON CONFLICT (code) DO UPDATE SET
 -- The existing ADR-009 bootstrap owner is NOLOGIN and explicitly BYPASSRLS.
 -- It receives only the columns required for JIT identity provisioning and
 -- the single append-only audit insert performed by the allowlisted function.
-GRANT INSERT (id, identity_provider, external_subject, email, full_name, status)
+-- `status` is deliberately absent: the column default ('active') is always
+-- sufficient at insert time, so granting INSERT on it would be an
+-- unnecessary write privilege (public.users already grants this role full
+-- SELECT, including status, since migration 0000).
+GRANT INSERT (id, identity_provider, external_subject, email, full_name)
 	ON TABLE public.users TO tallermecario_bootstrap_resolver;
 --> statement-breakpoint
 GRANT INSERT (
@@ -57,7 +61,7 @@ DECLARE
 	v_user_status text;
 	v_provisioned boolean := false;
 BEGIN
-	IF p_identity_provider IS NULL OR p_identity_provider = '' OR pg_catalog.length(p_identity_provider) > 32
+	IF p_identity_provider IS NULL OR p_identity_provider <> 'clerk'
 		OR p_external_subject IS NULL OR p_external_subject = '' OR pg_catalog.length(p_external_subject) > 255
 		OR p_proposed_user_id IS NULL
 		OR p_email IS NULL OR p_email = '' OR pg_catalog.length(p_email) > 320
@@ -67,11 +71,14 @@ BEGIN
 		RAISE EXCEPTION 'BOOTSTRAP_USER_ARGUMENT_INVALID' USING ERRCODE = '22023';
 	END IF;
 
+	-- `status` is intentionally omitted: the column default ('active') is
+	-- always correct at JIT-provisioning time, and this role holds no
+	-- INSERT privilege on it (see the GRANT above).
 	INSERT INTO public.users (
-		id, identity_provider, external_subject, email, full_name, status
+		id, identity_provider, external_subject, email, full_name
 	) VALUES (
 		p_proposed_user_id, p_identity_provider, p_external_subject,
-		p_email, p_full_name, 'active'
+		p_email, p_full_name
 	)
 	ON CONFLICT ON CONSTRAINT users_identity_key DO NOTHING
 	RETURNING id, status, true

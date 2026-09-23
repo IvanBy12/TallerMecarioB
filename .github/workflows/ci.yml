@@ -64,6 +64,9 @@ jobs:
       - name: API health/readiness, CORS, rate limiting, security headers
         run: npm run test:api:security:ci
 
+      - name: Workshop onboarding (S1-01)
+        run: npm run test:onboarding:ci
+
       - name: Outbox worker regression
         run: npm run test:outbox:ci
 
