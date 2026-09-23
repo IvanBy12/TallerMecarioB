@@ -26,6 +26,8 @@
     "test:outbox:ci": "node scripts/test-outbox-worker.cjs",
     "test:wompi": "node scripts/test-wompi.cjs",
     "test:wompi:sandbox": "node --env-file-if-exists=.env scripts/test-wompi.cjs --sandbox",
+    "test:onboarding": "node --env-file=.env scripts/test-onboarding.cjs",
+    "test:onboarding:ci": "node scripts/test-onboarding.cjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

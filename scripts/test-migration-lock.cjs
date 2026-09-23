@@ -18,6 +18,7 @@
 const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const postgres = require('postgres');
+const { expectedMigrationCount } = require('./migration-count.cjs');
 
 const LOCK_SQL = `pg_catalog.hashtextextended('tallermecario:migration-runner', 0)`;
 
@@ -113,7 +114,7 @@ async function main() {
     const verify = postgres(dbUrl.toString(), { max: 1, prepare: false, onnotice: () => {} });
     const [{ count }] = await verify`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
     await verify.end({ timeout: 5 });
-    if (count !== 5) throw new Error(`UNEXPECTED_MIGRATION_COUNT_${count}`);
+    if (count !== expectedMigrationCount()) throw new Error(`UNEXPECTED_MIGRATION_COUNT_${count}`);
     process.stdout.write(`MIGRATION_SUCCEEDED_AFTER_LOCK_RELEASE count=${count}\n`);
 
     testPassed = true;

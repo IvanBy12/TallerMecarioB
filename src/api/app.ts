@@ -6,7 +6,12 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import type postgres from 'postgres';
-import type { IdentityProvider } from '../identity/identity-provider.js';
+import type {
+  IdentityProvider,
+  VerifiedIdentity,
+  VerifiedIdentityProfile,
+} from '../identity/identity-provider.js';
+import { uuidV7 } from '../platform/uuid-v7.js';
 import { checkDatabaseReady } from './health.js';
 
 export interface TenantContext {
@@ -19,6 +24,11 @@ export interface TenantContext {
 export interface TenantRequestContext {
   tenant: TenantContext;
   sql: postgres.ReservedSql;
+}
+
+export interface IdentityOnlyRequestContext {
+  identity: VerifiedIdentity;
+  profile: VerifiedIdentityProfile;
 }
 
 interface ActiveMembershipRow {
@@ -40,6 +50,7 @@ export interface BuildApiOptions {
   database: postgres.Sql;
   identityProvider: IdentityProvider;
   registerPublicRoutes?: (app: FastifyInstance) => void | Promise<void>;
+  registerIdentityOnlyRoutes?: (app: FastifyInstance) => void | Promise<void>;
   registerRoutes?: (app: FastifyInstance) => void | Promise<void>;
   /** Security Baseline §16: explicit allowlist, never `*` with credentials. Empty = no browser cross-origin caller allowed. */
   corsAllowedOrigins?: string[];
@@ -62,6 +73,7 @@ export class ApiError extends Error {
 }
 
 const requestStates = new WeakMap<FastifyRequest, RequestState>();
+const identityOnlyStates = new WeakMap<FastifyRequest, IdentityOnlyRequestContext>();
 const rawRequestBodies = new WeakMap<FastifyRequest, Buffer>();
 
 export function getRawRequestBody(request: FastifyRequest): Buffer {
@@ -93,8 +105,43 @@ export function getTenantRequestContext(request: FastifyRequest): TenantRequestC
   return state;
 }
 
+export function getIdentityOnlyRequestContext(request: FastifyRequest): IdentityOnlyRequestContext {
+  const state = identityOnlyStates.get(request);
+  if (!state) {
+    throw new ApiError(500, 'IDENTITY_CONTEXT_UNAVAILABLE', 'Identity context is unavailable.');
+  }
+  return state;
+}
+
+function mapFrameworkError(error: unknown): ApiError | null {
+  const candidate = error as { code?: string; statusCode?: number; validation?: unknown };
+  if (candidate.code === 'FST_ERR_VALIDATION' || candidate.validation) {
+    return new ApiError(400, 'REQUEST_VALIDATION_FAILED', 'The request body is invalid.');
+  }
+  if (candidate.code === 'FST_ERR_CTP_BODY_TOO_LARGE' || candidate.statusCode === 413) {
+    return new ApiError(413, 'PAYLOAD_TOO_LARGE', 'The request body is too large.');
+  }
+  if (candidate.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE' || candidate.statusCode === 415) {
+    return new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json.');
+  }
+  if (candidate.code === 'FST_ERR_CTP_INVALID_JSON_BODY'
+    || (candidate.statusCode === 400 && error instanceof SyntaxError)) {
+    return new ApiError(400, 'REQUEST_BODY_MALFORMED', 'The JSON request body is malformed.');
+  }
+  return null;
+}
+
 export async function buildApi(options: BuildApiOptions): Promise<FastifyInstance> {
-  const app = fastify({ logger: false });
+  const app = fastify({
+    logger: false,
+    genReqId: () => uuidV7(),
+    ajv: {
+      customOptions: {
+        coerceTypes: false,
+        removeAdditional: false,
+      },
+    },
+  });
 
   app.removeContentTypeParser('application/json');
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (request, body, done) => {
@@ -102,16 +149,16 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
     rawRequestBodies.set(request, rawBody);
     try {
       done(null, JSON.parse(rawBody.toString('utf8')));
-    } catch (error) {
-      done(error as Error, undefined);
+    } catch {
+      done(new ApiError(400, 'REQUEST_BODY_MALFORMED', 'The JSON request body is malformed.'), undefined);
     }
   });
 
   app.setErrorHandler(async (error, request, reply) => {
-    const known = error instanceof ApiError;
-    const statusCode = known ? error.statusCode : 500;
-    const code = known ? error.code : 'INTERNAL_ERROR';
-    const message = known ? error.message : 'The request could not be completed.';
+    const mapped = error instanceof ApiError ? error : mapFrameworkError(error);
+    const statusCode = mapped?.statusCode ?? 500;
+    const code = mapped?.code ?? 'INTERNAL_ERROR';
+    const message = mapped?.message ?? 'The request could not be completed.';
 
     await reply.code(statusCode).send({
       error: { code, message, request_id: request.id },
@@ -178,6 +225,57 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
   });
 
   if (options.registerPublicRoutes) await options.registerPublicRoutes(app);
+
+  // Identity-only routes authenticate and rate-limit but deliberately do not
+  // resolve a membership, create TenantContext or reserve a DB connection.
+  // This is the narrow bootstrap surface used by onboarding.
+  const registerIdentityOnlyRoutes = options.registerIdentityOnlyRoutes;
+  if (registerIdentityOnlyRoutes) {
+    app.register(async (identityOnlyApp) => {
+      const checkRateLimitBeforeAuth = identityOnlyApp.createRateLimit();
+      identityOnlyApp.addHook('onRequest', async (request, reply) => {
+        const limit = await checkRateLimitBeforeAuth(request);
+        if (!limit.isAllowed && limit.isExceeded) {
+          reply.header('retry-after', limit.ttlInSeconds);
+          return reply.code(429).send({
+            error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests.', request_id: request.id },
+          });
+        }
+      });
+
+      identityOnlyApp.addHook('onRequest', async (request) => {
+        let identity: VerifiedIdentity | null;
+        try {
+          identity = await options.identityProvider.verifyRequest(request);
+        } catch {
+          throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
+        }
+
+        if (!identity
+          || !identity.identityProvider
+          || identity.identityProvider.length > 32
+          || !identity.externalSubject
+          || identity.externalSubject.length > 255) {
+          throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
+        }
+
+        let profile: VerifiedIdentityProfile;
+        try {
+          profile = await options.identityProvider.getIdentityProfile(identity);
+        } catch {
+          throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
+        }
+
+        if (!profile.emailVerified) {
+          throw new ApiError(403, 'IDENTITY_EMAIL_UNVERIFIED', 'A verified email address is required.');
+        }
+
+        identityOnlyStates.set(request, { identity, profile });
+      });
+
+      await registerIdentityOnlyRoutes(identityOnlyApp);
+    });
+  }
 
   // Everything else lives in its own encapsulated context: the tenant
   // transaction hooks below must never run for /health/*.

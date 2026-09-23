@@ -9,6 +9,7 @@ const { mkdtempSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const postgres = require('postgres');
+const { expectedMigrationCount } = require('./migration-count.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -95,7 +96,7 @@ async function main() {
     const [migrationState] = await testAdmin`
       SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
     `;
-    if (migrationState.count !== 5) throw new Error('CLEAN_MIGRATION_INVALID');
+    if (migrationState.count !== expectedMigrationCount()) throw new Error('CLEAN_MIGRATION_INVALID');
     process.stdout.write('CLEAN_MIGRATION_PASS\n');
 
     await testAdmin.unsafe(

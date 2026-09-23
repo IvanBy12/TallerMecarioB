@@ -6,6 +6,7 @@ const { mkdtempSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const postgres = require('postgres');
+const { expectedMigrationCount } = require('./migration-count.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -94,7 +95,7 @@ async function main() {
         to_regprocedure('app.worker_complete_outbox_event(uuid,text,text,integer)') IS NOT NULL AS has_0003
       FROM drizzle.__drizzle_migrations
     `;
-    if (migrationState.count !== 5 || !migrationState.has_0003) throw new Error('CLEAN_MIGRATION_INVALID');
+    if (migrationState.count !== expectedMigrationCount() || !migrationState.has_0003) throw new Error('CLEAN_MIGRATION_INVALID');
     process.stdout.write('CLEAN_MIGRATION_PASS\n');
 
     // Single login, member of BOTH runtime roles: the test file switches

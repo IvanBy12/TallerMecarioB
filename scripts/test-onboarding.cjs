@@ -1,14 +1,15 @@
 'use strict';
 
-// Sprint 0: media/R2 flow end-to-end (ADR-003). Same disposable-database
-// pattern as scripts/test-api-multitenant.cjs: throwaway DB + throwaway
-// NOBYPASSRLS login + compiled TS + node --test, all torn down in `finally`
-// regardless of outcome. R2 object cleanup happens inside the test file
-// itself (it is the one that knows which object_keys it created).
-
 const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
-const { mkdtempSync, rmSync } = require('node:fs');
+const {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const postgres = require('postgres');
@@ -24,7 +25,6 @@ const CANONICAL_ROLES = [
 
 function databaseUrlFromEnvironment() {
   if (process.env.DATABASE_URL) return new URL(process.env.DATABASE_URL);
-
   const candidates = [
     ['PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD'],
     ['POSTGRES_HOST', 'POSTGRES_PORT', 'POSTGRES_DB', 'POSTGRES_USER', 'POSTGRES_PASSWORD'],
@@ -50,34 +50,39 @@ function assertLocal(url) {
   }
 }
 
-function requireR2Env() {
-  const required = ['R2_ENDPOINT', 'R2_REGION', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
-  const missing = required.filter((key) => !process.env[key]);
-  if (missing.length > 0) throw new Error('R2_CONFIGURATION_MISSING');
-}
-
-function runChild(args, env) {
+function runChild(args, env, timeout = 90000) {
   const result = spawnSync(process.execPath, args, {
-    cwd: process.cwd(),
-    env,
-    stdio: 'inherit',
-    timeout: 60000,
+    cwd: process.cwd(), env, stdio: 'inherit', timeout,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`CHILD_PROCESS_FAILED_${result.status}`);
 }
 
+function makePreviousMigrationFolder() {
+  const root = mkdtempSync(join(tmpdir(), 'tallermecario-onboarding-migrations-'));
+  const meta = join(root, 'meta');
+  mkdirSync(meta);
+  const journal = JSON.parse(readFileSync(resolve('drizzle/meta/_journal.json'), 'utf8'));
+  journal.entries = journal.entries.slice(0, -1);
+  writeFileSync(join(meta, '_journal.json'), `${JSON.stringify(journal, null, 2)}\n`);
+  for (const entry of journal.entries) {
+    copyFileSync(resolve(`drizzle/${entry.tag}.sql`), join(root, `${entry.tag}.sql`));
+  }
+  return root;
+}
+
 async function main() {
-  requireR2Env();
   const sourceUrl = databaseUrlFromEnvironment();
   assertLocal(sourceUrl);
-
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
-  const databaseName = `tallermecario_media_e2e_${suffix}`;
-  const loginRole = `tm_media_e2e_${suffix}`;
+  const databaseName = `tallermecario_onboarding_${suffix}`;
+  const loginRole = `tm_onboarding_${suffix}`;
   const loginPassword = `rt_${randomUUID()}`;
   const testUrl = new URL(sourceUrl.toString());
   testUrl.pathname = `/${databaseName}`;
+  const runtimeUrl = new URL(testUrl.toString());
+  runtimeUrl.username = loginRole;
+  runtimeUrl.password = loginPassword;
 
   const maintenance = postgres(sourceUrl.toString(), { max: 1, prepare: false, onnotice: () => {} });
   let testAdmin;
@@ -86,7 +91,8 @@ async function main() {
   let testPassed = false;
   let cleanupPassed = false;
   let originalRoles = new Set();
-  const compiledRoot = mkdtempSync(join(tmpdir(), 'tallermecario-media-test-'));
+  const compiledRoot = mkdtempSync(join(tmpdir(), 'tallermecario-onboarding-build-'));
+  const previousMigrations = makePreviousMigrationFolder();
 
   try {
     const [server] = await maintenance`SELECT pg_catalog.current_database() AS database`;
@@ -102,12 +108,31 @@ async function main() {
     databaseCreated = true;
     testAdmin = postgres(testUrl.toString(), { max: 1, prepare: false, onnotice: () => {} });
 
-    runChild(['scripts/migrate.cjs'], { ...process.env, DATABASE_URL: testUrl.toString() });
-    const [migrationState] = await testAdmin`
-      SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
+    runChild(['scripts/migrate.cjs'], {
+      ...process.env,
+      DATABASE_URL: testUrl.toString(),
+      MIGRATIONS_FOLDER: previousMigrations,
+    });
+    let [migrationState] = await testAdmin`
+      SELECT (SELECT count(*)::int FROM drizzle.__drizzle_migrations) AS count,
+        to_regprocedure('app.bootstrap_provision_user(text,text,uuid,text,text,text)') IS NOT NULL AS has_onboarding
     `;
-    if (migrationState.count !== expectedMigrationCount()) throw new Error('CLEAN_MIGRATION_INVALID');
-    process.stdout.write('CLEAN_MIGRATION_PASS\n');
+    if (migrationState.count !== expectedMigrationCount() - 1 || migrationState.has_onboarding) {
+      throw new Error('PREVIOUS_MIGRATION_STATE_INVALID');
+    }
+
+    runChild(['scripts/migrate.cjs'], { ...process.env, DATABASE_URL: testUrl.toString() });
+    [migrationState] = await testAdmin`
+      SELECT (SELECT count(*)::int FROM drizzle.__drizzle_migrations) AS count,
+        to_regprocedure('app.bootstrap_provision_user(text,text,uuid,text,text,text)') IS NOT NULL AS has_onboarding,
+        (SELECT count(*)::int FROM public.roles WHERE code IN ('owner','admin','service_advisor','technician')) AS roles
+    `;
+    if (migrationState.count !== expectedMigrationCount()
+      || !migrationState.has_onboarding
+      || migrationState.roles !== 4) {
+      throw new Error('ONBOARDING_MIGRATION_INVALID');
+    }
+    process.stdout.write('UPGRADE_TO_0005_PASS\n');
 
     await testAdmin.unsafe(
       `CREATE ROLE ${loginRole} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '${loginPassword}'`,
@@ -115,41 +140,28 @@ async function main() {
     loginCreated = true;
     await testAdmin.unsafe(`GRANT tallermecario_api TO ${loginRole}`);
 
-    runChild(
-      [
-        resolve('node_modules/typescript/bin/tsc'),
-        '-p',
-        'tsconfig.json',
-        '--noEmit',
-        'false',
-        '--rootDir',
-        'src',
-        '--outDir',
-        compiledRoot,
-      ],
-      process.env,
-    );
+    runChild([
+      resolve('node_modules/typescript/bin/tsc'),
+      '-p', 'tsconfig.json', '--noEmit', 'false', '--rootDir', 'src', '--outDir', compiledRoot,
+    ], process.env);
 
     runChild(
-      ['--test', '--test-concurrency=1', '--test-timeout=30000', 'tests/media/upload-flow.test.cjs'],
+      ['--test', '--test-concurrency=1', '--test-timeout=30000', 'tests/onboarding/onboarding.test.cjs'],
       {
         ...process.env,
         TEST_DATABASE_URL_ADMIN: testUrl.toString(),
-        TEST_RUNTIME_LOGIN: loginRole,
-        TEST_RUNTIME_PASSWORD: loginPassword,
+        TEST_DATABASE_URL_RUNTIME: runtimeUrl.toString(),
         TEST_API_APP_MODULE: join(compiledRoot, 'api', 'app.js'),
-        TEST_MEDIA_ROUTES_MODULE: join(compiledRoot, 'media', 'routes.js'),
-        TEST_MEDIA_R2_MODULE: join(compiledRoot, 'media', 'r2.js'),
+        TEST_ONBOARDING_ROUTES_MODULE: join(compiledRoot, 'onboarding', 'routes.js'),
+        TEST_ONBOARDING_SERVICE_MODULE: join(compiledRoot, 'onboarding', 'service.js'),
         NODE_PATH: resolve('node_modules'),
       },
+      120000,
     );
     testPassed = true;
   } finally {
     if (testAdmin) await testAdmin.end({ timeout: 5 }).catch(() => undefined);
-
-    if (loginCreated) {
-      await maintenance.unsafe(`DROP ROLE IF EXISTS ${loginRole}`).catch(() => undefined);
-    }
+    if (loginCreated) await maintenance.unsafe(`DROP ROLE IF EXISTS ${loginRole}`).catch(() => undefined);
     if (databaseCreated) {
       await maintenance`
         SELECT pg_catalog.pg_terminate_backend(pid)
@@ -158,16 +170,11 @@ async function main() {
       `.catch(() => undefined);
       await maintenance.unsafe(`DROP DATABASE IF EXISTS ${databaseName}`).catch(() => undefined);
     }
-
     for (const role of [...CANONICAL_ROLES].reverse()) {
-      if (!originalRoles.has(role)) {
-        await maintenance.unsafe(`DROP ROLE IF EXISTS ${role}`).catch(() => undefined);
-      }
+      if (!originalRoles.has(role)) await maintenance.unsafe(`DROP ROLE IF EXISTS ${role}`).catch(() => undefined);
     }
-
-    if (compiledRoot.startsWith(join(tmpdir(), 'tallermecario-media-test-'))) {
-      rmSync(compiledRoot, { recursive: true, force: true });
-    }
+    rmSync(compiledRoot, { recursive: true, force: true });
+    rmSync(previousMigrations, { recursive: true, force: true });
 
     if (databaseCreated) {
       const [remaining] = await maintenance`
@@ -180,20 +187,16 @@ async function main() {
     await maintenance.end({ timeout: 5 });
   }
 
-  if (!testPassed) throw new Error('MEDIA_R2_TEST_FAILED');
+  if (!testPassed) throw new Error('ONBOARDING_TEST_FAILED');
   if (!cleanupPassed) throw new Error('TEST_DATABASE_CLEANUP_FAILED');
   process.stdout.write('FIXTURE_CLEANUP_PASS\n');
 }
 
 main().catch((error) => {
-  const safeMessages = new Set([
-    'DATABASE_CONFIGURATION_REQUIRED',
-    'REFUSING_NON_LOCAL_DATABASE',
-    'DATABASE_CONNECTION_FAILED',
-    'R2_CONFIGURATION_MISSING',
-    'MEDIA_R2_TEST_FAILED',
-    'TEST_DATABASE_CLEANUP_FAILED',
+  const safe = new Set([
+    'DATABASE_CONFIGURATION_REQUIRED', 'REFUSING_NON_LOCAL_DATABASE',
+    'DATABASE_CONNECTION_FAILED', 'ONBOARDING_TEST_FAILED', 'TEST_DATABASE_CLEANUP_FAILED',
   ]);
-  process.stderr.write(`${safeMessages.has(error.message) ? error.message : 'MEDIA_R2_TEST_RUN_FAILED'}\n`);
+  process.stderr.write(`${safe.has(error.message) ? error.message : 'ONBOARDING_TEST_RUN_FAILED'}\n`);
   process.exitCode = 1;
 });

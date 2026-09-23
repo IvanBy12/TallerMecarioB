@@ -23,6 +23,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const postgres = require('postgres');
+const { expectedMigrationCount } = require('./migration-count.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -189,7 +190,7 @@ async function main() {
       throw new Error('SOURCE_MIGRATION_FAILED');
     }
     const [migrationState] = await sourceAdmin`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    if (migrationState.count !== 5) throw new Error('CLEAN_MIGRATION_INVALID');
+    if (migrationState.count !== expectedMigrationCount()) throw new Error('CLEAN_MIGRATION_INVALID');
     process.stdout.write('CLEAN_MIGRATION_PASS\n');
 
     let lastWriteAt;

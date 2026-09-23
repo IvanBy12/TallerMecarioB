@@ -1,9 +1,14 @@
 import postgres from 'postgres';
 import { buildApi, getTenantRequestContext } from './app.js';
-import type { IdentityProvider, VerifiedIdentity } from '../identity/identity-provider.js';
+import type {
+  IdentityProvider,
+  VerifiedIdentity,
+  VerifiedIdentityProfile,
+} from '../identity/identity-provider.js';
 import { loadWompiConfig } from '../integrations/wompi/config.js';
 import { PostgresWompiWebhookRepository } from '../integrations/wompi/repository.js';
 import { registerWompiWebhookRoute } from '../integrations/wompi/routes.js';
+import { registerOnboardingRoutes } from '../onboarding/routes.js';
 
 /**
  * ADR-006 is accepted but no concrete Clerk adapter exists in this repo yet
@@ -18,6 +23,10 @@ import { registerWompiWebhookRoute } from '../integrations/wompi/routes.js';
 class UnimplementedIdentityProvider implements IdentityProvider {
   async verifyRequest(): Promise<VerifiedIdentity | null> {
     return null;
+  }
+
+  async getIdentityProfile(): Promise<VerifiedIdentityProfile> {
+    throw new Error('IDENTITY_PROVIDER_NOT_IMPLEMENTED');
   }
 }
 
@@ -70,6 +79,9 @@ async function main(): Promise<void> {
         });
       },
     } : {}),
+    registerIdentityOnlyRoutes(server) {
+      registerOnboardingRoutes(server, { database });
+    },
     async registerRoutes(server) {
       // Deploy-smoke-test only: proves the full protected-route pipeline
       // (rate limit -> auth -> TenantContext transaction) is wired end to

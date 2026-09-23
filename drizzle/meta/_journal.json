@@ -36,6 +36,13 @@
       "when": 1790110241648,
       "tag": "0004_wompi_sandbox",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790120000000,
+      "tag": "0005_s1_01_onboarding",
+      "breakpoints": true
     }
   ]
 }
