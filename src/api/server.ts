@@ -84,9 +84,9 @@ async function main(): Promise<void> {
     },
     async registerRoutes(server) {
       // Deploy-smoke-test only: proves the full protected-route pipeline
-      // (rate limit -> auth -> TenantContext transaction) is wired end to
-      // end in the deployed artifact. Not a product endpoint.
-      server.get('/api/v1/__whoami', async (request) => {
+      // (rate limit -> auth -> TenantContext transaction -> RBAC) is wired
+      // end to end in the deployed artifact. Not a product endpoint.
+      server.get('/api/v1/__whoami', { config: { permission: 'workshop.read' } }, async (request) => {
         const context = getTenantRequestContext(request);
         return { tenantId: context.tenant.tenantId };
       });

@@ -84,6 +84,13 @@ test.before(async () => {
       { id: fixture.membershipA, tenant_id: fixture.tenantA, user_id: fixture.userA },
       { id: fixture.membershipB, tenant_id: fixture.tenantB, user_id: fixture.userB },
     ])}`;
+    // S1-02: media routes require media.upload / media.read from PostgreSQL RBAC.
+    await sql`
+      INSERT INTO membership_roles (tenant_id, membership_id, role_id, assigned_by_membership_id)
+      SELECT m.tenant_id, m.id, r.id, m.id
+      FROM public.memberships AS m CROSS JOIN public.roles AS r
+      WHERE m.id IN (${fixture.membershipA}, ${fixture.membershipB}) AND r.code = 'owner'
+    `;
   });
 
   app = await buildApi({

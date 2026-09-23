@@ -80,6 +80,12 @@ test.before(async () => {
       tenant_id: fixture.tenantA,
       user_id: fixture.userA,
     })}`;
+    // S1-02: access comes from PostgreSQL RBAC rows, never implicitly.
+    await sql`
+      INSERT INTO membership_roles (tenant_id, membership_id, role_id, assigned_by_membership_id)
+      SELECT ${fixture.tenantA}, ${fixture.membershipA}, r.id, ${fixture.membershipA}
+      FROM public.roles AS r WHERE r.code = 'owner'
+    `;
     await sql`INSERT INTO customers ${sql([
       { id: fixture.customerA, tenant_id: fixture.tenantA, first_name: 'Allowed', last_name: 'A', phone: '3000000001', notes: 'tenant-a' },
       { id: fixture.customerB, tenant_id: fixture.tenantB, first_name: 'Hidden', last_name: 'B', phone: '3000000002', notes: 'tenant-b' },
@@ -99,7 +105,7 @@ test.before(async () => {
       },
     },
     async registerRoutes(server) {
-      server.get('/api/v1/customers/:id', async (request, reply) => {
+      server.get('/api/v1/customers/:id', { config: { permission: 'customers.read' } }, async (request, reply) => {
         const context = getTenantRequestContext(request);
         lastTenantContext = context.tenant;
         const { id } = request.params;
@@ -114,6 +120,7 @@ test.before(async () => {
 
       // Test-only probe: validates that an API write cannot reach another tenant.
       server.patch('/__test/customers/:id', {
+        config: { permission: 'customers.update' },
         schema: {
           body: {
             type: 'object',
@@ -159,6 +166,11 @@ test('TenantContext is derived from a verified identity and active PostgreSQL me
   assert.equal(lastTenantContext.userId, fixture.userA);
   assert.equal(lastTenantContext.membershipId, fixture.membershipA);
   assert.ok(lastTenantContext.requestId);
+  // Built by the S1-02 core (createTenantContext), from PostgreSQL rows only.
+  assert.equal(Object.isFrozen(lastTenantContext), true);
+  assert.deepEqual([...lastTenantContext.roles], ['owner']);
+  assert.equal(lastTenantContext.permissions.size, 103);
+  assert.deepEqual(lastTenantContext.permissions.get('customers.read'), { kind: 'tenant' });
 });
 
 test('Tenant A cannot read a Tenant B customer through Fastify', async () => {

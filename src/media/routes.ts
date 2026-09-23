@@ -21,7 +21,9 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
     {
       // Security Baseline §10: uploads get a stricter per-route limit than
       // the global default (@fastify/rate-limit route-level override).
-      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+      // RBAC: tenant scope. Technician's `media.upload = assigned` stays
+      // denied until an order-assignment resource check exists (Sprint 2+).
+      config: { permission: 'media.upload', rateLimit: { max: 30, timeWindow: '1 minute' } },
       schema: {
         body: {
           type: 'object',
@@ -61,6 +63,7 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
   app.post(
     '/api/v1/media/upload-sessions/:id/complete',
     {
+      config: { permission: 'media.upload' },
       schema: {
         body: {
           type: 'object',
@@ -83,7 +86,7 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
     },
   );
 
-  app.get('/api/v1/media/:id/download-url', async (request, reply) => {
+  app.get('/api/v1/media/:id/download-url', { config: { permission: 'media.read' } }, async (request, reply) => {
     const context = getTenantRequestContext(request);
     const { id } = request.params as { id: string };
     try {

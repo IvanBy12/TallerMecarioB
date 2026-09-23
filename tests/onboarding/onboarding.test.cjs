@@ -130,7 +130,7 @@ test.before(async () => {
       });
     },
     registerRoutes(server) {
-      server.get('/api/v1/__test/tenant', async (request) => {
+      server.get('/api/v1/__test/tenant', { config: { permission: 'workshop.read' } }, async (request) => {
         const context = getTenantRequestContext(request);
         return { tenantId: context.tenant.tenantId };
       });
@@ -310,7 +310,7 @@ test('P1: profile lookup is opt-in and tenant routes do not request it', async (
       }));
     },
     registerRoutes(server) {
-      server.get('/api/v1/__test/profile-tenant', async (request) => ({
+      server.get('/api/v1/__test/profile-tenant', { config: { permission: 'workshop.read' } }, async (request) => ({
         tenantId: getTenantRequestContext(request).tenant.tenantId,
       }));
     },
@@ -1510,7 +1510,7 @@ test('T23/V13: request IDs are globally shaped and unique across app instances',
     database,
     identityProvider,
     registerRoutes(server) {
-      server.get('/api/v1/__test/request-id', async () => ({ ok: true }));
+      server.get('/api/v1/__test/request-id', { config: { permission: 'workshop.read' } }, async () => ({ ok: true }));
     },
   });
   try {
@@ -1537,7 +1537,7 @@ test('MEDIUM-05.D: an actual 500 (a real injected failure, not a 401 mislabeled 
       registerOnboardingRoutes(server, { database, rateLimit: { max: 100, timeWindow: '1 minute' } });
     },
     registerRoutes(server) {
-      server.get('/api/v1/__test/boom-onboarding', async () => {
+      server.get('/api/v1/__test/boom-onboarding', { config: { permission: 'workshop.read' } }, async () => {
         throw new Error('duplicate key value violates unique constraint "workshops_slug_key" DETAIL: Key (slug)=(x) already exists. at Connection.query (postgres.js:123)');
       });
     },
