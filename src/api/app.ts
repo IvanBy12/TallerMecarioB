@@ -1,5 +1,6 @@
 import fastify, {
   type FastifyInstance,
+  type FastifyReply,
   type FastifyRequest,
 } from 'fastify';
 import cors from '@fastify/cors';
@@ -33,6 +34,7 @@ export {
 } from './request-context.js';
 export {
   getTenantRequestContext,
+  markDurableTenantOutcome,
   TenantRouteConfigurationError,
   type TenantRequestContext,
 } from './tenant-request.js';
@@ -136,6 +138,43 @@ function mapFrameworkError(error: unknown): ApiError | null {
   return null;
 }
 
+const TENANT_ERROR_HEADERS = new Set([
+  'access-control-allow-origin', 'access-control-allow-credentials',
+  'access-control-expose-headers', 'vary', 'retry-after', 'www-authenticate',
+  'cache-control', 'content-security-policy', 'content-security-policy-report-only',
+  'cross-origin-embedder-policy', 'cross-origin-opener-policy',
+  'cross-origin-resource-policy', 'origin-agent-cluster', 'referrer-policy',
+  'strict-transport-security', 'x-content-type-options', 'x-dns-prefetch-control',
+  'x-download-options', 'x-frame-options', 'x-permitted-cross-domain-policies',
+  'x-xss-protection',
+]);
+
+/** Fastify's fallback exposes error.message if an error response's onSend fails. */
+function sendTenantErrorWithoutOnSend(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  statusCode: number,
+  code: string,
+  message: string,
+): void {
+  const payload = JSON.stringify({ error: { code, message, request_id: request.id } });
+  if (reply.raw.headersSent) {
+    reply.raw.destroy();
+    return;
+  }
+  const headers = Object.fromEntries(Object.entries(reply.getHeaders()).filter(([name]) =>
+    TENANT_ERROR_HEADERS.has(name.toLowerCase())
+    || name.toLowerCase().startsWith('ratelimit-')
+    || name.toLowerCase().startsWith('x-ratelimit-')));
+  reply.hijack();
+  reply.raw.writeHead(statusCode, {
+    ...headers,
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload),
+  });
+  reply.raw.end(payload);
+}
+
 export async function buildApi(options: BuildApiOptions): Promise<FastifyInstance> {
   const app = fastify({
     logger: false,
@@ -168,11 +207,23 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
       ? error
       : mapDomainError(error) ?? mapFrameworkError(error);
     const statusCode = mapped?.statusCode ?? 500;
-    const code = mapped?.code ?? 'INTERNAL_ERROR';
-    const message = mapped?.message ?? 'The request could not be completed.';
+    const tenantRoute = request.routeOptions.config.permission !== undefined;
+    const explicitTripwire = mapped?.code === 'RESOURCE_AUTHORIZATION_CHECK_MISSING';
+    const code = tenantRoute && statusCode === 500 && !explicitTripwire
+      ? 'INTERNAL_ERROR' : mapped?.code ?? 'INTERNAL_ERROR';
+    const message = tenantRoute && statusCode === 500 ? 'The request could not be completed.'
+      : mapped?.message ?? 'The request could not be completed.';
 
     for (const [name, value] of Object.entries(mapped?.headers ?? {})) {
       reply.header(name, value);
+    }
+
+    // Error responses on tenant routes must not re-enter route or ancestor
+    // onSend hooks. A second onSend failure makes Fastify's fallback serialize
+    // the internal exception rather than invoking this mapper again.
+    if (tenantRoute) {
+      sendTenantErrorWithoutOnSend(request, reply, statusCode, code, message);
+      return;
     }
 
     await reply.code(statusCode).send({

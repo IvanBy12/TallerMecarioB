@@ -29,10 +29,13 @@ const {
   buildApi,
   getIdentityOnlyRequestContext,
   getTenantRequestContext,
+  markDurableTenantOutcome,
   markResourceAuthorizationSatisfied,
   TenantRouteConfigurationError,
 } = require(join(root, 'api', 'app.js'));
 const { getResourceAuthorizationStatus } = require(join(root, 'authz', 'resource-authorization.js'));
+const { TenantContextDbError } = require(join(root, 'tenancy', 'tenant-context-db.js'));
+const { registerMediaRoutes } = require(join(root, 'media', 'routes.js'));
 
 const adminUrl = process.env.TEST_DATABASE_URL_ADMIN;
 const runtimeLogin = process.env.TEST_RUNTIME_LOGIN;
@@ -55,6 +58,10 @@ function runtimePool(max) {
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const GENERIC_500 = 'The request could not be completed.';
+const testR2 = {
+  endpoint: 'http://127.0.0.1:1', region: 'auto', bucket: 'tenant-audit',
+  accessKeyId: 'test-only', secretAccessKey: 'test-only',
+};
 
 /* -------------------------------------------------------------------------- */
 /* Fixture ids                                                                */
@@ -263,6 +270,7 @@ function contextView(context) {
 }
 
 function registerTestRoutes(server, db) {
+  registerMediaRoutes(server, testR2);
   server.get('/api/v1/__it/context', { config: { permission: 'workshop.read' } }, async (request) => {
     ran('context');
     const context = getTenantRequestContext(request);
@@ -318,13 +326,25 @@ function registerTestRoutes(server, db) {
     return { before: statusBefore, after: getResourceAuthorizationStatus(context.resourceAuthorization) };
   });
 
+  server.post('/api/v1/__it/durable-pending', {
+    config: {
+      permission: 'orders.read',
+      permissionScope: 'resource',
+      durableErrorCodes: ['UPLOAD_SESSION_EXPIRED'],
+    },
+  }, async (request, reply) => {
+    await touchCustomerA(getTenantRequestContext(request).sql, `pending-${request.id}`);
+    markDurableTenantOutcome(request, 'UPLOAD_SESSION_EXPIRED');
+    return reply.code(409).send({ error: { code: 'UPLOAD_SESSION_EXPIRED', request_id: request.id } });
+  });
+
   server.post('/api/v1/__it/customers/notes', {
     config: { permission: 'customers.update' },
     schema: {
       querystring: {
         type: 'object',
         additionalProperties: false,
-        properties: { fail: { type: 'string', enum: ['throw', 'serialize', 'onsend', 'reply-4xx'] } },
+        properties: { fail: { type: 'string', enum: ['throw', 'serialize', 'onsend', 'reply-400', 'reply-403', 'reply-409', 'reply-500'] } },
       },
       response: {
         200: {
@@ -335,9 +355,6 @@ function registerTestRoutes(server, db) {
         },
       },
     },
-    // Fails on the success payload only. (A hook that also throws on the
-    // error response makes Fastify bypass setErrorHandler entirely and use
-    // its own fallback serializer — a route bug outside this lifecycle.)
     onSend: async (request, reply, payload) => {
       if (request.query.fail === 'onsend' && reply.statusCode < 400) throw new Error('route onSend failure');
       return payload;
@@ -349,9 +366,24 @@ function registerTestRoutes(server, db) {
     switch (request.query.fail) {
       case 'throw': throw new Error('handler failure after a write');
       case 'serialize': return { unexpected: true };
-      case 'reply-4xx': return reply.code(409).send({ error: { code: 'TEST_CONFLICT', request_id: request.id } });
+      case 'reply-400': return reply.code(400).send({ error: { code: 'TEST_BAD_REQUEST', request_id: request.id } });
+      case 'reply-403': return reply.code(403).send({ error: { code: 'TEST_FORBIDDEN', request_id: request.id } });
+      case 'reply-409': return reply.code(409).send({ error: { code: 'TEST_CONFLICT', request_id: request.id } });
+      case 'reply-500': return reply.code(500).send({ error: { code: 'TEST_INTERNAL', request_id: request.id } });
       default: return { id: C.A };
     }
+  });
+
+  server.post('/api/v1/__it/on-send-error', {
+    config: { permission: 'customers.update' },
+    onSend: async () => {
+      const error = new TenantContextDbError('TENANT_CONTEXT_CLIENT_MISMATCH');
+      error.message = 'constraint users_external_identity_key internal-user-uuid INTERNAL_SQL_SENTINEL';
+      throw error;
+    },
+  }, async (request, reply) => {
+    await touchCustomerA(getTenantRequestContext(request).sql, `leak-${request.id}`);
+    return reply.code(409).send({ error: { code: 'TEST_CONFLICT', request_id: request.id } });
   });
 
   server.get('/api/v1/__it/slow', { config: { permission: 'workshop.read' } }, async (request) => {
@@ -864,6 +896,18 @@ describe('RBAC route guard', () => {
     assert.equal(await customerNotes(C.A), before, 'nothing written without a resource check survives');
   });
 
+  test('a declared durable 409 cannot bypass a pending resource check', async () => {
+    const before = await customerNotes(C.A);
+    const mark = checkpoint(main);
+    const response = await app.inject({ method: 'POST', url: '/api/v1/__it/durable-pending', headers: auth('tech') });
+    assertSanitized500(response, 'RESOURCE_AUTHORIZATION_CHECK_MISSING');
+    assert.equal(await customerNotes(C.A), before, 'pending resource write must roll back');
+    const [tx] = since(main, mark).transactions;
+    assert.equal(kinds(tx).filter((kind) => kind === 'ROLLBACK').length, 1);
+    assert.equal(kinds(tx).includes('COMMIT'), false);
+    assert.equal(tx.releases, 1);
+  });
+
   test('resource route + tenant grant → no resource check required', async () => {
     const response = await app.inject({ method: 'POST', url: '/api/v1/__it/orders/omit', headers: auth('ownerA') });
     assert.equal(response.statusCode, 200, response.body);
@@ -956,14 +1000,50 @@ describe('unknown authorization data in PostgreSQL fails closed', () => {
 });
 
 describe('transaction lifetime and connection release', () => {
-  test('success commits; handler-sent 4xx after a write commits (existing service contract)', async () => {
+  test('success commits; generic 400, 403, 409 and 500 after a real write roll back', async () => {
     const ok = await app.inject({ method: 'POST', url: '/api/v1/__it/customers/notes', headers: auth('ownerA') });
     assert.equal(ok.statusCode, 200, ok.body);
     assert.match(await customerNotes(C.A), /^notes-/);
+    const before = await customerNotes(C.A);
+    for (const status of [400, 403, 409, 500]) {
+      const mark = checkpoint(main);
+      const response = await app.inject({
+        method: 'POST', url: `/api/v1/__it/customers/notes?fail=reply-${status}`, headers: auth('ownerA'),
+      });
+      assert.equal(response.statusCode, status, response.body);
+      assert.equal(await customerNotes(C.A), before, `${status} must roll back the write`);
+      const [tx] = since(main, mark).transactions;
+      assert.equal(kinds(tx).at(-1), 'ROLLBACK');
+      assert.equal(kinds(tx).filter((kind) => kind === 'ROLLBACK').length, 1);
+      assert.equal(kinds(tx).includes('COMMIT'), false);
+      assert.equal(tx.releases, 1);
+    }
+  });
 
-    const conflict = await app.inject({ method: 'POST', url: '/api/v1/__it/customers/notes?fail=reply-4xx', headers: auth('ownerA') });
-    assert.equal(conflict.statusCode, 409);
-    assert.equal(await customerNotes(C.A), `notes-${conflict.json().error.request_id}`);
+  test('a real internal onSend error over a 409 is a sanitized 500 and rolls back once', async () => {
+    const before = await customerNotes(C.A);
+    const mark = checkpoint(main);
+    const response = await app.inject({ method: 'POST', url: '/api/v1/__it/on-send-error', headers: auth('ownerA') });
+    assertSanitized500(response);
+    for (const sentinel of ['TENANT_CONTEXT_CLIENT_MISMATCH', 'users_external_identity_key', 'internal-user-uuid', 'INTERNAL_SQL_SENTINEL']) {
+      assert.equal(response.body.includes(sentinel), false, sentinel);
+    }
+    assert.equal(await customerNotes(C.A), before);
+    const [tx] = since(main, mark).transactions;
+    assert.equal(kinds(tx).filter((kind) => kind === 'ROLLBACK').length, 1);
+    assert.equal(kinds(tx).includes('COMMIT'), false);
+    assert.equal(tx.releases, 1);
+    assert.equal(await idleInTransaction(), 0);
+  });
+
+  test('permission denial before the handler leaves the customer unchanged', async () => {
+    const before = await customerNotes(C.A);
+    const mark = checkpoint(main);
+    assertError(await app.inject({ method: 'POST', url: '/api/v1/__it/customers/notes', headers: auth('tech') }), 403, 'PERMISSION_DENIED');
+    assert.equal(await customerNotes(C.A), before);
+    const [tx] = since(main, mark).transactions;
+    assert.equal(kinds(tx).filter((kind) => kind === 'ROLLBACK').length, 1);
+    assert.equal(tx.releases, 1);
   });
 
   for (const fail of ['throw', 'serialize', 'onsend']) {
@@ -1035,6 +1115,87 @@ describe('transaction lifetime and connection release', () => {
     await waitFor(async () => (await idleInTransaction()) === 0, 'no idle-in-transaction session');
     const response = await httpRequest(abortPort, { path: '/api/v1/__it/context', headers: auth('ownerA') });
     assert.equal(response.statusCode, 200, response.body);
+  });
+});
+
+describe('media durable 4xx outcomes', () => {
+  async function createSession() {
+    const response = await app.inject({
+      method: 'POST', url: '/api/v1/media/upload-sessions', headers: auth('ownerA'),
+      payload: {
+        mediaType: 'photo', mimeType: 'image/png', retentionClass: 'operational',
+        idempotencyKey: randomUUID(),
+      },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json();
+  }
+
+  test('retry creation of an expired session commits only its explicit 409 outcome', async () => {
+    const idempotencyKey = randomUUID();
+    const payload = { mediaType: 'photo', mimeType: 'image/png', retentionClass: 'operational', idempotencyKey };
+    const created = await app.inject({ method: 'POST', url: '/api/v1/media/upload-sessions', headers: auth('ownerA'), payload });
+    assert.equal(created.statusCode, 201, created.body);
+    const sessionId = created.json().uploadSessionId;
+    await admin`UPDATE upload_sessions SET expires_at = now() - interval '1 hour' WHERE id = ${sessionId}`;
+
+    const mark = checkpoint(main);
+    const retry = await app.inject({ method: 'POST', url: '/api/v1/media/upload-sessions', headers: auth('ownerA'), payload });
+    assertError(retry, 409, 'UPLOAD_SESSION_EXPIRED');
+    const [stored] = await admin`SELECT status FROM upload_sessions WHERE id = ${sessionId}`;
+    assert.equal(stored.status, 'expired');
+    const [tx] = since(main, mark).transactions;
+    assert.equal(kinds(tx).filter((kind) => kind === 'COMMIT').length, 1);
+    assert.equal(kinds(tx).includes('ROLLBACK'), false);
+    assert.equal(tx.releases, 1);
+  });
+
+  test('completion of an expired session commits its explicit 409 outcome', async () => {
+    const created = await createSession();
+    await admin`UPDATE upload_sessions SET expires_at = now() - interval '1 hour' WHERE id = ${created.uploadSessionId}`;
+    const mark = checkpoint(main);
+    const response = await app.inject({
+      method: 'POST', url: `/api/v1/media/upload-sessions/${created.uploadSessionId}/complete`,
+      headers: auth('ownerA'), payload: {},
+    });
+    assertError(response, 409, 'UPLOAD_SESSION_EXPIRED');
+    const [stored] = await admin`SELECT status FROM upload_sessions WHERE id = ${created.uploadSessionId}`;
+    assert.equal(stored.status, 'expired');
+    const [tx] = since(main, mark).transactions;
+    assert.equal(kinds(tx).filter((kind) => kind === 'COMMIT').length, 1);
+    assert.equal(kinds(tx).includes('ROLLBACK'), false);
+    assert.equal(tx.releases, 1);
+  });
+
+  test('invalid stored object size commits quarantine and failed session on explicit 422', async () => {
+    const created = await createSession();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, options) => {
+      assert.equal(options.method, 'HEAD');
+      return new Response(null, { status: 200, headers: { 'content-length': String(21 * 1024 * 1024) } });
+    };
+    const mark = checkpoint(main);
+    let response;
+    try {
+      response = await app.inject({
+        method: 'POST', url: `/api/v1/media/upload-sessions/${created.uploadSessionId}/complete`,
+        headers: auth('ownerA'), payload: {},
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assertError(response, 422, 'MEDIA_SIZE_INVALID');
+    const [stored] = await admin`
+      SELECT ma.status AS asset_status, us.status AS session_status
+      FROM media_assets AS ma JOIN upload_sessions AS us
+        ON us.tenant_id = ma.tenant_id AND us.media_asset_id = ma.id
+      WHERE ma.id = ${created.mediaAssetId}
+    `;
+    assert.deepEqual({ ...stored }, { asset_status: 'quarantined', session_status: 'failed' });
+    const [tx] = since(main, mark).transactions;
+    assert.equal(kinds(tx).filter((kind) => kind === 'COMMIT').length, 1);
+    assert.equal(kinds(tx).includes('ROLLBACK'), false);
+    assert.equal(tx.releases, 1);
   });
 });
 

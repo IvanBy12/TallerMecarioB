@@ -41,7 +41,6 @@ import type { PermissionCode } from '../authz/rbac-matrix.js';
 import {
   assertResourceAuthorizationComplete,
   createResourceAuthorizationState,
-  getResourceAuthorizationStatus,
   type ResourceAuthorizationState,
 } from '../authz/resource-authorization.js';
 import type { VerifiedIdentity } from '../identity/identity-provider.js';
@@ -71,8 +70,17 @@ declare module 'fastify' {
      * `markResourceAuthorizationSatisfied` before a non-error response.
      */
     permissionScope?: PermissionScopeRequirement;
+    /** Server-declared durable 4xx outcomes; each also requires an explicit mark. */
+    durableErrorCodes?: readonly DurableTenantOutcomeCode[];
   }
 }
+
+const DURABLE_OUTCOME_STATUS = Object.freeze({
+  UPLOAD_SESSION_EXPIRED: 409,
+  MEDIA_SIZE_INVALID: 422,
+} as const);
+
+export type DurableTenantOutcomeCode = keyof typeof DURABLE_OUTCOME_STATUS;
 
 export interface TenantRequestContext {
   /** Built only by `createTenantContext` from rows revalidated inside `sql`'s transaction. */
@@ -98,6 +106,7 @@ export interface TenantRequestContext {
 interface TenantRequestState {
   readonly context: TenantRequestContext;
   status: 'open' | 'closing' | 'closed';
+  durableOutcome?: { readonly code: DurableTenantOutcomeCode; readonly statusCode: number };
   /** Set at preValidation: from then on route code may be using `sql`. */
   routeStarted: boolean;
 }
@@ -146,6 +155,24 @@ function assertTenantRouteConfig(routeOptions: RouteOptions): void {
       'config.permission must be a known permission code and config.permissionScope tenant|resource',
     );
   }
+  const codes = routeOptions.config?.durableErrorCodes;
+  if (codes !== undefined && (!Array.isArray(codes) || codes.length === 0
+    || new Set(codes).size !== codes.length
+    || codes.some((code) => !Object.hasOwn(DURABLE_OUTCOME_STATUS, code)))) {
+    throw new TenantRouteConfigurationError(routeOptions, 'config.durableErrorCodes contains an unknown or duplicate outcome');
+  }
+}
+
+/** Called only by a handler that emitted one of its declared durable outcomes. */
+export function markDurableTenantOutcome(request: FastifyRequest, code: DurableTenantOutcomeCode): void {
+  const state = tenantRequestStates.get(request);
+  if (state?.status !== 'open'
+    || !Object.hasOwn(DURABLE_OUTCOME_STATUS, code)
+    || !request.routeOptions.config.durableErrorCodes?.includes(code)
+    || state.durableOutcome !== undefined) {
+    throw new Error('TENANT_DURABLE_OUTCOME_INVALID');
+  }
+  state.durableOutcome = Object.freeze({ code, statusCode: DURABLE_OUTCOME_STATUS[code] });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -246,12 +273,10 @@ export async function rollbackTenantRequest(request: FastifyRequest): Promise<vo
  * Last route-level onSend hook: runs after serialization and after every other
  * onSend hook, so a serialization or onSend failure is still rolled back.
  *
- *  - status < 400: the tripwire must be complete (else 500
- *    RESOURCE_AUTHORIZATION_CHECK_MISSING and ROLLBACK via onError), then COMMIT;
- *  - status >= 400 sent by the handler: COMMIT (services may persist state
- *    before answering an error, e.g. an expired upload session), except when
- *    the resource check is still pending — then ROLLBACK, nothing an
- *    unverified resource access wrote survives.
+ *  - 2xx: the tripwire must be complete, then COMMIT;
+ *  - 4xx: ROLLBACK unless the handler explicitly marked a route-declared,
+ *    status-matched durable outcome and the resource check is complete;
+ *  - every other status: ROLLBACK.
  *
  * A failed COMMIT throws (connection already released) and becomes a 500.
  */
@@ -264,13 +289,15 @@ async function finalizeTenantTransaction(
   if (state === undefined || state.status !== 'open') return payload;
 
   const { resourceAuthorization } = state.context;
-  if (reply.statusCode < 400) {
+  if (reply.statusCode >= 200 && reply.statusCode < 300) {
     assertResourceAuthorizationComplete(resourceAuthorization);
     await endTransaction(state, 'COMMIT');
-  } else if (getResourceAuthorizationStatus(resourceAuthorization) === 'required_pending') {
-    await endTransaction(state, 'ROLLBACK');
-  } else {
+  } else if (reply.statusCode >= 400 && reply.statusCode < 500
+    && state.durableOutcome?.statusCode === reply.statusCode) {
+    assertResourceAuthorizationComplete(resourceAuthorization);
     await endTransaction(state, 'COMMIT');
+  } else {
+    await endTransaction(state, 'ROLLBACK');
   }
   return payload;
 }
