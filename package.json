@@ -28,6 +28,11 @@
     "test:wompi:sandbox": "node --env-file-if-exists=.env scripts/test-wompi.cjs --sandbox",
     "test:onboarding": "node --env-file=.env scripts/test-onboarding.cjs",
     "test:onboarding:ci": "node scripts/test-onboarding.cjs",
+    "test:authz": "node scripts/test-authz.cjs",
+    "test:authz:db": "node --env-file=.env scripts/test-authz-db.cjs",
+    "test:authz:db:ci": "node scripts/test-authz-db.cjs",
+    "rbac:generate-seed-sql": "node scripts/generate-rbac-seed-sql.cjs",
+    "rbac:check-doc-parity": "node scripts/check-rbac-matrix-doc.cjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
