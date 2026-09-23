@@ -13,43 +13,35 @@ import type {
 } from '../identity/identity-provider.js';
 import { IdentityProfileNotFoundError } from '../identity/identity-provider.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
+import { ApiError, mapDomainError } from './errors.js';
 import { checkDatabaseReady } from './health.js';
+import {
+  recordVerifiedIdentity,
+  setIdentityOnlyRequestContext,
+  setIdentityProfileRequestContext,
+} from './request-context.js';
+import { registerTenantRequestLifecycle, rollbackTenantRequest } from './tenant-request.js';
 
-export interface TenantContext {
-  tenantId: string;
-  userId: string;
-  membershipId: string;
-  requestId: string;
-}
-
-export interface TenantRequestContext {
-  tenant: TenantContext;
-  sql: postgres.ReservedSql;
-}
-
-export interface IdentityOnlyRequestContext {
-  identity: VerifiedIdentity;
-}
-
-export interface IdentityProfileRequestContext {
-  identity: VerifiedIdentity;
-  profile: VerifiedIdentityProfile;
-}
+export { ApiError } from './errors.js';
+export {
+  getIdentityOnlyRequestContext,
+  getIdentityProfileRequestContext,
+  identityAwareRateLimitKey,
+  type IdentityOnlyRequestContext,
+  type IdentityProfileRequestContext,
+} from './request-context.js';
+export {
+  getTenantRequestContext,
+  TenantRouteConfigurationError,
+  type TenantRequestContext,
+} from './tenant-request.js';
+export { markResourceAuthorizationSatisfied } from '../authz/resource-authorization.js';
+export type { TenantContext } from '../tenancy/tenant-context.js';
 
 declare module 'fastify' {
   interface FastifyContextConfig {
     identityProfile?: 'required';
   }
-}
-
-interface ActiveMembershipRow {
-  tenant_id: string;
-  user_id: string;
-  membership_id: string;
-}
-
-interface RequestState extends TenantRequestContext {
-  transactionOpen: boolean;
 }
 
 export interface RateLimitOptions {
@@ -61,7 +53,12 @@ export interface BuildApiOptions {
   database: postgres.Sql;
   identityProvider: IdentityProvider;
   registerPublicRoutes?: (app: FastifyInstance) => void | Promise<void>;
+  /** Identity-authenticated routes without TenantContext (onboarding, /me). */
   registerIdentityOnlyRoutes?: (app: FastifyInstance) => void | Promise<void>;
+  /**
+   * Tenant routes. Every route MUST declare `config.permission` (and may set
+   * `config.permissionScope: 'resource'`); registration fails otherwise.
+   */
   registerRoutes?: (app: FastifyInstance) => void | Promise<void>;
   /** Security Baseline §16: explicit allowlist, never `*` with credentials. Empty = no browser cross-origin caller allowed. */
   corsAllowedOrigins?: string[];
@@ -73,37 +70,7 @@ export interface BuildApiOptions {
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { max: 300, timeWindow: '1 minute' };
 const DEFAULT_READINESS_TIMEOUT_MS = 2000;
 
-export class ApiError extends Error {
-  constructor(
-    readonly statusCode: number,
-    readonly code: string,
-    message: string,
-    readonly headers?: Readonly<Record<string, string>>,
-  ) {
-    super(message);
-  }
-}
-
-const requestStates = new WeakMap<FastifyRequest, RequestState>();
-const identityOnlyStates = new WeakMap<FastifyRequest, IdentityOnlyRequestContext>();
-const identityProfileStates = new WeakMap<FastifyRequest, IdentityProfileRequestContext>();
 const rawRequestBodies = new WeakMap<FastifyRequest, Buffer>();
-
-/**
- * Rate-limit bucket key for a per-route limiter. Once an `identityOnly`/
- * `identityProfile` hook has resolved a verified identity for this request
- * (they run as instance-level `onRequest` hooks, ahead of any per-route
- * hook such as `@fastify/rate-limit`'s automatic `config.rateLimit`
- * wiring), two different identities behind the same IP get independent
- * buckets instead of sharing one. Before identity is available, IP is the
- * only signal there is, so it stays the fallback.
- */
-export function identityAwareRateLimitKey(request: FastifyRequest): string {
-  const identity = identityProfileStates.get(request)?.identity
-    ?? identityOnlyStates.get(request)?.identity;
-  if (identity) return `identity:${identity.identityProvider}:${identity.externalSubject}`;
-  return `ip:${request.ip}`;
-}
 
 export function getRawRequestBody(request: FastifyRequest): Buffer {
   const body = rawRequestBodies.get(request);
@@ -111,43 +78,43 @@ export function getRawRequestBody(request: FastifyRequest): Buffer {
   return body;
 }
 
-async function finishTransaction(
+function authenticationRequired(): ApiError {
+  return new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
+}
+
+/**
+ * ADR-006 boundary: the provider only proves WHO the caller is. Only
+ * `identityProvider` + `externalSubject` are kept (bounded like the users.*
+ * columns); any other field a provider returns — claims, metadata, roles —
+ * is dropped here and never reaches membership discovery or authorization.
+ */
+async function authenticate(
+  identityProvider: IdentityProvider,
   request: FastifyRequest,
-  action: 'COMMIT' | 'ROLLBACK',
-): Promise<void> {
-  const state = requestStates.get(request);
-  if (!state?.transactionOpen) return;
-
-  state.transactionOpen = false;
+): Promise<VerifiedIdentity> {
+  let verified: VerifiedIdentity | null;
   try {
-    await state.sql.unsafe(action);
-  } finally {
-    state.sql.release();
+    verified = await identityProvider.verifyRequest(request);
+  } catch {
+    throw authenticationRequired();
   }
-}
 
-export function getTenantRequestContext(request: FastifyRequest): TenantRequestContext {
-  const state = requestStates.get(request);
-  if (!state?.transactionOpen) {
-    throw new ApiError(500, 'TENANT_CONTEXT_UNAVAILABLE', 'Tenant context is unavailable.');
+  if (!verified
+    || typeof verified.identityProvider !== 'string'
+    || verified.identityProvider.length === 0
+    || verified.identityProvider.length > 32
+    || typeof verified.externalSubject !== 'string'
+    || verified.externalSubject.length === 0
+    || verified.externalSubject.length > 255) {
+    throw authenticationRequired();
   }
-  return state;
-}
 
-export function getIdentityOnlyRequestContext(request: FastifyRequest): IdentityOnlyRequestContext {
-  const state = identityOnlyStates.get(request);
-  if (!state) {
-    throw new ApiError(500, 'IDENTITY_CONTEXT_UNAVAILABLE', 'Identity context is unavailable.');
-  }
-  return state;
-}
-
-export function getIdentityProfileRequestContext(request: FastifyRequest): IdentityProfileRequestContext {
-  const state = identityProfileStates.get(request);
-  if (!state) {
-    throw new ApiError(500, 'IDENTITY_PROFILE_CONTEXT_UNAVAILABLE', 'Identity profile context is unavailable.');
-  }
-  return state;
+  const identity: VerifiedIdentity = Object.freeze({
+    identityProvider: verified.identityProvider,
+    externalSubject: verified.externalSubject,
+  });
+  recordVerifiedIdentity(request, identity);
+  return identity;
 }
 
 function mapFrameworkError(error: unknown): ApiError | null {
@@ -192,7 +159,13 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
   });
 
   app.setErrorHandler(async (error, request, reply) => {
-    const mapped = error instanceof ApiError ? error : mapFrameworkError(error);
+    // Backstop: an error response never leaves a tenant transaction open
+    // (the tenant context's onError hook normally rolled back already).
+    await rollbackTenantRequest(request);
+
+    const mapped = error instanceof ApiError
+      ? error
+      : mapDomainError(error) ?? mapFrameworkError(error);
     const statusCode = mapped?.statusCode ?? 500;
     const code = mapped?.code ?? 'INTERNAL_ERROR';
     const message = mapped?.message ?? 'The request could not be completed.';
@@ -282,70 +255,63 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
 
   // Identity-only routes authenticate and rate-limit but deliberately do not
   // resolve a membership, create TenantContext or reserve a DB connection.
-  // This is the narrow bootstrap surface used by onboarding.
-  const registerIdentityOnlyRoutes = options.registerIdentityOnlyRoutes;
-  if (registerIdentityOnlyRoutes) {
-    app.register(async (identityOnlyApp) => {
-      const checkRateLimitBeforeAuth = identityOnlyApp.createRateLimit();
-      identityOnlyApp.addHook('onRequest', async (request, reply) => {
-        const limit = await checkRateLimitBeforeAuth(request);
-        if (!limit.isAllowed && limit.isExceeded) {
-          reply.header('retry-after', limit.ttlInSeconds);
-          return reply.code(429).send({
-            error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests.', request_id: request.id },
-          });
-        }
-      });
-
-      identityOnlyApp.addHook('onRequest', async (request) => {
-        let identity: VerifiedIdentity | null;
-        try {
-          identity = await options.identityProvider.verifyRequest(request);
-        } catch {
-          throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
-        }
-
-        if (!identity
-          || !identity.identityProvider
-          || identity.identityProvider.length > 32
-          || !identity.externalSubject
-          || identity.externalSubject.length > 255) {
-          throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
-        }
-
-        identityOnlyStates.set(request, { identity });
-
-        if (request.routeOptions.config.identityProfile === 'required') {
-          let profile: VerifiedIdentityProfile;
-          try {
-            profile = await options.identityProvider.getIdentityProfile(identity);
-          } catch (error) {
-            if (error instanceof IdentityProfileNotFoundError
-              || (error as { code?: string })?.code === 'IDENTITY_PROFILE_NOT_FOUND') {
-              throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
-            }
-            throw new ApiError(
-              503,
-              'IDENTITY_PROVIDER_UNAVAILABLE',
-              'The identity provider is temporarily unavailable.',
-              { 'retry-after': '5' },
-            );
-          }
-
-          if (profile.emailVerified !== true) {
-            throw new ApiError(403, 'IDENTITY_EMAIL_UNVERIFIED', 'A verified email address is required.');
-          }
-
-          identityProfileStates.set(request, { identity, profile });
-        }
-      });
-
-      await registerIdentityOnlyRoutes(identityOnlyApp);
+  // This is the narrow bootstrap surface: onboarding and GET /api/v1/me.
+  app.register(async (identityOnlyApp) => {
+    // Same pre-auth manual rate-limit reasoning as the tenant context below.
+    const checkRateLimitBeforeAuth = identityOnlyApp.createRateLimit();
+    identityOnlyApp.addHook('onRequest', async (request, reply) => {
+      const limit = await checkRateLimitBeforeAuth(request);
+      if (!limit.isAllowed && limit.isExceeded) {
+        reply.header('retry-after', limit.ttlInSeconds);
+        return reply.code(429).send({
+          error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests.', request_id: request.id },
+        });
+      }
     });
-  }
 
-  // Everything else lives in its own encapsulated context: the tenant
-  // transaction hooks below must never run for /health/*.
+    identityOnlyApp.addHook('onRequest', async (request) => {
+      const identity = await authenticate(options.identityProvider, request);
+      setIdentityOnlyRequestContext(request, identity);
+
+      // Provider profile is opt-in per route (S1-01 onboarding/invitation);
+      // it is never fetched for /me or for tenant routes.
+      if (request.routeOptions.config.identityProfile === 'required') {
+        let profile: VerifiedIdentityProfile;
+        try {
+          profile = await options.identityProvider.getIdentityProfile(identity);
+        } catch (error) {
+          if (error instanceof IdentityProfileNotFoundError
+            || (error as { code?: string })?.code === 'IDENTITY_PROFILE_NOT_FOUND') {
+            throw authenticationRequired();
+          }
+          throw new ApiError(
+            503,
+            'IDENTITY_PROVIDER_UNAVAILABLE',
+            'The identity provider is temporarily unavailable.',
+            { 'retry-after': '5' },
+          );
+        }
+
+        if (profile.emailVerified !== true) {
+          throw new ApiError(403, 'IDENTITY_EMAIL_UNVERIFIED', 'A verified email address is required.');
+        }
+
+        setIdentityProfileRequestContext(request, identity, profile);
+      }
+    });
+
+    // A permission here would be silently ignored (no TenantContext): refuse it.
+    identityOnlyApp.addHook('onRoute', (routeOptions) => {
+      if (routeOptions.config?.permission !== undefined || routeOptions.config?.permissionScope !== undefined) {
+        throw new Error(`IDENTITY_ROUTE_CONFIGURATION_INVALID ${String(routeOptions.method)} ${routeOptions.url}: permission requires a tenant route`);
+      }
+    });
+
+    if (options.registerIdentityOnlyRoutes) await options.registerIdentityOnlyRoutes(identityOnlyApp);
+  });
+
+  // Tenant routes live in their own encapsulated context: the tenant
+  // transaction hooks below must never run for /health/* or identity-only.
   app.register(async (protectedApp) => {
     // Fastify always runs a context's own instance-level `onRequest` hooks
     // before a route's per-route hook array -- and that per-route array is
@@ -370,73 +336,12 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
       }
     });
 
-    protectedApp.addHook('onRequest', async (request) => {
-      let identity;
-      try {
-        identity = await options.identityProvider.verifyRequest(request);
-      } catch {
-        throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
-      }
-
-      if (!identity) {
-        throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
-      }
-
-      const memberships = await options.database<ActiveMembershipRow[]>`
-        SELECT user_id, membership_id, tenant_id
-        FROM app.bootstrap_list_active_memberships(
-          ${identity.identityProvider},
-          ${identity.externalSubject}
-        )
-      `;
-
-      if (memberships.length === 0) {
-        throw new ApiError(403, 'ACTIVE_MEMBERSHIP_REQUIRED', 'An active membership is required.');
-      }
-      if (memberships.length !== 1) {
-        throw new ApiError(409, 'TENANT_SELECTION_REQUIRED', 'A workshop must be selected.');
-      }
-
-      const membership = memberships[0];
-      const sql = await options.database.reserve();
-      try {
-        await sql.unsafe('BEGIN');
-        await sql`
-          SELECT
-            set_config('app.tenant_id', ${membership.tenant_id}, true),
-            set_config('app.user_id', ${membership.user_id}, true),
-            set_config('app.membership_id', ${membership.membership_id}, true),
-            set_config('app.request_id', ${request.id}, true)
-        `;
-      } catch (error) {
-        await sql.unsafe('ROLLBACK').catch(() => undefined);
-        sql.release();
-        throw error;
-      }
-
-      requestStates.set(request, {
-        sql,
-        transactionOpen: true,
-        tenant: {
-          tenantId: membership.tenant_id,
-          userId: membership.user_id,
-          membershipId: membership.membership_id,
-          requestId: request.id,
-        },
-      });
-    });
-
-    protectedApp.addHook('onSend', async (request, _reply, payload) => {
-      await finishTransaction(request, 'COMMIT');
-      return payload;
-    });
-
-    protectedApp.addHook('onError', async (request) => {
-      await finishTransaction(request, 'ROLLBACK');
-    });
-
-    protectedApp.addHook('onResponse', async (request) => {
-      await finishTransaction(request, 'ROLLBACK');
+    // S1-02: identity → memberships → X-Tenant-Id → one transaction →
+    // revalidation → GUCs → RBAC rows → TenantContext → permission guard →
+    // handler → resource tripwire → COMMIT/ROLLBACK (see ./tenant-request.ts).
+    registerTenantRequestLifecycle(protectedApp, {
+      database: options.database,
+      authenticate: (request) => authenticate(options.identityProvider, request),
     });
 
     if (options.registerRoutes) await options.registerRoutes(protectedApp);
