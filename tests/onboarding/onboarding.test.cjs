@@ -537,6 +537,90 @@ test('LOW-04: Unicode/emoji at the 200-code-point boundary is never split mid-ch
   assert.equal([...rowB.full_name].length, 200);
 });
 
+async function onboardWithProviderFullName(label, fullName) {
+  const identity = addIdentity(`fullname-${label}`, { fullName });
+  const response = await postOnboarding(identity, validPayload(`Provider Name ${label}`));
+  const rows = await admin`SELECT full_name FROM public.users WHERE external_subject = ${identity.subject}`;
+  return { response, rows };
+}
+
+function hasLoneSurrogateOrReplacement(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0xfffd) return true;
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function assertProviderFullNameNulled(label, fullName) {
+  const { response, rows } = await onboardWithProviderFullName(label, fullName);
+  assert.equal(response.statusCode, 201, JSON.stringify({ label, body: response.body }));
+  assert.equal(rows.length, 1, `${label}: the JIT user must still be provisioned`);
+  assert.equal(rows[0].full_name, null, `${label}: full_name must be NULL`);
+}
+
+test('NEW-LOW-01: a provider fullName with multiple NULs never 500s; onboarding succeeds with full_name NULL', async () => {
+  await assertProviderFullNameNulled('multi-nul', 'Ana\u0000Maria\u0000');
+});
+
+test('NEW-LOW-01: a provider fullName with multiple C1 controls (and DEL) is nulled, never partially stripped', async () => {
+  await assertProviderFullNameNulled('multi-c1', '\u0080Ana\u0081Maria\u009f');
+  await assertProviderFullNameNulled('del', 'Ana\u007fMaria');
+});
+
+test('NEW-LOW-01: a provider fullName with a bidi override (U+202A-U+202E) is nulled', async () => {
+  for (const codePoint of [0x202a, 0x202e]) {
+    await assertProviderFullNameNulled(`bidi-override-${codePoint.toString(16)}`, `Ana${String.fromCodePoint(codePoint)}airaM`);
+  }
+});
+
+test('NEW-LOW-01: a provider fullName with a bidi isolate (U+2066-U+2069) is nulled', async () => {
+  for (const codePoint of [0x2066, 0x2069]) {
+    await assertProviderFullNameNulled(`bidi-isolate-${codePoint.toString(16)}`, `Ana${String.fromCodePoint(codePoint)}Maria`);
+  }
+});
+
+test('NEW-LOW-01: a whitespace-only provider fullName persists as NULL', async () => {
+  await assertProviderFullNameNulled('spaces-only', '      ');
+});
+
+test('NEW-LOW-01: a legitimate Unicode provider fullName survives NFC + whitespace collapse unchanged otherwise', async () => {
+  const { response, rows } = await onboardWithProviderFullName('legit', '  José   Ñandú 🚗  ');
+  assert.equal(response.statusCode, 201);
+  assert.equal(rows[0].full_name, 'José Ñandú 🚗');
+});
+
+test('NEW-LOW-01: a long non-ASCII provider fullName is truncated to exactly 200 code points without a lone surrogate', async () => {
+  const long = `${'ñ'.repeat(150)}${'🚗'.repeat(60)}`;
+  assert.equal([...long].length, 210);
+  const { response, rows } = await onboardWithProviderFullName('long-unicode', long);
+  assert.equal(response.statusCode, 201);
+  const stored = rows[0].full_name;
+  assert.equal([...stored].length, 200);
+  assert.equal(stored, `${'ñ'.repeat(150)}${'🚗'.repeat(50)}`);
+  assert.equal(hasLoneSurrogateOrReplacement(stored), false);
+});
+
+test('NEW-LOW-01: truncation at the emoji boundary never leaves an isolated high or low surrogate', async () => {
+  const { response, rows } = await onboardWithProviderFullName('emoji-boundary', `${'A'.repeat(199)}🚗🚙`);
+  assert.equal(response.statusCode, 201);
+  const stored = rows[0].full_name;
+  assert.equal(stored, `${'A'.repeat(199)}🚗`);
+  assert.equal([...stored].length, 200);
+  assert.equal(hasLoneSurrogateOrReplacement(stored), false);
+  const last = stored.charCodeAt(stored.length - 1);
+  assert.ok(last >= 0xdc00 && last <= 0xdfff, 'the final UTF-16 unit is the low half of a complete pair');
+  const beforeLast = stored.charCodeAt(stored.length - 2);
+  assert.ok(beforeLast >= 0xd800 && beforeLast <= 0xdbff, 'preceded by its high half');
+});
+
 test('MEDIUM-03: normalizedText collapses internal whitespace, applies NFC and rejects bidi controls', async () => {
   const collapseIdentity = addIdentity('text-normalization-collapse');
 

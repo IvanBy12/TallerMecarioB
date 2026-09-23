@@ -113,23 +113,25 @@ export const onboardingRequestSchema = z.object({
 }).strict();
 
 /**
- * Provider-sourced (Clerk) `fullName` is sanitized, never a 403: this data
- * did not come from the request body, so blocking onboarding over an
- * awkward-but-real name is the wrong failure mode. NFC -> trim -> collapse
- * whitespace -> empty becomes null -> Unicode-safe truncation to 200 code
- * points (never split a surrogate pair or a combining sequence mid-cluster
- * by slicing UTF-16 code units). A malformed string (lone surrogate, NUL)
- * degrades to null rather than persisting invalid data or throwing.
+ * Provider-sourced (Clerk) `fullName` never blocks onboarding: this data did
+ * not come from the request body, so an invalid name degrades to null
+ * instead of a 403/500. Policy: non-string or malformed Unicode (lone
+ * surrogate) -> null; NFC; any C0/DEL/C1 control or bidi override/isolate
+ * character anywhere -> null (never partially stripped, so a potentially
+ * ambiguous name is never silently rewritten); trim + collapse whitespace;
+ * empty -> null; truncate to 200 code points. Truncation is Unicode-safe by
+ * code point only -- it never splits a surrogate pair, but it does not
+ * preserve grapheme clusters (a combining or ZWJ sequence may be cut).
  */
 function normalizeProviderFullName(raw: string | null): string | null {
-  if (raw === null) return null;
+  if (typeof raw !== 'string') return null;
   if (!hasValidUnicode(raw)) return null;
-  let value = raw.normalize('NFC').trim().replace(WHITESPACE_RUN, ' ');
-  value = value.replace(PROHIBITED_CONTROL_CHARACTERS, '').trim();
+  const normalized = raw.normalize('NFC');
+  if (PROHIBITED_CONTROL_CHARACTERS.test(normalized) || BIDI_CONTROL_CHARACTERS.test(normalized)) return null;
+  const value = normalized.trim().replace(WHITESPACE_RUN, ' ');
   if (value.length === 0) return null;
   const codePoints = [...value];
-  if (codePoints.length > 200) value = codePoints.slice(0, 200).join('');
-  return value;
+  return codePoints.length > 200 ? codePoints.slice(0, 200).join('') : value;
 }
 
 export const verifiedProfileSchema = z.object({
