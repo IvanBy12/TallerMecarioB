@@ -39,6 +39,16 @@ function findRbacMigrationPath() {
   return candidates[0];
 }
 
+/**
+ * Canonicalize line endings only (CRLF / lone CR -> LF). The working-tree copy
+ * of the migration may be CRLF on Windows checkouts (core.autocrlf) while the
+ * generator always emits LF. Nothing else is normalized: internal whitespace,
+ * SQL content, ordering, codes, roles, scopes and comments must still match.
+ */
+function normalizeEol(value) {
+  return value.replace(/\r\n?/g, '\n');
+}
+
 test('migration GENERATED RBAC V1 block matches RBAC_MATRIX_V1 exactly', () => {
   const migrationPath = findRbacMigrationPath();
   const expected = buildGeneratedBlock(rbac);
@@ -46,8 +56,8 @@ test('migration GENERATED RBAC V1 block matches RBAC_MATRIX_V1 exactly', () => {
 
   assert.ok(actual, `no GENERATED RBAC V1 block found in ${migrationPath}`);
   assert.equal(
-    actual,
-    expected,
+    normalizeEol(actual),
+    normalizeEol(expected),
     `GENERATED RBAC V1 block in ${migrationPath} is stale — regenerate with:\n` +
       '  node scripts/generate-rbac-seed-sql.cjs',
   );

@@ -13,7 +13,6 @@ const {
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const postgres = require('postgres');
-const { expectedMigrationCount } = require('./migration-count.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -58,14 +57,28 @@ function runChild(args, env, timeout = 90000) {
   if (result.status !== 0) throw new Error(`CHILD_PROCESS_FAILED_${result.status}`);
 }
 
-function makePreviousMigrationFolder() {
+const ONBOARDING_MIGRATION_TAG = '0005_s1_01_onboarding';
+
+function readJournal() {
+  return JSON.parse(readFileSync(resolve('drizzle/meta/_journal.json'), 'utf8'));
+}
+
+/**
+ * Locate the onboarding migration by its stable journal tag, never by position:
+ * later migrations (0006, 0007, ...) are appended after it.
+ */
+function onboardingMigrationIndex(journal) {
+  const index = journal.entries.findIndex((entry) => entry.tag === ONBOARDING_MIGRATION_TAG);
+  if (index < 0) throw new Error('ONBOARDING_MIGRATION_NOT_FOUND');
+  return index;
+}
+
+function makeMigrationFolder(journal, entries) {
   const root = mkdtempSync(join(tmpdir(), 'tallermecario-onboarding-migrations-'));
   const meta = join(root, 'meta');
   mkdirSync(meta);
-  const journal = JSON.parse(readFileSync(resolve('drizzle/meta/_journal.json'), 'utf8'));
-  journal.entries = journal.entries.slice(0, -1);
-  writeFileSync(join(meta, '_journal.json'), `${JSON.stringify(journal, null, 2)}\n`);
-  for (const entry of journal.entries) {
+  writeFileSync(join(meta, '_journal.json'), `${JSON.stringify({ ...journal, entries }, null, 2)}\n`);
+  for (const entry of entries) {
     copyFileSync(resolve(`drizzle/${entry.tag}.sql`), join(root, `${entry.tag}.sql`));
   }
   return root;
@@ -74,6 +87,11 @@ function makePreviousMigrationFolder() {
 async function main() {
   const sourceUrl = databaseUrlFromEnvironment();
   assertLocal(sourceUrl);
+  const journal = readJournal();
+  const onboardingIndex = onboardingMigrationIndex(journal);
+  const migrationsBeforeOnboarding = journal.entries.slice(0, onboardingIndex);
+  const migrationsThroughOnboarding = journal.entries.slice(0, onboardingIndex + 1);
+  const fullMigrationChain = journal.entries;
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
   const databaseName = `tallermecario_onboarding_${suffix}`;
   const loginRole = `tm_onboarding_${suffix}`;
@@ -92,7 +110,8 @@ async function main() {
   let cleanupPassed = false;
   let originalRoles = new Set();
   const compiledRoot = mkdtempSync(join(tmpdir(), 'tallermecario-onboarding-build-'));
-  const previousMigrations = makePreviousMigrationFolder();
+  const previousMigrations = makeMigrationFolder(journal, migrationsBeforeOnboarding);
+  const onboardingMigrations = makeMigrationFolder(journal, migrationsThroughOnboarding);
 
   try {
     const [server] = await maintenance`SELECT pg_catalog.current_database() AS database`;
@@ -117,22 +136,37 @@ async function main() {
       SELECT (SELECT count(*)::int FROM drizzle.__drizzle_migrations) AS count,
         to_regprocedure('app.bootstrap_provision_user(text,text,uuid,text,text,text)') IS NOT NULL AS has_onboarding
     `;
-    if (migrationState.count !== expectedMigrationCount() - 1 || migrationState.has_onboarding) {
+    if (migrationState.count !== migrationsBeforeOnboarding.length || migrationState.has_onboarding) {
       throw new Error('PREVIOUS_MIGRATION_STATE_INVALID');
     }
 
-    runChild(['scripts/migrate.cjs'], { ...process.env, DATABASE_URL: testUrl.toString() });
+    runChild(['scripts/migrate.cjs'], {
+      ...process.env,
+      DATABASE_URL: testUrl.toString(),
+      MIGRATIONS_FOLDER: onboardingMigrations,
+    });
     [migrationState] = await testAdmin`
       SELECT (SELECT count(*)::int FROM drizzle.__drizzle_migrations) AS count,
         to_regprocedure('app.bootstrap_provision_user(text,text,uuid,text,text,text)') IS NOT NULL AS has_onboarding,
         (SELECT count(*)::int FROM public.roles WHERE code IN ('owner','admin','service_advisor','technician')) AS roles
     `;
-    if (migrationState.count !== expectedMigrationCount()
+    if (migrationState.count !== migrationsThroughOnboarding.length
       || !migrationState.has_onboarding
       || migrationState.roles !== 4) {
       throw new Error('ONBOARDING_MIGRATION_INVALID');
     }
     process.stdout.write('UPGRADE_TO_0005_PASS\n');
+
+    // Apply the remainder of the real chain (0006+) so the suite runs against the full schema.
+    runChild(['scripts/migrate.cjs'], { ...process.env, DATABASE_URL: testUrl.toString() });
+    [migrationState] = await testAdmin`
+      SELECT (SELECT count(*)::int FROM drizzle.__drizzle_migrations) AS count,
+        to_regprocedure('app.bootstrap_provision_user(text,text,uuid,text,text,text)') IS NOT NULL AS has_onboarding
+    `;
+    if (migrationState.count !== fullMigrationChain.length || !migrationState.has_onboarding) {
+      throw new Error('FULL_MIGRATION_CHAIN_INVALID');
+    }
+    process.stdout.write('FULL_MIGRATION_CHAIN_PASS\n');
 
     await testAdmin.unsafe(
       `CREATE ROLE ${loginRole} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '${loginPassword}'`,
@@ -175,6 +209,7 @@ async function main() {
     }
     rmSync(compiledRoot, { recursive: true, force: true });
     rmSync(previousMigrations, { recursive: true, force: true });
+    rmSync(onboardingMigrations, { recursive: true, force: true });
 
     if (databaseCreated) {
       const [remaining] = await maintenance`
@@ -196,6 +231,8 @@ main().catch((error) => {
   const safe = new Set([
     'DATABASE_CONFIGURATION_REQUIRED', 'REFUSING_NON_LOCAL_DATABASE',
     'DATABASE_CONNECTION_FAILED', 'ONBOARDING_TEST_FAILED', 'TEST_DATABASE_CLEANUP_FAILED',
+    'ONBOARDING_MIGRATION_NOT_FOUND', 'PREVIOUS_MIGRATION_STATE_INVALID', 'ONBOARDING_MIGRATION_INVALID',
+    'FULL_MIGRATION_CHAIN_INVALID',
   ]);
   process.stderr.write(`${safe.has(error.message) ? error.message : 'ONBOARDING_TEST_RUN_FAILED'}\n`);
   process.exitCode = 1;
