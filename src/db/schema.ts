@@ -156,9 +156,18 @@ export const rolePermissions = pgTable(
   {
     roleId: uuid('role_id').notNull().references(() => roles.id),
     permissionId: uuid('permission_id').notNull().references(() => permissions.id),
+    /** Scope de la celda role×permission. Ver RBAC_MATRIX_V1 (src/authz/rbac-matrix.ts). */
+    resourceScope: varchar('resource_scope', { length: 16 }).notNull(),
     createdAt: createdAt(),
   },
-  (t) => [primaryKey({ name: 'role_permissions_pk', columns: [t.roleId, t.permissionId] })],
+  (t) => [
+    primaryKey({ name: 'role_permissions_pk', columns: [t.roleId, t.permissionId] }),
+    enumCheck('role_permissions_resource_scope_check', t.resourceScope, [
+      'tenant',
+      'assigned',
+      'quality_control',
+    ]),
+  ],
 );
 
 /** Planes SaaS. Tabla global sin `tenant_id`; read-only para el runtime de tenant. */
