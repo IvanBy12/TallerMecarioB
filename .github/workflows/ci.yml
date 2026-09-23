@@ -74,6 +74,13 @@ jobs:
       - name: TenantContext + RBAC request lifecycle (S1-02)
         run: npm run test:tenant-context:api:ci
 
+      # Hermetic: per-run RSA/Svix keys and a fake Clerk Backend API; no Clerk
+      # instance, no secrets, no internet (the runner strips CLERK_* vars).
+      - name: Clerk identity lifecycle (S1-03)
+        run: |
+          npm run test:identity:ci
+          npm run test:identity:upgrade:ci
+
       - name: API health/readiness, CORS, rate limiting, security headers
         run: npm run test:api:security:ci
 
