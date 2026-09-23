@@ -34,6 +34,7 @@
   },
   "homepage": "https://github.com/IvanBy12/TallerMecarioB#readme",
   "dependencies": {
+    "@clerk/nextjs": "^7.9.5",
     "@fastify/cors": "^11.3.0",
     "@fastify/helmet": "^13.1.1",
     "@fastify/rate-limit": "^11.2.0",
