@@ -8,12 +8,14 @@ const root = process.env.TEST_WOMPI_MODULE_ROOT;
 if (!root) throw new Error('TEST_WOMPI_MODULE_ROOT is required');
 const { WompiAdapter } = require(join(root, 'integrations/wompi/adapter.js'));
 const { WompiAdapterError } = require(join(root, 'integrations/wompi/errors.js'));
-const { normalizeWompiTransaction } = require(join(root, 'integrations/wompi/contracts.js'));
+const {
+  assertNoRawPaymentInstrument,
+  normalizeWompiTransaction,
+} = require(join(root, 'integrations/wompi/contracts.js'));
 const { createTransactionIntegritySignature, createWebhookChecksum } = require(join(root, 'integrations/wompi/crypto.js'));
 const { verifyWompiWebhook } = require(join(root, 'integrations/wompi/webhook.js'));
 const { handleSubscriptionChargeRequested } = require(join(root, 'integrations/wompi/outbox-handler.js'));
 const { loadWompiConfig } = require(join(root, 'integrations/wompi/config.js'));
-const { subscriptionStatusAfterWompiPayment } = require(join(root, 'integrations/wompi/subscription-state.js'));
 const { registerWompiWebhookRoute } = require(join(root, 'integrations/wompi/routes.js'));
 const { buildApi } = require(join(root, 'api/app.js'));
 
@@ -175,6 +177,62 @@ test('adapter never accepts PAN or CVV fields', async () => {
   }), /RAW_PAYMENT_INSTRUMENT_FORBIDDEN/);
 });
 
+test('raw PAN, CVV and expiration aliases are rejected recursively', () => {
+  const forbiddenKeys = [
+    'PAN',
+    'card-number',
+    'C V V',
+    'security-code',
+    'exp_month',
+    'exp_year',
+    'expiry_month',
+    'expiry_year',
+    'expiry_date',
+    'expiration_month',
+    'expiration_year',
+    'expiration_date',
+    'ExpirationDate',
+  ];
+  for (const key of forbiddenKeys) {
+    assert.throws(() => assertNoRawPaymentInstrument({
+      envelope: [{ payment_method: { card: { [key]: 'raw-card-data' } } }],
+    }), /RAW_PAYMENT_INSTRUMENT_FORBIDDEN/, key);
+  }
+});
+
+test('raw-payment guard allows opaque tokens and payment_source_id recursively', () => {
+  assert.doesNotThrow(() => assertNoRawPaymentInstrument({
+    envelope: [{
+      token: 'tok_test_opaque',
+      acceptance_token: 'acceptance-token',
+      payment_source_id: '3891',
+    }],
+  }));
+});
+
+test('adapter rejects custom serialization that would emit card data', async () => {
+  let calls = 0;
+  const adapter = new WompiAdapter(testConfig, {
+    fetch: async () => { calls += 1; throw new Error('must not call'); },
+  });
+  await assert.rejects(adapter.createTransaction({
+    acceptanceToken: 'token',
+    amountMinor: 1000,
+    currency: 'COP',
+    customerEmail: 'a@example.invalid',
+    paymentMethod: {
+      toJSON: () => ({
+        card_number: '4242424242424242',
+        cvv: '123',
+        exp_month: '12',
+        exp_year: '2030',
+      }),
+    },
+    reference: transaction().reference,
+  }), /RAW_PAYMENT_INSTRUMENT_FORBIDDEN/);
+  assert.equal(calls, 0);
+});
+
 test('adapter creates a payment source from an opaque token only', async () => {
   let payload;
   const adapter = new WompiAdapter(testConfig, {
@@ -307,13 +365,16 @@ test('webhook environment mismatch is rejected before persistence', () => {
   }), /WOMPI_WEBHOOK_ENVIRONMENT_INVALID/);
 });
 
-test('verified payment statuses use only canonical subscription transitions', () => {
-  assert.equal(subscriptionStatusAfterWompiPayment('trialing', 'PENDING'), 'trialing');
-  assert.equal(subscriptionStatusAfterWompiPayment('trialing', 'APPROVED'), 'active');
-  assert.equal(subscriptionStatusAfterWompiPayment('active', 'DECLINED'), 'past_due');
-  assert.equal(subscriptionStatusAfterWompiPayment('active', 'ERROR'), 'active');
-  assert.equal(subscriptionStatusAfterWompiPayment('active', 'VOIDED'), 'active');
-  assert.equal(subscriptionStatusAfterWompiPayment('cancelled', 'APPROVED'), 'cancelled');
+test('webhook rejects nested raw card expiration data before persistence', () => {
+  const fixture = signedWebhook({
+    data: { transaction: transaction({ payment_method: { card: { expiry_year: '2030' } } }) },
+  });
+  assert.throws(() => verifyWompiWebhook({
+    rawBody: fixture.rawBody,
+    headerChecksum: fixture.event.signature.checksum,
+    eventSecret: fixture.eventSecret,
+    expectedEnvironment: 'test',
+  }), /WOMPI_WEBHOOK_PAYLOAD_INVALID/);
 });
 
 test('outbox charge handler reconciles an existing provider transaction instead of charging twice', async () => {

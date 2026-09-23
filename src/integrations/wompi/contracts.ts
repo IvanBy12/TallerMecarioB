@@ -99,19 +99,42 @@ export function normalizeWompiTransaction(transaction: WompiTransaction): Normal
   };
 }
 
-const forbiddenPaymentKeys = new Set(['pan', 'card_number', 'cardnumber', 'cvv', 'cvc', 'security_code']);
+const forbiddenPaymentKeys = new Set([
+  'pan',
+  'cardnumber',
+  'cvv',
+  'cvc',
+  'securitycode',
+  'expmonth',
+  'expyear',
+  'expirymonth',
+  'expiryyear',
+  'expirydate',
+  'expirationmonth',
+  'expirationyear',
+  'expirationdate',
+]);
+
+function normalizePaymentKey(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 
 export function assertNoRawPaymentInstrument(value: unknown): void {
   const pending: unknown[] = [value];
   while (pending.length > 0) {
     const current = pending.pop();
     if (!current || typeof current !== 'object') continue;
+    if (typeof (current as { toJSON?: unknown }).toJSON === 'function') {
+      throw new Error('RAW_PAYMENT_INSTRUMENT_FORBIDDEN');
+    }
     if (Array.isArray(current)) {
       pending.push(...current);
       continue;
     }
     for (const [key, child] of Object.entries(current)) {
-      if (forbiddenPaymentKeys.has(key.toLowerCase())) throw new Error('RAW_PAYMENT_INSTRUMENT_FORBIDDEN');
+      if (forbiddenPaymentKeys.has(normalizePaymentKey(key))) {
+        throw new Error('RAW_PAYMENT_INSTRUMENT_FORBIDDEN');
+      }
       pending.push(child);
     }
   }

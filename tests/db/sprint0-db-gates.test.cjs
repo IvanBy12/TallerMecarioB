@@ -502,6 +502,85 @@ test.describe('bootstrap allowlist', () => {
       subscription_status: 'past_due', billing_events: 3,
     });
   });
+
+  test('app.apply_wompi_payment_status owns the complete subscription transition matrix', async () => {
+    const cases = [
+      ['trialing', 'PENDING', 'trialing'],
+      ['trialing', 'APPROVED', 'active'],
+      ['trialing', 'DECLINED', 'trialing'],
+      ['trialing', 'ERROR', 'trialing'],
+      ['trialing', 'VOIDED', 'trialing'],
+      ['active', 'PENDING', 'active'],
+      ['active', 'APPROVED', 'active'],
+      ['active', 'DECLINED', 'past_due'],
+      ['active', 'ERROR', 'active'],
+      ['active', 'VOIDED', 'active'],
+      ['past_due', 'PENDING', 'past_due'],
+      ['past_due', 'APPROVED', 'active'],
+      ['past_due', 'DECLINED', 'past_due'],
+      ['past_due', 'ERROR', 'past_due'],
+      ['past_due', 'VOIDED', 'past_due'],
+      ['suspended', 'PENDING', 'suspended'],
+      ['suspended', 'APPROVED', 'active'],
+      ['suspended', 'DECLINED', 'suspended'],
+      ['suspended', 'ERROR', 'suspended'],
+      ['suspended', 'VOIDED', 'suspended'],
+      ['cancelled', 'PENDING', 'cancelled'],
+      ['cancelled', 'APPROVED', 'cancelled'],
+      ['cancelled', 'DECLINED', 'cancelled'],
+      ['cancelled', 'ERROR', 'cancelled'],
+      ['cancelled', 'VOIDED', 'cancelled'],
+    ];
+
+    for (const [initialStatus, providerStatus, expectedStatus] of cases) {
+      const tenant = id();
+      const subscription = id();
+      const payment = id();
+      const reference = `ilvox_pay_${payment}`;
+      const transaction = `tx-${payment}`;
+      const businessId = createHash('sha256')
+        .update(`wompi|${transaction}|${providerStatus}`)
+        .digest('hex');
+      const occurredAt = new Date('2026-09-19T03:00:00.000Z');
+
+      await fixture(async (tx) => {
+        await tx`INSERT INTO workshops ${tx({ id: tenant, slug: `w-${tenant}`, legal_name: 'T', display_name: 'T' })}`;
+        await tx`INSERT INTO subscriptions ${tx({
+          id: subscription,
+          tenant_id: tenant,
+          plan_id: id(),
+          status: initialStatus,
+          current_period_start: new Date(),
+          current_period_end: new Date(Date.now() + 86400000),
+          cancelled_at: initialStatus === 'cancelled' ? occurredAt : null,
+        })}`;
+        await tx`INSERT INTO payments ${tx({
+          id: payment,
+          tenant_id: tenant,
+          subscription_id: subscription,
+          environment: 'test',
+          reference,
+          amount: 4990000,
+        })}`;
+      });
+
+      let outcome;
+      await h.inTx(worker, tenant, async (tx) => {
+        [outcome] = await tx`
+          SELECT app.apply_wompi_payment_status(
+            ${id()}::uuid, ${id()}::uuid, ${businessId}, ${transaction}, ${reference}, ${providerStatus},
+            4990000::bigint, 'COP', ${occurredAt}::timestamptz
+          ) AS outcome
+        `;
+      });
+
+      const [stored] = await admin`
+        SELECT status FROM subscriptions WHERE id = ${subscription}
+      `;
+      assert.equal(outcome.outcome, 'applied', `${initialStatus} + ${providerStatus}`);
+      assert.equal(stored.status, expectedStatus, `${initialStatus} + ${providerStatus}`);
+    }
+  });
 });
 
 test('truncated FK name is deterministic and collision-free', async () => {
