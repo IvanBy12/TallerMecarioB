@@ -43,6 +43,13 @@
       "when": 1790120000000,
       "tag": "0005_s1_01_onboarding",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790134025729,
+      "tag": "0006_rbac_resource_scope",
+      "breakpoints": true
     }
   ]
 }
