@@ -6,9 +6,10 @@
  * Every command runs inside the tenant request's single transaction
  * (TenantContext GUCs bound, FORCE RLS, NOBYPASSRLS runtime) in this order:
  *
- *   tenant role-change lock   app.lock_tenant_owner_set(<tenant>) (0012): every
- *                             role change of a tenant serializes here; it is
- *                             the lock the 0011/0012 triggers take (re-entrant)
+ *   tenant role-change lock   app.lock_current_tenant_owner_set() (0013): owner
+ *                             gate (shared) + the TenantContext's workshop row;
+ *                             every role change of a tenant serializes here and
+ *                             the 0011-0013 triggers re-take it (re-entrant)
  *   lock actor                memberships FOR SHARE (status cannot change under us)
  *   lock target               memberships FOR UPDATE (status/role race)
  *   permission check          FRESH from DB rows, after the locks: a concurrent
@@ -132,12 +133,14 @@ interface RoleRow {
 }
 
 /**
- * The tenant owner-set lock (0012 app.lock_tenant_owner_set, the single
- * definition of the key the 0011/0012 triggers take): one serialization point
- * per tenant for every role change and every owner status change.
+ * The tenant owner-set lock (0013): owner_mutation_gate ACCESS SHARE, then the
+ * TenantContext tenant's workshop row FOR NO KEY UPDATE (under RLS: only the
+ * bound tenant can be locked; no tenant id is passed). One serialization point
+ * per tenant for every role change and every owner status change, always
+ * taken before any membership row lock.
  */
-async function lockTenantRoleChanges(sql: postgres.ReservedSql, tenantId: string): Promise<void> {
-  await sql`SELECT app.lock_tenant_owner_set(${tenantId}::uuid)`;
+async function lockTenantRoleChanges(sql: postgres.ReservedSql): Promise<void> {
+  await sql`SELECT app.lock_current_tenant_owner_set()`;
 }
 
 async function lockTarget(sql: postgres.ReservedSql, tenantId: string, membershipId: string): Promise<TargetRow> {
@@ -281,7 +284,7 @@ async function prepareChange(
     throw new RoleChangeDeniedError('SELF_ROLE_MODIFICATION_FORBIDDEN');
   }
 
-  await lockTenantRoleChanges(sql, tenant.tenantId);
+  await lockTenantRoleChanges(sql);
   const permissions = await freshActorPermissions(sql, context);
   const target = await lockTarget(sql, tenant.tenantId, membershipId);
   const roles = await rolesOf(sql, tenant.tenantId, target.id);

@@ -92,6 +92,13 @@
       "when": 1790276314403,
       "tag": "0012_s1_05_owner_status_invariant",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790280822455,
+      "tag": "0013_s1_05_owner_lock_hierarchy",
+      "breakpoints": true
     }
   ]
 }
