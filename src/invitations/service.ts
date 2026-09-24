@@ -27,6 +27,7 @@ import { ROLE_CODES } from '../authz/rbac-matrix.js';
 import type { VerifiedIdentity } from '../identity/identity-provider.js';
 import type { VerifiedProfileInput } from '../identity/profile.js';
 import { publishOutboxEvent } from '../outbox/publish.js';
+import { INVITATION_EMAIL_EVENT_TYPE } from './email.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
 import {
   deriveInvitationToken,
@@ -35,7 +36,6 @@ import {
   type InvitationTokenKey,
 } from './token.js';
 
-export const INVITATION_EMAIL_EVENT_TYPE = 'membership.invitation_email_requested';
 export const INVITATION_TTL_DAYS = 7;
 const REASON_CODE = 'membership_invitation';
 const LIST_LIMIT = 200;

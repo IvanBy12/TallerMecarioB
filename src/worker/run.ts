@@ -14,6 +14,12 @@ import {
   createMembershipRevocationHandler,
   MEMBERSHIP_REVOCATION_EVENT_TYPE,
 } from '../identity/sync/membership-revocation.js';
+import { invitationsConfigured, loadInvitationEmailConfig } from '../invitations/config.js';
+import {
+  createInvitationEmailHandler,
+  INVITATION_EMAIL_EVENT_TYPE,
+  ResendEmailSender,
+} from '../invitations/email.js';
 import { WompiAdapter } from '../integrations/wompi/adapter.js';
 import { PostgresWompiBillingRepository } from '../integrations/wompi/billing-repository.js';
 import { loadWompiConfig, type WompiRuntimeConfig } from '../integrations/wompi/config.js';
@@ -122,6 +128,15 @@ async function main(): Promise<void> {
       }),
     }
     : {};
+  // S1-04: invitation emails call Resend, so they run phased too. Any
+  // invitation variable present => the full email configuration is mandatory.
+  if (invitationsConfigured()) {
+    const invitationEmail = loadInvitationEmailConfig();
+    phasedHandlers[INVITATION_EMAIL_EVENT_TYPE] = createInvitationEmailHandler({
+      config: invitationEmail,
+      sender: new ResendEmailSender(invitationEmail),
+    });
+  }
 
   let running = true;
   const shutdown = async (signal: string) => {
