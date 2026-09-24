@@ -16,7 +16,7 @@ import { loadWompiConfig } from '../integrations/wompi/config.js';
 import { PostgresWompiWebhookRepository } from '../integrations/wompi/repository.js';
 import { registerWompiWebhookRoute } from '../integrations/wompi/routes.js';
 import { registerOnboardingRoutes } from '../onboarding/routes.js';
-import { invitationsConfigured, loadInvitationTokenKey } from '../invitations/config.js';
+import { invitationsConfigured, loadInvitationApiConfig } from '../invitations/config.js';
 import { registerInvitationAcceptRoute, registerInvitationRoutes } from '../invitations/routes.js';
 
 /**
@@ -63,8 +63,8 @@ async function main(): Promise<void> {
   const clerk = clerkConfigured()
     ? { config: loadClerkAuthenticationConfig(), webhookSigningSecret: loadClerkWebhookSigningSecret() }
     : null;
-  // S1-04: any invitation variable present => the token secret is mandatory.
-  const invitationTokenKey = invitationsConfigured() ? loadInvitationTokenKey() : null;
+  // S1-04: any invitation variable present => token secret + accept URL + sender are mandatory.
+  const invitationConfig = invitationsConfigured() ? loadInvitationApiConfig() : null;
   const port =Number(process.env.PORT ?? 3000);
   const host = process.env.HOST ?? '0.0.0.0';
 
@@ -102,7 +102,7 @@ async function main(): Promise<void> {
       registerInvitationAcceptRoute(server, { database });
     },
     async registerRoutes(server) {
-      if (invitationTokenKey) registerInvitationRoutes(server, { tokenKey: invitationTokenKey });
+      if (invitationConfig) registerInvitationRoutes(server, { config: invitationConfig });
       // Deploy-smoke-test only: proves the full protected-route pipeline
       // (rate limit -> auth -> TenantContext transaction -> RBAC) is wired
       // end to end in the deployed artifact. Not a product endpoint.

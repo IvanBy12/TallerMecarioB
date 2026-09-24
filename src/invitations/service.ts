@@ -27,13 +27,18 @@ import { ROLE_CODES } from '../authz/rbac-matrix.js';
 import type { VerifiedIdentity } from '../identity/identity-provider.js';
 import type { VerifiedProfileInput } from '../identity/profile.js';
 import { publishOutboxEvent } from '../outbox/publish.js';
-import { INVITATION_EMAIL_EVENT_TYPE } from './email.js';
+import type { InvitationApiConfig } from './config.js';
+import {
+  buildInvitationDeliverySnapshot,
+  INVITATION_EMAIL_EVENT_TYPE,
+  INVITATION_EMAIL_EVENT_VERSION,
+  type InvitationEmailPayload,
+} from './email.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
 import {
   deriveInvitationToken,
   hashInvitationToken,
   newInvitationTokenNonce,
-  type InvitationTokenKey,
 } from './token.js';
 
 export const INVITATION_TTL_DAYS = 7;
@@ -202,9 +207,10 @@ export interface CreateInvitationInput {
 export async function createInvitation(
   context: TenantRequestContext,
   input: CreateInvitationInput,
-  tokenKey: InvitationTokenKey,
+  config: InvitationApiConfig,
   meta: RequestMeta,
 ): Promise<InvitationDto> {
+  const { tokenKey } = config;
   const { sql, tenant } = context;
   const role = parseRole(input.role);
 
@@ -282,15 +288,35 @@ export async function createInvitation(
     throw error;
   }
 
+  const [workshop] = await sql<{ display_name: string }[]>`
+    SELECT display_name FROM public.workshops WHERE id = ${tenant.tenantId}
+  `;
+  if (!workshop) throw new Error('INVITATION_WORKSHOP_NOT_VISIBLE');
+
   // ADR-004: the email job commits (or rolls back) with the invitation. The
-  // payload carries the nonce, never the token (see ./token.ts), and no PII.
+  // payload carries the nonce, never the token (see ./token.ts), no recipient
+  // PII, and the immutable delivery snapshot: every mutable input of the
+  // provider request is frozen now so a retry can never change it (S104-02).
+  const payload: InvitationEmailPayload = {
+    invitation_id: invitationId,
+    token_nonce: nonce,
+    token_key_version: tokenKey.version,
+    delivery: buildInvitationDeliverySnapshot({
+      from: config.from,
+      acceptUrl: config.acceptUrl,
+      workshopName: workshop.display_name,
+      role,
+      expiresAt: new Date(created.expires_at),
+    }),
+  };
   await publishOutboxEvent(sql, {
     id: uuidV7(),
     tenantId: tenant.tenantId,
     aggregateType: 'membership_invitation',
     aggregateId: invitationId,
     eventType: INVITATION_EMAIL_EVENT_TYPE,
-    payload: { invitation_id: invitationId, token_nonce: nonce, token_key_version: tokenKey.version },
+    eventVersion: INVITATION_EMAIL_EVENT_VERSION,
+    payload,
     idempotencyKey: invitationId,
   });
 

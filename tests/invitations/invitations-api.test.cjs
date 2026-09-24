@@ -57,12 +57,23 @@ test('A/D/U: owner creates an invitation; email normalized; outbox + audit in th
   const ttlMs = row.expires_at.getTime() - row.created_at.getTime();
   assert.ok(Math.abs(ttlMs - 7 * 86_400_000) < 5_000, 'TTL baseline 7 days from PostgreSQL clock');
 
-  const outbox = await h.admin`SELECT tenant_id, aggregate_type, aggregate_id, event_type, payload_json, idempotency_key, status FROM public.outbox_events WHERE aggregate_id = ${dto.id}`;
+  const outbox = await h.admin`SELECT tenant_id, aggregate_type, aggregate_id, event_type, event_version, payload_json, idempotency_key, status FROM public.outbox_events WHERE aggregate_id = ${dto.id}`;
   assert.equal(outbox.length, 1);
   assert.equal(outbox[0].tenant_id, t.a.tenantId);
   assert.equal(outbox[0].event_type, h.EMAIL_EVENT);
+  assert.equal(outbox[0].event_version, 2);
   assert.equal(outbox[0].idempotency_key, dto.id);
-  assert.deepEqual(Object.keys(outbox[0].payload_json).sort(), ['invitation_id', 'token_key_version', 'token_nonce']);
+  assert.deepEqual(Object.keys(outbox[0].payload_json).sort(), ['delivery', 'invitation_id', 'token_key_version', 'token_nonce']);
+  // S104-02 delivery snapshot: message inputs only, no recipient, no token material.
+  const [workshop] = await h.admin`SELECT display_name FROM public.workshops WHERE id = ${t.a.tenantId}`;
+  assert.deepEqual(outbox[0].payload_json.delivery, {
+    template_version: 1,
+    from: h.FROM,
+    accept_url: h.ACCEPT_URL,
+    workshop_name: workshop.display_name,
+    role_label: 'Técnico',
+    expires_at: row.expires_at.toISOString(),
+  });
 
   const audits = await h.auditsFor(dto.id);
   assert.deepEqual(audits.map((a) => `${a.action}:${a.outcome}`), ['membership.invited:success']);

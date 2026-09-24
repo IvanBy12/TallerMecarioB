@@ -4,12 +4,18 @@
  *
  *   MEMBERSHIP_INVITATION_TOKEN_SECRET   API + worker. base64/base64url, >= 32 bytes.
  *                                        Keys the token derivation (./token.ts).
- *   MEMBERSHIP_INVITATION_ACCEPT_URL     worker. PWA page receiving the token in the
+ *   MEMBERSHIP_INVITATION_ACCEPT_URL     API. PWA page receiving the token in the
  *                                        URL fragment (https; http only for localhost).
- *   MEMBERSHIP_INVITATION_EMAIL_FROM     worker. Verified Resend sender.
+ *   MEMBERSHIP_INVITATION_EMAIL_FROM     API. Verified Resend sender.
  *   RESEND_API_KEY                       worker. Resend API key.
  *   RESEND_API_BASE_URL                  worker, optional (default https://api.resend.com).
  *   RESEND_TIMEOUT_MS                    worker, optional finite timeout (default 10000).
+ *
+ * The accept URL and the sender are part of the message, not of the transport:
+ * the API freezes them into the job's delivery snapshot when the invitation is
+ * created (./email.ts), so a later change of either variable can never alter a
+ * retry of an already-enqueued email (same Resend idempotency key => same
+ * request). The worker only needs the token secret and the Resend transport.
  *
  * Fail closed: as soon as ANY of these variables is present, the variables the
  * process needs are mandatory (a half-configured deployment must not boot).
@@ -86,20 +92,38 @@ export function loadInvitationTokenKey(env: Environment = process.env): Invitati
   }
 }
 
-export interface InvitationEmailConfig {
+function senderAddress(env: Environment): string {
+  const from = required(env, 'MEMBERSHIP_INVITATION_EMAIL_FROM');
+  if (from.length > 320 || /[\r\n]/u.test(from) || !from.includes('@')) {
+    throw new InvitationConfigurationError('MEMBERSHIP_INVITATION_EMAIL_FROM', 'must be a sender address');
+  }
+  return from;
+}
+
+/** API: token derivation + the message inputs frozen into each delivery snapshot. */
+export interface InvitationApiConfig {
   readonly tokenKey: InvitationTokenKey;
   readonly acceptUrl: string;
   readonly from: string;
+}
+
+export function loadInvitationApiConfig(env: Environment = process.env): InvitationApiConfig {
+  return Object.freeze({
+    tokenKey: loadInvitationTokenKey(env),
+    acceptUrl: httpsUrl(env, 'MEMBERSHIP_INVITATION_ACCEPT_URL'),
+    from: senderAddress(env),
+  });
+}
+
+/** Worker: token re-derivation + Resend transport. No message content. */
+export interface InvitationEmailConfig {
+  readonly tokenKey: InvitationTokenKey;
   readonly resendApiKey: string;
   readonly resendBaseUrl: string;
   readonly resendTimeoutMs: number;
 }
 
 export function loadInvitationEmailConfig(env: Environment = process.env): InvitationEmailConfig {
-  const from = required(env, 'MEMBERSHIP_INVITATION_EMAIL_FROM');
-  if (from.length > 320 || /[\r\n]/u.test(from) || !from.includes('@')) {
-    throw new InvitationConfigurationError('MEMBERSHIP_INVITATION_EMAIL_FROM', 'must be a sender address');
-  }
   const resendApiKey = required(env, 'RESEND_API_KEY');
   if (!/^re_\S+$/u.test(resendApiKey)) {
     throw new InvitationConfigurationError('RESEND_API_KEY', 'has an unexpected format');
@@ -111,8 +135,6 @@ export function loadInvitationEmailConfig(env: Environment = process.env): Invit
   }
   return Object.freeze({
     tokenKey: loadInvitationTokenKey(env),
-    acceptUrl: httpsUrl(env, 'MEMBERSHIP_INVITATION_ACCEPT_URL'),
-    from,
     resendApiKey,
     resendBaseUrl: httpsUrl(env, 'RESEND_API_BASE_URL', DEFAULT_RESEND_BASE_URL),
     resendTimeoutMs,

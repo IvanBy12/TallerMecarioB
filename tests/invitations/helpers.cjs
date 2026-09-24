@@ -20,6 +20,10 @@ const worker = h.load('worker/outbox-worker.js');
 const email = h.load('invitations/email.js');
 
 const tokenKey = token.createInvitationTokenKey(randomBytes(32));
+const ACCEPT_URL = 'https://app.tallermecario.test/invite';
+const FROM = 'TallerMecario <invitaciones@tallermecario.test>';
+/** API-side invitation config (the message inputs frozen into each delivery snapshot). */
+const apiConfig = Object.freeze({ tokenKey, acceptUrl: ACCEPT_URL, from: FROM });
 const clerkUsers = new h.FakeClerkUsers();
 const provider = new ClerkIdentityProvider(h.clerkAuthenticationConfig(), { usersApi: clerkUsers });
 const apiPool = h.runtimePool('api', 8);
@@ -36,7 +40,7 @@ async function buildTestApp() {
       registerInvitationAcceptRoute(server, { database: apiPool, rateLimit: BIG_LIMIT });
     },
     registerRoutes(server) {
-      registerInvitationRoutes(server, { tokenKey, rateLimit: BIG_LIMIT });
+      registerInvitationRoutes(server, { config: apiConfig, rateLimit: BIG_LIMIT });
       server.get('/api/v1/__s104/whoami', { config: { permission: 'workshop.read' } }, async (request) => {
         const context = getTenantRequestContext(request);
         return {
@@ -145,8 +149,13 @@ async function seedInvitation({ tenantId, email: address, role = 'technician', i
     if (withOutbox) {
       await tx`INSERT INTO public.outbox_events ${tx({
         id: randomUUID(), tenant_id: tenantId, aggregate_type: 'membership_invitation', aggregate_id: id,
-        event_type: EMAIL_EVENT, event_version: 1,
-        payload_json: tx.json({ invitation_id: id, token_nonce: nonce, token_key_version: tokenKey.version }),
+        event_type: EMAIL_EVENT, event_version: email.INVITATION_EMAIL_EVENT_VERSION,
+        payload_json: tx.json({
+          invitation_id: id, token_nonce: nonce, token_key_version: tokenKey.version,
+          delivery: email.buildInvitationDeliverySnapshot({
+            from: FROM, acceptUrl: ACCEPT_URL, workshopName: 'Seeded workshop', role, expiresAt: new Date(expiresAt),
+          }),
+        }),
         idempotency_key: id,
       })}`;
     }
@@ -228,6 +237,9 @@ module.exports = {
   worker,
   email,
   tokenKey,
+  ACCEPT_URL,
+  FROM,
+  apiConfig,
   clerkUsers,
   apiPool,
   workerPool,

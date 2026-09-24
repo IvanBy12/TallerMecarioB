@@ -20,7 +20,7 @@ import {
   revokeInvitation,
   type RequestMeta,
 } from './service.js';
-import type { InvitationTokenKey } from './token.js';
+import type { InvitationApiConfig } from './config.js';
 
 /**
  * S1-04 HTTP surface (Arquitectura Técnica v1 §13: base /api/v1, stable error
@@ -77,7 +77,7 @@ const createBodySchema = {
 } as const;
 
 export interface RegisterInvitationRoutesOptions {
-  readonly tokenKey: InvitationTokenKey;
+  readonly config: InvitationApiConfig;
   readonly rateLimit?: RateLimit;
 }
 
@@ -105,7 +105,7 @@ export function registerInvitationRoutes(app: FastifyInstance, options: Register
         email: body.email.normalize('NFC').trim(),
         emailNormalized: normalized.data,
         role: body.role,
-      }, options.tokenKey, requestMeta(request));
+      }, options.config, requestMeta(request));
       return reply.code(201).header('cache-control', 'no-store').send({ invitation });
     } catch (error) {
       if (error instanceof InvitationRoleNotAllowedError) return sendRoleNotAllowed(request, reply);

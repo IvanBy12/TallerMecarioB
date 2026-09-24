@@ -129,7 +129,8 @@ async function main(): Promise<void> {
     }
     : {};
   // S1-04: invitation emails call Resend, so they run phased too. Any
-  // invitation variable present => the full email configuration is mandatory.
+  // invitation variable present => token secret + Resend transport are
+  // mandatory. Message content comes from each job's delivery snapshot.
   if (invitationsConfigured()) {
     const invitationEmail = loadInvitationEmailConfig();
     phasedHandlers[INVITATION_EMAIL_EVENT_TYPE] = createInvitationEmailHandler({

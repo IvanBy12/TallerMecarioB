@@ -15,8 +15,8 @@ const config = h.load('invitations/config.js');
 
 let app;
 let t;
-const ACCEPT_URL = 'https://app.tallermecario.test/invite';
-const FROM = 'TallerMecario <invitaciones@tallermecario.test>';
+// The API config frozen into every delivery snapshot (helpers.apiConfig).
+const { ACCEPT_URL, FROM } = h;
 
 class RecordingSender {
   constructor() {
@@ -48,7 +48,7 @@ function handlerOptions(sender, overrides = {}) {
     handlers: {},
     phasedHandlers: {
       [h.EMAIL_EVENT]: email.createInvitationEmailHandler({
-        config: { tokenKey: h.tokenKey, acceptUrl: ACCEPT_URL, from: FROM, ...overrides },
+        config: { tokenKey: h.tokenKey, ...overrides },
         sender,
       }),
     },
@@ -285,10 +285,14 @@ test('Resend client: failure classification never leaks the key or recipient', a
 });
 
 test('message: escapes workshop name, header-safe subject, Spanish role name', () => {
-  const message = email.buildInvitationMessage({
-    from: FROM, to: 'x@invite.test', workshopName: 'Taller <script>alert(1)</script>\r\nBcc: evil@x', role: 'service_advisor',
-    acceptUrl: `${ACCEPT_URL}#token=abc`, expiresAt: new Date('2026-10-01T00:00:00Z'),
+  const snapshot = email.buildInvitationDeliverySnapshot({
+    from: FROM, acceptUrl: ACCEPT_URL, workshopName: 'Taller <script>alert(1)</script>\r\nBcc: evil@x', role: 'service_advisor',
+    expiresAt: new Date('2026-10-01T00:00:00Z'),
   });
+  const message = email.renderInvitationEmail(snapshot, 'x@invite.test', `${ACCEPT_URL}#token=abc`);
+  assert.deepEqual(email.renderInvitationEmail(snapshot, 'x@invite.test', `${ACCEPT_URL}#token=abc`), message, 'pure/deterministic');
+  assert.equal(snapshot.template_version, 1);
+  assert.equal(snapshot.role_label, 'Asesor de servicio', 'role label frozen, not re-read from code at send time');
   assert.ok(!message.html.includes('<script>'));
   assert.ok(message.html.includes('&lt;script&gt;'));
   assert.ok(!/[\r\n]/u.test(message.subject));
@@ -336,25 +340,45 @@ test('config: fail closed on partial/invalid configuration; errors never echo va
   };
   assert.equal(config.invitationsConfigured({}), false);
   assert.equal(config.invitationsConfigured({ RESEND_API_KEY: 'x' }), true);
+  // Worker: token secret + Resend transport only (no message content).
   const loaded = config.loadInvitationEmailConfig(full);
+  assert.deepEqual(Object.keys(loaded).sort(), ['resendApiKey', 'resendBaseUrl', 'resendTimeoutMs', 'tokenKey']);
   assert.equal(loaded.resendBaseUrl, 'https://api.resend.com/');
   assert.equal(loaded.resendTimeoutMs, 10_000);
   assert.equal(loaded.tokenKey.secret.length, 32);
+  // API: token secret + the message inputs frozen into each delivery snapshot.
+  const api = config.loadInvitationApiConfig(full);
+  assert.deepEqual(Object.keys(api).sort(), ['acceptUrl', 'from', 'tokenKey']);
+  assert.equal(api.acceptUrl, 'https://app.tallermecario.test/invite');
 
-  const invalid = [
+  const secretSafe = (error) => error instanceof config.InvitationConfigurationError
+    && !error.message.includes(secret) && !error.message.includes('re_live_abcdef');
+  const invalidWorker = [
     { MEMBERSHIP_INVITATION_TOKEN_SECRET: undefined },
     { MEMBERSHIP_INVITATION_TOKEN_SECRET: randomBytes(16).toString('base64') },
-    { MEMBERSHIP_INVITATION_ACCEPT_URL: 'http://app.tallermecario.test/invite' },
-    { MEMBERSHIP_INVITATION_ACCEPT_URL: 'https://app.tallermecario.test/invite?x=1' },
-    { MEMBERSHIP_INVITATION_EMAIL_FROM: 'no-at-sign' },
+    { RESEND_API_KEY: undefined },
     { RESEND_API_KEY: 'sk_wrong' },
     { RESEND_TIMEOUT_MS: '0' },
     { RESEND_API_BASE_URL: 'http://evil.test' },
   ];
-  for (const override of invalid) {
-    const env = { ...full, ...override };
-    assert.throws(() => config.loadInvitationEmailConfig(env), (error) => error instanceof config.InvitationConfigurationError
-      && !error.message.includes(secret) && !error.message.includes('re_live_abcdef'), JSON.stringify(Object.keys(override)));
+  for (const override of invalidWorker) {
+    assert.throws(() => config.loadInvitationEmailConfig({ ...full, ...override }), secretSafe, `worker ${JSON.stringify(Object.keys(override))}`);
   }
-  assert.equal(config.loadInvitationEmailConfig({ ...full, MEMBERSHIP_INVITATION_ACCEPT_URL: 'http://localhost:5173/invite' }).acceptUrl, 'http://localhost:5173/invite');
+  const invalidApi = [
+    { MEMBERSHIP_INVITATION_TOKEN_SECRET: undefined },
+    { MEMBERSHIP_INVITATION_TOKEN_SECRET: randomBytes(16).toString('base64') },
+    { MEMBERSHIP_INVITATION_ACCEPT_URL: undefined },
+    { MEMBERSHIP_INVITATION_ACCEPT_URL: 'http://app.tallermecario.test/invite' },
+    { MEMBERSHIP_INVITATION_ACCEPT_URL: 'https://app.tallermecario.test/invite?x=1' },
+    { MEMBERSHIP_INVITATION_ACCEPT_URL: 'https://app.tallermecario.test/invite#frag' },
+    { MEMBERSHIP_INVITATION_EMAIL_FROM: undefined },
+    { MEMBERSHIP_INVITATION_EMAIL_FROM: 'no-at-sign' },
+  ];
+  for (const override of invalidApi) {
+    assert.throws(() => config.loadInvitationApiConfig({ ...full, ...override }), secretSafe, `api ${JSON.stringify(Object.keys(override))}`);
+  }
+  // Partial configuration: a single variable present => the process's own set is mandatory.
+  assert.throws(() => config.loadInvitationApiConfig({ MEMBERSHIP_INVITATION_EMAIL_FROM: 'a@b.test' }), secretSafe);
+  assert.throws(() => config.loadInvitationEmailConfig({ RESEND_API_KEY: 're_x' }), secretSafe);
+  assert.equal(config.loadInvitationApiConfig({ ...full, MEMBERSHIP_INVITATION_ACCEPT_URL: 'http://localhost:5173/invite' }).acceptUrl, 'http://localhost:5173/invite');
 });
