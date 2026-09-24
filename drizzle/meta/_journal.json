@@ -57,6 +57,13 @@
       "when": 1790179341798,
       "tag": "0007_s1_03_clerk_identity_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790216219361,
+      "tag": "0008_s1_04_membership_invitations",
+      "breakpoints": true
     }
   ]
 }

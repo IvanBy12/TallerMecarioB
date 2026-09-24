@@ -388,6 +388,20 @@ export const membershipInvitations = pgTable(
     unique('mi_tenant_id_key').on(t.tenantId, t.id),
     unique('mi_token_hash_key').on(t.tokenHash),
     enumCheck('mi_status_check', t.status, ['pending', 'accepted', 'expired', 'revoked']),
+    // S1-04 (0008): state coherence, and token_hash is always a SHA-256 hex
+    // digest -- a raw base64url token can never satisfy it.
+    rawCheck(
+      'mi_accepted_coherence_check',
+      `("status" = 'accepted' AND "accepted_at" IS NOT NULL AND "accepted_by_user_id" IS NOT NULL AND "accepted_membership_id" IS NOT NULL)
+       OR ("status" <> 'accepted' AND "accepted_at" IS NULL AND "accepted_by_user_id" IS NULL AND "accepted_membership_id" IS NULL)`,
+    ),
+    rawCheck(
+      'mi_revoked_coherence_check',
+      `("status" = 'revoked' AND "revoked_at" IS NOT NULL AND "revoked_by_membership_id" IS NOT NULL)
+       OR ("status" <> 'revoked' AND "revoked_at" IS NULL AND "revoked_by_membership_id" IS NULL)`,
+    ),
+    rawCheck('mi_token_hash_format_check', `"token_hash" ~ '^[0-9a-f]{64}$'`),
+    rawCheck('mi_expiry_after_creation_check', '"expires_at" > "created_at"'),
     foreignKey({
       name: 'mi_invited_by_fk',
       columns: [t.tenantId, t.invitedByMembershipId],
