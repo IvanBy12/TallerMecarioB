@@ -6,9 +6,9 @@
  * Every command runs inside the tenant request's single transaction
  * (TenantContext GUCs bound, FORCE RLS, NOBYPASSRLS runtime) in this order:
  *
- *   tenant role-change lock   pg_advisory_xact_lock(owner_set/<tenant>): every
+ *   tenant role-change lock   app.lock_tenant_owner_set(<tenant>) (0012): every
  *                             role change of a tenant serializes here; it is
- *                             the same key the 0011 trigger takes (re-entrant)
+ *                             the lock the 0011/0012 triggers take (re-entrant)
  *   lock actor                memberships FOR SHARE (status cannot change under us)
  *   lock target               memberships FOR UPDATE (status/role race)
  *   permission check          FRESH from DB rows, after the locks: a concurrent
@@ -131,13 +131,13 @@ interface RoleRow {
   assigned_at: Date;
 }
 
-/** Same key as the 0011 trigger: one serialization point per tenant. */
+/**
+ * The tenant owner-set lock (0012 app.lock_tenant_owner_set, the single
+ * definition of the key the 0011/0012 triggers take): one serialization point
+ * per tenant for every role change and every owner status change.
+ */
 async function lockTenantRoleChanges(sql: postgres.ReservedSql, tenantId: string): Promise<void> {
-  await sql`
-    SELECT pg_catalog.pg_advisory_xact_lock(
-      pg_catalog.hashtextextended(${'tallermecario.membership_roles.owner_set/' + tenantId}, 0)
-    )
-  `;
+  await sql`SELECT app.lock_tenant_owner_set(${tenantId}::uuid)`;
 }
 
 async function lockTarget(sql: postgres.ReservedSql, tenantId: string, membershipId: string): Promise<TargetRow> {

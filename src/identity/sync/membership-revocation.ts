@@ -8,9 +8,10 @@
  * see and change memberships of that tenant.
  *
  * Last-owner invariant (RBAC §16: every workshop keeps at least one ACTIVE
- * owner membership): all owner memberships of the tenant are locked in id
- * order first, so two concurrent deletions of the only two owners serialize
- * and the second one observes the first revocation. The last active owner
+ * owner membership): the tenant owner-set lock (0012) is taken first, then all
+ * owner memberships of the tenant are locked in id order, so two concurrent
+ * deletions of the only two owners serialize and the second one observes the
+ * first revocation (the 0012 memberships trigger enforces it in PostgreSQL). The last active owner
  * membership is kept for structural integrity (audited as denied); the user
  * behind it is already `disabled`, so it grants no access.
  */
@@ -80,6 +81,13 @@ export function createMembershipRevocationHandler(options: MembershipRevocationO
     const payload = parsed.data;
     const report = (outcome: MembershipRevocationOutcome) =>
       options.onOutcome?.({ membershipId: payload.membership_id, outcome });
+
+    // S1-05 audit fix: take the tenant owner-set lock (0012) BEFORE any row
+    // lock, in the same order as the role commands (no lock-order deadlock).
+    // The owner list below is then read on a snapshot taken after the wait,
+    // so a concurrent owner-role removal that committed meanwhile is seen.
+    // The 0012 memberships trigger re-checks the invariant in PostgreSQL.
+    await tx`SELECT app.lock_tenant_owner_set(app.current_tenant_id())`;
 
     const owners = await tx<OwnerRow[]>`
       SELECT m.id, m.status
