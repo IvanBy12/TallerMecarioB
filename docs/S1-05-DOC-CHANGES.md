@@ -1,15 +1,17 @@
-# S1-05 member role management (+ audit fix) — cambios de documentación preparados (NO canónicos todavía)
+# S1-05 member role management (+ audit fixes 1 y 2) — cambios de documentación preparados (NO canónicos todavía)
 
-Preparado 2026-09-24 en el worktree `task/s1-05-audit-fix` (base `ecd1366`). `docs/` es gitignored.
-El docs canónico del checkout principal y Notion **no** se editaron. Copiar **por secciones**
-(no reemplazar archivos). Requerido antes de merge: AGENTS.md §1/§3 (cambio estructural → ERD +
-Diccionario) y la introducción (contrato consumido por la PWA → documentado antes de merge).
+Preparado 2026-09-24 en el worktree `task/s1-05-audit-fix-2` (base `556c23b`). Estado final de la
+implementación: migraciones **0011 + 0012 + 0013**. El docs canónico del checkout principal y Notion
+**no** se editaron. Copiar **por secciones** (no reemplazar archivos). Requerido antes de merge:
+AGENTS.md §1/§3 (cambio estructural → ERD + Diccionario) y la introducción (contrato consumido por la
+PWA → documentado antes de merge). Este archivo está versionado con `git add -f` (el resto de `docs/`
+sigue gitignored).
 
 | Destino (bajo `Arquitectura Técnica v1 — TallerMecario/`) | Sección | Texto |
 | --- | --- | --- |
 | `../Arquitectura Técnica v1 — TallerMecario …md` (raíz) | nuevo §13.2, después de §13.1 | A |
-| `ADR-009 — RLS y privilegios …md` | §10 "Reducciones aplicadas…" (nuevas viñetas S1-05) | B |
-| `Diccionario de Datos v1 — PostgreSQL/Diccionario 01 …md` | §4 `memberships` y §9 `membership_roles` (añadir tras las notas existentes) | C |
+| `ADR-009 — RLS y privilegios …md` | §10 "Reducciones aplicadas…" (nuevas viñetas S1-05) y nueva subsección "Lock de owner-set" | B |
+| `Diccionario de Datos v1 — PostgreSQL/Diccionario 01 …md` | §4 `memberships`, §9 `membership_roles`, nota de objeto `app.owner_mutation_gate` | C |
 | `Modelo de Datos ERD v1 — PostgreSQL …md` | reglas de integridad ("todo taller conserva al menos un owner activo") | D |
 
 ---
@@ -36,54 +38,69 @@ DELETE /api/v1/memberships/:membershipId/roles/:roleCode   tenant route: members
   `SELF_ROLE_MODIFICATION_FORBIDDEN` 403 (auditado `denied`, commit durable) ·
   `PERMISSION_DENIED` 403 · `REQUEST_VALIDATION_FAILED` 400 · `UNSUPPORTED_MEDIA_TYPE` 415.
 - **Auditoría** (RBAC §20): `role.assigned` / `role.revoked`; `entity_type = membership_role`, `entity_id` = membership objetivo, `actor_user_id`/`actor_membership_id` = actor, `before_json`/`after_json = {roles:[…]}`, `metadata_json = {role}`; denegados con `reason_code = role_assignment_not_permitted` (+ `missing_permissions`) o `self_role_modification`. Sin email, token, JWT ni User-Agent (NULL).
-- **Transacción única:** `app.lock_tenant_owner_set(tenant)` → actor `FOR SHARE` → objetivo `FOR UPDATE` → permisos frescos → invariantes → INSERT/DELETE en `membership_roles` → audit → COMMIT. Cualquier error → ROLLBACK total (salvo los dos 403 durables, que confirman solo su fila `denied`).
+- **Transacción única:** `app.lock_current_tenant_owner_set()` (puerta compartida + fila `workshops` del tenant del TenantContext, ver ADR-009) → actor `FOR SHARE` → objetivo `FOR UPDATE` → permisos frescos → invariantes → INSERT/DELETE en `membership_roles` → audit → COMMIT. Cualquier error → ROLLBACK total (salvo los dos 403 durables, que confirman solo su fila `denied`).
 - **No incluido:** comando de reemplazo atómico de rol; `Idempotency-Key`; gestión de estado de memberships (S1-06).
 
-## B. ADR-009 §10 — nuevas viñetas
+## B. ADR-009 §10 — nuevas viñetas + subsección "Lock de owner-set"
 
-- **S1-05 (0011) `membership_roles`:** REVOKE `UPDATE` a `tallermecario_api` y `tallermecario_worker`; policy `tenant_update` eliminada (un cambio de rol es DELETE + INSERT, Diccionario 01 §9). `GRANT DELETE` solo a `tallermecario_api`, con policy `tenant_delete FOR DELETE TO tallermecario_api USING (tenant_id = app.current_tenant_id())`. Worker: SELECT/INSERT sin UPDATE/DELETE. Policies resultantes: `tenant_select`, `tenant_insert` (api, worker), `tenant_delete` (api).
-- **S1-05 (0011/0012) invariante de owner activo** — "owner activo" = fila `membership_roles` con rol `owner` sobre una membership con `status = 'active'` (el `users.status` **no** interviene):
-  - Lock único por tenant: `app.lock_tenant_owner_set(uuid)` = `pg_advisory_xact_lock(hashtextextended('tallermecario.membership_roles.owner_set/' || tenant_id, 0))`. Lo toman: los comandos S1-05, el handler S1-03 `membership-revocation` (antes de sus row locks), los triggers `BEFORE … FOR EACH STATEMENT` de `memberships`/`membership_roles` (tenant de la sesión, antes de cualquier row lock) y el chequeo del invariante. Orden global: lock de tenant → row locks.
-  - `app.assert_tenant_keeps_active_owner(uuid, text)`: toma el lock y **después** evalúa `EXISTS (owner activo)` en una sentencia nueva (snapshot READ COMMITTED posterior a la espera); fuera de READ COMMITTED la reducción falla cerrada.
-  - Triggers: `membership_roles_invariants_trg` (0011, función redefinida en 0012: INSERT exige membership `active`; DELETE/UPDATE de fila `owner` → assert, constraint `mr_last_active_owner`) y `memberships_owner_invariant_trg` (0012, AFTER UPDATE OR DELETE: una membership `active` con rol owner que sale de `active` o cambia id/tenant → assert, constraint `m_last_active_owner`, SQLSTATE 23514).
-  - Todas las funciones: SECURITY INVOKER, owner `tallermecario_schema_owner`, `search_path` fijo (`pg_catalog[, public]`), sin EXECUTE a PUBLIC; EXECUTE de los dos helpers solo para api/worker. Sin `SECURITY DEFINER` ni `BYPASSRLS` nuevos. `memberships`: sin cambio de grants (api conserva UPDATE de tabla porque S1-04/S1-05 usan `FOR UPDATE`/`FOR SHARE`, que lo requieren; worker conserva UPDATE para el handler S1-03; ningún runtime tiene DELETE/TRUNCATE).
+**Grants (estado final):**
+
+- **0011 `membership_roles`:** REVOKE `UPDATE` a `tallermecario_api` y `tallermecario_worker`; policy `tenant_update` eliminada (un cambio de rol es DELETE + INSERT, Diccionario 01 §9). `GRANT DELETE` solo a `tallermecario_api`, policy `tenant_delete FOR DELETE TO tallermecario_api USING (tenant_id = app.current_tenant_id())`. Worker: SELECT/INSERT, sin UPDATE/DELETE. Policies: `tenant_select`, `tenant_insert` (api, worker), `tenant_delete` (api).
+- **0012/0013 `memberships`:** sin cambio de grants. API conserva UPDATE de tabla (S1-04/S1-05 toman `FOR UPDATE`/`FOR SHARE`, que lo requieren; ningún endpoint escribe `status`); worker conserva UPDATE (handler S1-03). Ningún runtime tiene DELETE/TRUNCATE.
+- **0013 `workshops`:** sin cambio: api/worker ya tenían UPDATE + policy `tenant_update` (0000), que es lo que permite `FOR NO KEY UPDATE` de **su propio** workshop bajo RLS.
+- **0013 `app.owner_mutation_gate`:** tabla sin columnas ni filas (solo objeto de lock), owner `tallermecario_schema_owner`, RLS ENABLE/FORCE, `SELECT` a api/worker, nada a PUBLIC.
+- **0013 funciones:** `app.lock_current_tenant_owner_set()` — sin argumentos, EXECUTE solo api/worker. `app.enforce_owner_set_lock_order()`, `app.enforce_membership_owner_invariant()`, `app.enforce_membership_role_invariants()` — funciones de trigger, sin EXECUTE a nadie (no invocables directamente). Todas SECURITY INVOKER, owner `tallermecario_schema_owner`, `search_path = pg_catalog, public`, sin EXECUTE a PUBLIC. **Eliminadas** (0013): `app.lock_tenant_owner_set(uuid)`, `app.assert_tenant_keeps_active_owner(uuid, text)` y la función de trigger 0012 `app.lock_current_tenant_owner_set()` (el nombre se reutiliza para la interfaz runtime). Sin `SECURITY DEFINER` ni `BYPASSRLS` nuevos.
+
+**Lock de owner-set (0013) — jerarquía única:**
+
+```
+app.owner_mutation_gate  ─►  fila public.workshops del tenant (FOR NO KEY UPDATE)  ─►  filas memberships / membership_roles
+```
+
+- **Tenant-scoped (runtime con TenantContext):** puerta en `ACCESS SHARE` → fila `workshops` de `app.current_tenant_id()` (bajo RLS: solo su propio tenant es visible/lockeable) → filas. Interfaz: `app.lock_current_tenant_owner_set()`; la usan los comandos S1-05 y el handler S1-03, y el trigger `BEFORE … FOR EACH STATEMENT` de `memberships`/`membership_roles` para cualquier UPDATE/DELETE del runtime. La función falla (`55000`) sin tenant context o si el workshop no es visible. El trigger de sentencia toma los mismos locks sin ese error: si el workshop del contexto no es visible, bajo RLS tampoco lo es ninguna fila del tenant, y la sentencia sigue afectando 0 filas (comportamiento previo, cubierto por el test S1-03 de RLS del worker).
+- **Privilegiado / sin scope (superuser o `BYPASSRLS`):** el trigger de sentencia toma la puerta en `ACCESS EXCLUSIVE` **antes de tocar filas**; espera a todo holder tenant-scoped y luego toma la fila `workshops` de cada tenant afectado en los triggers de fila, cuando ninguna transacción tenant-scoped puede tener una. Esto elimina el ciclo 0012 (privilegiado: fila → lock de tenant; runtime: lock de tenant → fila) que producía `40P01`.
+- **Un runtime no puede apuntar a otro tenant:** no hay función runtime que acepte un tenant id; la fila `workshops` de otro tenant es invisible bajo RLS (el `FOR NO KEY UPDATE` devuelve 0 filas); con solo `SELECT` sobre la puerta, el único modo que un runtime puede tomar es `ACCESS SHARE` (los demás modos de `LOCK TABLE` exigen UPDATE/DELETE/TRUNCATE → 42501), que solo retrasa escrituras privilegiadas, nunca a otro tenant.
+- **Snapshot:** cada comprobación del invariante es una sentencia nueva ejecutada después de adquirir los locks → en READ COMMITTED ve todo lo confirmado mientras esperaba. Fuera de READ COMMITTED una reducción de owners falla cerrada.
+- **Boundary administrativo (no cubierto):** superusuarios/roles administrativos de PostgreSQL pueden tomar cualquier lock (incluida la puerta exclusiva o la fila de cualquier workshop) y desactivar triggers (`session_replication_role = replica`); eso es boundary de administración, no de tenant. Una sesión runtime que fija `app.tenant_id` a otro tenant obtiene acceso a los datos de ese tenant igual que antes (los GUC son contexto, no prueba criptográfica — ADR-009 §3); el lock no añade superficie sobre eso. Los advisory locks built-in (`pg_advisory_xact_lock`, PUBLIC) siguen disponibles para cualquier sesión, pero el owner-set ya no los usa.
+- **Orden no soportado:** una transacción que primero bloquea la fila `workshops` por otra vía (p. ej. un UPDATE del perfil del taller) y después reduce owners puede interbloquearse con una escritura privilegiada; ninguna ruta actual lo hace.
 
 ## C. Diccionario 01
 
-**§4 `memberships` — añadir:** Invariante (S1-05, 0012): una membership `active` que tiene rol `owner` no puede pasar a `suspended`/`revoked` (ni cambiar id/tenant, ni borrarse) si es la última owner activa del taller → `23514 m_last_active_owner`. No aplica a memberships sin rol owner ni a transiciones desde `suspended`/`revoked`; reactivar (`→ active`) no está restringido por este guard. Las transiciones de estado de memberships siguen sin definirse en Estados y Transiciones v1 (S1-06).
+**§4 `memberships` — añadir:** Invariante (S1-05, 0012/0013): una membership `active` que tiene rol `owner` no puede pasar a `suspended`/`revoked` (ni cambiar id/tenant, ni borrarse) si es la última owner activa del taller → `23514 m_last_active_owner`. No aplica a memberships sin rol owner ni a transiciones desde `suspended`/`revoked`; reactivar (`→ active`) no está restringido por este guard. Toda UPDATE/DELETE sobre `memberships` pasa por el lock de owner-set (ADR-009 §10). Las transiciones de estado de memberships siguen sin definirse en Estados y Transiciones v1 (S1-06).
 
-**§9 `membership_roles` — añadir tras "No UPDATE directo de rol…":** Implementado (0011/0012): runtime sin UPDATE; DELETE solo API bajo RLS tenant; `assigned_by_membership_id` = actor del TenantContext (FK compuesta mismo tenant). Trigger `app.enforce_membership_role_invariants`: `mr_membership_not_active` (INSERT sobre membership no `active`) y `mr_last_active_owner` (remoción de la última fila owner activa). "Guard de último owner se evalúa transaccionalmente" = advisory lock por tenant + chequeo post-lock (ver ADR-009 §10).
+**§9 `membership_roles` — añadir tras "No UPDATE directo de rol…":** Implementado (0011–0013): runtime sin UPDATE; DELETE solo API bajo RLS tenant; `assigned_by_membership_id` = actor del TenantContext (FK compuesta mismo tenant). Trigger `app.enforce_membership_role_invariants`: `mr_membership_not_active` (INSERT sobre membership no `active`) y `mr_last_active_owner` (remoción de la última fila owner activa). "Guard de último owner se evalúa transaccionalmente" = lock de owner-set (puerta + fila `workshops`) + chequeo posterior al lock.
+
+**Objeto de infraestructura (no de dominio):** `app.owner_mutation_gate` — tabla sin columnas ni filas usada solo como lock global del owner-set (ADR-009 §10). No contiene datos, no es tenant-owned, no aparece en `schema.ts`.
 
 ## D. ERD — regla "todo taller conserva al menos un owner activo"
 
-**Garantizado por PostgreSQL** (0011 + 0012) para toda escritura en `membership_roles` o `memberships` que reduzca el conjunto {membership `active` ∧ rol `owner`}, cualquiera sea la sesión (runtime o privilegiada):
+**Garantizado por PostgreSQL** (0011–0013) para toda escritura en `membership_roles` o `memberships` que reduzca el conjunto {membership `active` ∧ rol `owner`}, sea de runtime o de una sesión privilegiada con triggers activos:
 
 - remoción del rol `owner` (DELETE, o UPDATE por sesión privilegiada);
 - `memberships.status` `active → suspended` y `active → revoked` de una owner;
 - cambio de `id`/`tenant_id` o DELETE de una membership owner activa (el runtime no tiene DELETE; las FKs de `membership_roles` también lo impiden mientras tenga roles);
-- carreras entre cualquiera de las anteriores (serializadas por el lock de tenant; la última en confirmar ve a todas las demás).
+- carreras entre cualquiera de las anteriores, incluidas escrituras privilegiadas sin TenantContext (jerarquía única de locks; la última en confirmar ve a todas las demás; sin `40P01` entre runtime y privilegiado).
 
 **No cubre / límites explícitos:**
 
-- No repara datos existentes: un tenant que ya tuviera 0 owners activos antes de 0012 no se corrige; solo se bloquean nuevas reducciones de owners (cambios de memberships no-owner siguen permitidos).
-- `users.status = 'disabled'` no afecta al conteo: una membership `active` de un usuario deshabilitado cuenta como owner activo (semántica S1-03: el caso last-owner de `user.deleted` conserva la membership estructural, auditada `membership.revoked`/`denied`/`last_owner_invariant`; el usuario deshabilitado no obtiene acceso). `users.status = disabled` **no** implica `membership.status = revoked`.
+- No repara datos existentes: un tenant que ya tuviera 0 owners activos antes de 0012 no se corrige; solo se bloquean nuevas reducciones de owners (los cambios de memberships no-owner siguen permitidos).
+- `users.status = 'disabled'` no afecta al conteo: una membership `active` de un usuario deshabilitado cuenta como owner activo. `users.status = disabled` **no** implica `membership.status = revoked` (semántica S1-03).
 - Una transacción que pasa transitoriamente por 0 owners (quitar el owner antes de añadir el nuevo) se rechaza en la sentencia que reduce: añadir primero. `ownership.transfer` (RBAC §16.7) no existe todavía.
 - Sesiones con `session_replication_role = replica` (solo superusuario; fixtures/mantenimiento) no ejecutan triggers.
 - Reducciones de owner fuera de READ COMMITTED se rechazan (fail-closed).
-- Sesiones sin contexto de tenant (privilegiadas) no pasan por el lock previo de sentencia: toman el lock por fila (posible deadlock detectado por PostgreSQL, nunca violación del invariante).
 
 ---
 
 ## Interacción con S1-03 (sin cambio de semántica)
 
-- El handler `identity.membership_revocation_requested` sigue: revoca memberships del usuario borrado salvo la última owner activa (`kept_last_owner`, auditada `denied`/`last_owner_invariant`); no toca `users`; no reactiva nada.
-- Cambio único: toma `app.lock_tenant_owner_set(app.current_tenant_id())` **antes** de sus row locks, igual que los comandos S1-05 (evita el deadlock por orden inverso y le hace ver, tras la espera, una remoción de rol owner confirmada mientras esperaba). El trigger 0012 es el respaldo en DB.
+- El handler `identity.membership_revocation_requested` sigue: revoca memberships del usuario borrado salvo la última owner activa (`kept_last_owner`, auditada `membership.revoked`/`denied`/`last_owner_invariant`); no toca `users`; no reactiva nada.
+- Único cambio: llama `app.lock_current_tenant_owner_set()` (tenant = el del job, ya ligado como TenantContext por el worker) **antes** de sus row locks, igual que los comandos S1-05; tras la espera lee el estado confirmado. El trigger de `memberships` es el respaldo en DB.
 
 ## DECISION_REQUIRED abiertas (no resueltas)
 
 1. Cambios de roles sobre memberships `suspended`/`revoked` (hoy 409 `MEMBERSHIP_NOT_ACTIVE`; lectura permitida).
 2. Admin sobre target owner/admin (hoy denegado, derivado de RBAC §16.5).
 3. Membership activa con 0 roles (hoy permitido retirar su último rol).
-4. Semántica administrativa futura S1-06 (suspender/revocar/reactivar desde API; el guard 0012 ya aplica a esas escrituras).
+4. Semántica administrativa futura S1-06 (suspender/revocar/reactivar desde API; el guard ya aplica a esas escrituras).
 5. Reemplazo atómico de rol (no implementado).
 6. `Idempotency-Key` en la API (pendiente, igual que S1-04).
