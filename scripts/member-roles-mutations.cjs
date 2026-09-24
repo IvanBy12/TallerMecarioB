@@ -80,7 +80,35 @@ const MUTATIONS = {
   },
   // S1-03 handler: drop its owner-set lock taken before the owner row locks.
   'handler-lock-order': {
-    js: [['identity/sync/membership-revocation.js', 'await tx `SELECT app.lock_tenant_owner_set(app.current_tenant_id())`;', '']],
+    js: [['identity/sync/membership-revocation.js', 'await tx `SELECT app.lock_current_tenant_owner_set()`;', '']],
+  },
+  // 0013 (round 2, A): expose again a runtime-executable owner-set lock that
+  // takes an arbitrary tenant id (definer rights => can lock another tenant).
+  'runtime-tenant-lock-helper': {
+    sql: [
+      `CREATE FUNCTION app.lock_tenant_owner_set(p_tenant_id uuid) RETURNS void
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $f$
+        BEGIN
+          LOCK TABLE app.owner_mutation_gate IN ACCESS SHARE MODE;
+          PERFORM 1 FROM public.workshops WHERE id = p_tenant_id FOR NO KEY UPDATE;
+        END $f$`,
+      'GRANT EXECUTE ON FUNCTION app.lock_tenant_owner_set(uuid) TO tallermecario_api, tallermecario_worker',
+    ],
+  },
+  // 0013 (round 2, B): privileged / unscoped statements no longer take the
+  // EXCLUSIVE owner gate before their row locks (the 0012 ordering).
+  'privileged-gate': {
+    sql: [
+      `CREATE OR REPLACE FUNCTION app.enforce_owner_set_lock_order() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog, public AS $f$
+        BEGIN
+          IF app.current_tenant_id() IS NOT NULL
+            AND NOT (SELECT r.rolsuper OR r.rolbypassrls FROM pg_catalog.pg_roles r WHERE r.rolname = current_user) THEN
+            PERFORM app.lock_current_tenant_owner_set();
+          END IF;
+          RETURN NULL;
+        END $f$`,
+    ],
   },
   // Authorize from the request-start TenantContext snapshot instead of fresh rows.
   'stale-permissions': {

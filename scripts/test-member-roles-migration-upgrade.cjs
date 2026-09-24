@@ -3,8 +3,9 @@
 /**
  * S1-05 upgrade paths with live tenancy data, by the real migration runner:
  *
- *   0010 head -> HEAD   (applies 0011 + 0012 in one run)
- *   0011 head -> HEAD   (applies 0012)
+ *   0010 head -> HEAD   (applies 0011 + 0012 + 0013 in one run)
+ *   0011 head -> HEAD   (applies 0012 + 0013)
+ *   0012 head -> HEAD   (applies 0013: lock hierarchy)
  *
  * For each start head: disposable local DB migrated with a COPY of drizzle/
  * whose journal stops at that head; seed a single-owner tenant, a two-owner
@@ -25,7 +26,11 @@ const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const postgres = require('postgres');
 
-const START_HEADS = ['0010_s1_04_worker_invitation_privileges', '0011_s1_05_member_role_management'];
+const START_HEADS = [
+  '0010_s1_04_worker_invitation_privileges',
+  '0011_s1_05_member_role_management',
+  '0012_s1_05_owner_status_invariant',
+];
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner', 'tallermecario_migrator', 'tallermecario_api',
   'tallermecario_worker', 'tallermecario_bootstrap_resolver', 'tallermecario_identity_sync',
@@ -146,10 +151,17 @@ async function main() {
             (SELECT pg_catalog.array_agg(policyname::text ORDER BY policyname) FROM pg_catalog.pg_policies
               WHERE tablename = 'membership_roles') AS policies,
             has_table_privilege('tallermecario_api', 'public.membership_roles', 'UPDATE') AS api_update,
-            has_table_privilege('tallermecario_api', 'public.membership_roles', 'DELETE') AS api_delete
+            has_table_privilege('tallermecario_api', 'public.membership_roles', 'DELETE') AS api_delete,
+            (to_regclass('app.owner_mutation_gate') IS NOT NULL) AS gate,
+            (SELECT pg_catalog.array_agg(p.oid::regprocedure::text ORDER BY 1) FROM pg_catalog.pg_proc p
+              JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+              WHERE n.nspname = 'app' AND p.proname ~ 'owner'
+                AND (has_function_privilege('tallermecario_api', p.oid, 'EXECUTE')
+                  OR has_function_privilege('tallermecario_worker', p.oid, 'EXECUTE'))) AS runtime_owner_functions
         `;
         assert.deepEqual({ ...objects[0] }, {
           triggers: 4, policies: ['tenant_delete', 'tenant_insert', 'tenant_select'], api_update: false, api_delete: true,
+          gate: true, runtime_owner_functions: ['app.lock_current_tenant_owner_set()'],
         }, `${head}: HEAD objects`);
 
         // Invariant on upgraded data (privileged session: triggers apply to everyone).

@@ -5,8 +5,8 @@
  * membership_roles AND memberships.status writes, enforced by PostgreSQL.
  * Every write here runs as a NOBYPASSRLS runtime role with the TenantContext
  * GUCs bound (h.asRuntime), i.e. without any Fastify guard in front of it.
- * Races park real transactions on the tenant owner-set advisory lock and
- * prove the wait through pg_locks before releasing.
+ * Races park real transactions on the tenant owner-set lock (0013: owner gate
+ * + workshop row) and prove the wait through pg_locks before releasing.
  */
 
 const h = require('./helpers.cjs');
@@ -54,13 +54,17 @@ function deleteOwnerRole(conn, membershipId) {
 const runtime = (pool, tenantId, fn, isolation) => h.asRuntime(pool, { tenantId, isolation }, fn);
 const settle = (promise) => promise.then(() => 'ok', (error) => error);
 
-/** Backends currently waiting on the tenant owner-set advisory lock. */
-async function waitForAdvisoryWaiters(count, timeoutMs = 5000) {
+/**
+ * Backends currently waiting on a lock in this database (pg_locks, not granted):
+ * the owner gate (relation), a workshop/membership row (transactionid/tuple).
+ */
+async function waitForOwnerLockWaiters(count, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const [row] = await h.admin`
-      SELECT count(*)::int AS n FROM pg_catalog.pg_locks
-      WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
+      SELECT count(DISTINCT l.pid)::int AS n FROM pg_catalog.pg_locks AS l
+      JOIN pg_catalog.pg_stat_activity AS a ON a.pid = l.pid
+      WHERE NOT l.granted AND a.datname = pg_catalog.current_database()
     `;
     if (row.n >= count) return;
     if (Date.now() > deadline) throw new Error(`ADVISORY_WAITERS_NOT_REACHED ${row.n}/${count}`);
@@ -224,7 +228,7 @@ test('D: two owners revoked concurrently (status): exactly one commits, never 0 
       const pending = [a.owner, a.owner2].map((target, index) => settle(
         runtime(index === 0 ? h.apiPool : h.workerPool, a.tenantId, (tx) => setStatus(tx, target.membershipId, 'revoked')),
       ));
-      await waitForAdvisoryWaiters(2);
+      await waitForOwnerLockWaiters(2);
       await barrier.release();
       results = await Promise.all(pending);
     } catch (error) {
@@ -243,10 +247,11 @@ test('no stale snapshot: a reducer that waited on the lock sees the reduction co
     status: (tx, target) => setStatus(tx, target.membershipId, 'revoked'),
     role: (tx, target) => deleteOwnerRole(tx, target.membershipId),
   };
-  // Second reducer as the api runtime (waits in the BEFORE STATEMENT lock,
-  // before touching rows) and as a privileged session without tenant context
-  // (row already updated and row-locked, waits INSIDE the AFTER ROW trigger:
-  // the check must still use a snapshot taken after the wait).
+  // Second reducer as the api runtime (waits for the tenant workshop row in
+  // its BEFORE STATEMENT trigger) and as a privileged session without tenant
+  // context (waits for the EXCLUSIVE owner gate in its BEFORE STATEMENT
+  // trigger). Both wait BEFORE touching rows; the invariant check runs after
+  // the wait in a new statement and must see the first reducer's commit.
   const secondRunners = {
     runtime: (a, fn) => runtime(h.apiPool, a.tenantId, fn),
     privileged: (a, fn) => h.admin.begin(fn),
@@ -259,7 +264,7 @@ test('no stale snapshot: a reducer that waited on the lock sees the reduction co
       const first = await openRuntime(h.apiPool, a.tenantId, (tx) => reducers[firstKind](tx, a.owner));
       // Second reducer starts BEFORE the first commits and blocks on the lock.
       const second = settle(runSecond(a, (tx) => reducers[secondKind](tx, a.owner2)));
-      await waitForAdvisoryWaiters(1);
+      await waitForOwnerLockWaiters(1);
       await first.commit();
       const outcome = await second;
       assert.ok(anyOwnerViolation(outcome), `${label}: ${outcome}`);
@@ -280,14 +285,14 @@ test('E: owner-role removal via the API races a status revoke: never 0 active ow
       const runStatus = () => settle(runtime(h.workerPool, a.tenantId, (tx) => setStatus(tx, a.owner.membershipId, 'revoked')));
       if (apiFirst) {
         api = runApi();
-        await waitForAdvisoryWaiters(1);
+        await waitForOwnerLockWaiters(1);
         status = runStatus();
       } else {
         status = runStatus();
-        await waitForAdvisoryWaiters(1);
+        await waitForOwnerLockWaiters(1);
         api = runApi();
       }
-      await waitForAdvisoryWaiters(2);
+      await waitForOwnerLockWaiters(2);
     } finally {
       await barrier.release();
     }
@@ -314,14 +319,14 @@ test('E: owner-role removal via the API races the S1-03 revocation handler: neve
       const runHandler = () => runRevocation(a.tenantId, a.owner).catch((error) => error);
       if (apiFirst) {
         api = runApi();
-        await waitForAdvisoryWaiters(1);
+        await waitForOwnerLockWaiters(1);
         handler = runHandler();
       } else {
         handler = runHandler();
-        await waitForAdvisoryWaiters(1);
+        await waitForOwnerLockWaiters(1);
         api = runApi();
       }
-      await waitForAdvisoryWaiters(2);
+      await waitForOwnerLockWaiters(2);
     } finally {
       await barrier.release();
     }
@@ -362,36 +367,43 @@ test('G: S1-03 revocation keeps the last owner (denied audit), revokes co-owners
 
 /* Hygiene -------------------------------------------------------------------- */
 
-test('0012 functions: invoker rights, fixed search_path, no PUBLIC EXECUTE, runtime-only EXECUTE; trigger installed', async () => {
+test('0013 functions: invoker rights, fixed search_path, no PUBLIC EXECUTE; only the no-argument lock is runtime-executable', async () => {
   const functions = await h.admin`
-    SELECT p.proname, p.prosecdef, p.proconfig, pg_catalog.pg_get_userbyid(p.proowner) AS owner,
+    SELECT p.proname, p.pronargs, p.prosecdef, p.proconfig, pg_catalog.pg_get_userbyid(p.proowner) AS owner,
       has_function_privilege('public', p.oid, 'EXECUTE') AS public_exec,
       has_function_privilege('tallermecario_api', p.oid, 'EXECUTE') AS api_exec,
       has_function_privilege('tallermecario_worker', p.oid, 'EXECUTE') AS worker_exec
     FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'app' AND p.proname IN (
-      'lock_tenant_owner_set', 'assert_tenant_keeps_active_owner',
-      'enforce_membership_owner_invariant', 'enforce_membership_role_invariants')
+      'lock_current_tenant_owner_set', 'enforce_owner_set_lock_order',
+      'enforce_membership_owner_invariant', 'enforce_membership_role_invariants',
+      'lock_tenant_owner_set', 'assert_tenant_keeps_active_owner')
     ORDER BY p.proname
   `;
-  assert.equal(functions.length, 4);
+  assert.deepEqual(functions.map((fn) => fn.proname), [
+    'enforce_membership_owner_invariant', 'enforce_membership_role_invariants',
+    'enforce_owner_set_lock_order', 'lock_current_tenant_owner_set',
+  ], 'the 0012 tenant-uuid helpers are gone');
   for (const fn of functions) {
     assert.equal(fn.prosecdef, false, fn.proname);
     assert.equal(fn.owner, 'tallermecario_schema_owner', fn.proname);
     assert.equal(fn.public_exec, false, fn.proname);
     assert.ok(fn.proconfig.some((setting) => setting.startsWith('search_path=pg_catalog')), fn.proname);
-    if (['lock_tenant_owner_set', 'assert_tenant_keeps_active_owner'].includes(fn.proname)) {
-      assert.deepEqual([fn.api_exec, fn.worker_exec], [true, true], fn.proname);
-    }
+    const runtimeCallable = fn.proname === 'lock_current_tenant_owner_set';
+    assert.deepEqual([fn.api_exec, fn.worker_exec], [runtimeCallable, runtimeCallable], fn.proname);
+    if (runtimeCallable) assert.equal(fn.pronargs, 0, 'the runtime lock takes no tenant argument');
   }
   const triggers = await h.admin`
     SELECT c.relname, t.tgname FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
-    WHERE t.tgname IN ('memberships_owner_invariant_trg', 'membership_roles_invariants_trg') AND t.tgenabled = 'O'
-    ORDER BY c.relname
+    WHERE t.tgname IN ('memberships_owner_invariant_trg', 'membership_roles_invariants_trg',
+      'memberships_owner_set_lock_trg', 'membership_roles_owner_set_lock_trg') AND t.tgenabled = 'O'
+    ORDER BY c.relname, t.tgname
   `;
   assert.deepEqual(triggers.map((row) => `${row.relname}.${row.tgname}`), [
     'membership_roles.membership_roles_invariants_trg',
+    'membership_roles.membership_roles_owner_set_lock_trg',
     'memberships.memberships_owner_invariant_trg',
+    'memberships.memberships_owner_set_lock_trg',
   ]);
   const [bypass] = await h.admin`
     SELECT count(*)::int AS n FROM pg_catalog.pg_roles

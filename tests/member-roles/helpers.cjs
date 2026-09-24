@@ -151,11 +151,16 @@ async function roleAudits(entityId) {
   return rows.map((row) => ({ ...row }));
 }
 
-/** Admin transaction holding the tenant role-change advisory lock (barrier). */
+/**
+ * Admin transaction holding a tenant's owner-set lock exactly like a runtime
+ * holder (0013): owner gate ACCESS SHARE + the tenant's workshop row FOR NO KEY
+ * UPDATE. Used as a barrier to park competing writers.
+ */
 async function holdTenantRoleLock(tenantId) {
   const conn = await h.admin.reserve();
   await conn.unsafe('BEGIN');
-  await conn`SELECT app.lock_tenant_owner_set(${tenantId}::uuid)`;
+  await conn`LOCK TABLE app.owner_mutation_gate IN ACCESS SHARE MODE`;
+  await conn`SELECT id FROM public.workshops WHERE id = ${tenantId} FOR NO KEY UPDATE`;
   return {
     async release() {
       try { await conn.unsafe('COMMIT'); } finally { conn.release(); }
