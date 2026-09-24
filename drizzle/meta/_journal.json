@@ -71,6 +71,13 @@
       "when": 1790222221883,
       "tag": "0009_s1_04_invitation_delivery_lease",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790222868450,
+      "tag": "0010_s1_04_worker_invitation_privileges",
+      "breakpoints": true
     }
   ]
 }
