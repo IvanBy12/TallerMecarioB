@@ -22,8 +22,9 @@
 import type postgres from 'postgres';
 import { ApiError, type TenantRequestContext } from '../api/app.js';
 import { resolvePermissionDecision } from '../authz/authorize.js';
-import type { PermissionCode, RoleCode } from '../authz/rbac-matrix.js';
+import type { RoleCode } from '../authz/rbac-matrix.js';
 import { ROLE_CODES } from '../authz/rbac-matrix.js';
+import { ROLE_ASSIGNMENT_PERMISSION } from '../authz/role-assignment.js';
 import type { VerifiedIdentity } from '../identity/identity-provider.js';
 import type { VerifiedProfileInput } from '../identity/profile.js';
 import { publishOutboxEvent } from '../outbox/publish.js';
@@ -44,13 +45,6 @@ import {
 export const INVITATION_TTL_DAYS = 7;
 const REASON_CODE = 'membership_invitation';
 const LIST_LIMIT = 200;
-
-export const ROLE_ASSIGNMENT_PERMISSION: Readonly<Record<RoleCode, PermissionCode>> = Object.freeze({
-  owner: 'roles.assign_owner',
-  admin: 'roles.assign_admin',
-  service_advisor: 'roles.assign_staff',
-  technician: 'roles.assign_staff',
-});
 
 export type InvitationStatus = 'pending' | 'accepted' | 'expired' | 'revoked';
 
