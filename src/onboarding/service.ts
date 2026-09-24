@@ -72,8 +72,8 @@ export interface CreateWorkshopInput {
   profile: VerifiedProfileInput;
   payload: OnboardingRequest;
   requestId: string;
+  /** Socket-derived. Client free-form headers (User-Agent, ...) are never audited. */
   ipAddress: string;
-  userAgent: string | null;
   slugFactory?: (displayName: string) => string;
 }
 
@@ -232,7 +232,7 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
           id, tenant_id, actor_type, actor_user_id, actor_membership_id,
           action, outcome, entity_type, entity_id, reason_code,
           before_json, after_json, metadata_json, request_id,
-          ip_address, user_agent
+          ip_address
         ) VALUES
           (
             ${uuidV7()}, ${tenantId}, 'user', ${user.user_id}, ${membershipId},
@@ -246,7 +246,7 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
               primary_location_id: location.id,
             })},
             NULL,
-            ${input.requestId}, ${input.ipAddress}::inet, ${input.userAgent}
+            ${input.requestId}, ${input.ipAddress}::inet
           ),
           (
             ${uuidV7()}, ${tenantId}, 'user', ${user.user_id}, ${membershipId},
@@ -255,7 +255,7 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
             NULL,
             ${sql.json({ status: membership.status, user_id: user.user_id })},
             NULL,
-            ${input.requestId}, ${input.ipAddress}::inet, ${input.userAgent}
+            ${input.requestId}, ${input.ipAddress}::inet
           ),
           (
             ${uuidV7()}, ${tenantId}, 'user', ${user.user_id}, ${membershipId},
@@ -264,7 +264,7 @@ export async function createWorkshopForIdentity(input: CreateWorkshopInput): Pro
             ${sql.json({ roles: [] })},
             ${sql.json({ roles: ['owner'] })},
             ${sql.json({ assigned_by_membership_id: membershipId, bootstrap: true })},
-            ${input.requestId}, ${input.ipAddress}::inet, ${input.userAgent}
+            ${input.requestId}, ${input.ipAddress}::inet
           )
       `;
 

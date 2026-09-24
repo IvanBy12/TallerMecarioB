@@ -61,10 +61,10 @@ export interface InvitationDto {
   readonly revokedAt: string | null;
 }
 
+/** Server-derived request context only: never a client-supplied free-form header. */
 export interface RequestMeta {
   readonly requestId: string;
   readonly ipAddress: string;
-  readonly userAgent: string | null;
 }
 
 /** Stable, sanitized invitation errors (Arquitectura Técnica v1 §13). */
@@ -165,7 +165,8 @@ interface AuditRow {
 
 /**
  * Minimized, allowlisted audit rows (Operación §5.1): ids, role codes and
- * statuses only. Never the token, its hash, the nonce or the invitee email.
+ * statuses only. Never the token, its hash, the nonce, the invitee email or
+ * any client-supplied header (user_agent stays NULL, see routes.ts).
  */
 async function insertAudit(sql: postgres.ReservedSql, meta: RequestMeta, rows: readonly AuditRow[]): Promise<void> {
   for (const row of rows) {
@@ -173,14 +174,14 @@ async function insertAudit(sql: postgres.ReservedSql, meta: RequestMeta, rows: r
       INSERT INTO public.audit_logs (
         id, tenant_id, actor_type, actor_user_id, actor_membership_id,
         action, outcome, entity_type, entity_id, reason_code,
-        before_json, after_json, metadata_json, request_id, ip_address, user_agent
+        before_json, after_json, metadata_json, request_id, ip_address
       ) VALUES (
         ${uuidV7()}, ${row.tenantId}, ${row.actorType}, ${row.actorUserId}, ${row.actorMembershipId},
         ${row.action}, ${row.outcome}, ${row.entityType}, ${row.entityId}, ${row.reasonCode ?? REASON_CODE},
         ${row.before == null ? null : sql.json(row.before)},
         ${row.after == null ? null : sql.json(row.after)},
         ${row.metadata == null ? null : sql.json(row.metadata)},
-        ${meta.requestId}, ${meta.ipAddress}::inet, ${meta.userAgent}
+        ${meta.requestId}, ${meta.ipAddress}::inet
       )
     `;
   }

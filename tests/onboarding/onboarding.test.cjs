@@ -1182,7 +1182,9 @@ test('T19/V09/V10/P6/LOW-02: tenant audit events carry the exact onboarding cont
   assert.ok(rows.every((row) => row.request_id === rows[0].request_id));
   assert.ok(rows.every((row) => row.reason_code === 'workshop_onboarding'));
   assert.ok(rows.every((row) => row.ip_address === '198.51.100.42'));
-  assert.ok(rows.every((row) => row.user_agent === userAgent.slice(0, 512)));
+  // S104-01: a client-controlled header can carry any credential; it is never persisted.
+  assert.ok(rows.every((row) => row.user_agent === null));
+  assert.ok(rows.every((row) => !JSON.stringify(row).includes('audit-agent/')));
 
   const byAction = Object.fromEntries(rows.map((row) => [row.action, row]));
 

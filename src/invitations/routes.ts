@@ -39,12 +39,15 @@ import type { InvitationTokenKey } from './token.js';
 
 type RateLimit = { max: number; timeWindow: string | number };
 
+/**
+ * Audit request context: server-generated request id + socket-derived IP only.
+ * No client-controlled free-form header (User-Agent, Referer, ...) is ever
+ * persisted: it can carry any credential, including a live invitation token,
+ * and no truncation or pattern-based redaction can prove otherwise
+ * (Operación §5.1; audit_logs.user_agent is nullable and stays NULL).
+ */
 function requestMeta(request: FastifyRequest): RequestMeta {
-  return {
-    requestId: request.id,
-    ipAddress: request.ip,
-    userAgent: request.headers['user-agent']?.slice(0, 512) ?? null,
-  };
+  return { requestId: request.id, ipAddress: request.ip };
 }
 
 async function requireJson(request: FastifyRequest): Promise<void> {

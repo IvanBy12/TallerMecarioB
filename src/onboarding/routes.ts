@@ -93,7 +93,6 @@ export function registerOnboardingRoutes(
       payload: parsedBody.data,
       requestId: request.id,
       ipAddress: request.ip,
-      userAgent: request.headers['user-agent']?.slice(0, 512) ?? null,
       ...(options.slugFactory ? { slugFactory: options.slugFactory } : {}),
     });
 
