@@ -1,7 +1,7 @@
 # S1-05 member role management (+ audit fixes 1 y 2) — cambios de documentación preparados (NO canónicos todavía)
 
-Preparado 2026-09-24 en el worktree `task/s1-05-audit-fix-2` (base `556c23b`). Estado final de la
-implementación: migraciones **0011 + 0012 + 0013**. El docs canónico del checkout principal y Notion
+Preparado 2026-09-24 en el worktree `task/s1-05-audit-fix-3` (base `0e7a7b8`). Estado final de la
+implementación: migraciones **0011 + 0012 + 0013 + 0014**. El docs canónico del checkout principal y Notion
 **no** se editaron. Copiar **por secciones** (no reemplazar archivos). Requerido antes de merge:
 AGENTS.md §1/§3 (cambio estructural → ERD + Diccionario) y la introducción (contrato consumido por la
 PWA → documentado antes de merge). Este archivo está versionado con `git add -f` (el resto de `docs/`
@@ -49,6 +49,7 @@ DELETE /api/v1/memberships/:membershipId/roles/:roleCode   tenant route: members
 - **0012/0013 `memberships`:** sin cambio de grants. API conserva UPDATE de tabla (S1-04/S1-05 toman `FOR UPDATE`/`FOR SHARE`, que lo requieren; ningún endpoint escribe `status`); worker conserva UPDATE (handler S1-03). Ningún runtime tiene DELETE/TRUNCATE.
 - **0013 `workshops`:** sin cambio: api/worker ya tenían UPDATE + policy `tenant_update` (0000), que es lo que permite `FOR NO KEY UPDATE` de **su propio** workshop bajo RLS.
 - **0013 `app.owner_mutation_gate`:** tabla sin columnas ni filas (solo objeto de lock), owner `tallermecario_schema_owner`, RLS ENABLE/FORCE, `SELECT` a api/worker, nada a PUBLIC.
+- **0014:** `CREATE OR REPLACE` de `app.lock_current_tenant_owner_set()` únicamente (quita el `RAISE 55000` cuando el workshop no es visible); sin cambios de grants, owner, `SECURITY INVOKER` ni `search_path`.
 - **0013 funciones:** `app.lock_current_tenant_owner_set()` — sin argumentos, EXECUTE solo api/worker. `app.enforce_owner_set_lock_order()`, `app.enforce_membership_owner_invariant()`, `app.enforce_membership_role_invariants()` — funciones de trigger, sin EXECUTE a nadie (no invocables directamente). Todas SECURITY INVOKER, owner `tallermecario_schema_owner`, `search_path = pg_catalog, public`, sin EXECUTE a PUBLIC. **Eliminadas** (0013): `app.lock_tenant_owner_set(uuid)`, `app.assert_tenant_keeps_active_owner(uuid, text)` y la función de trigger 0012 `app.lock_current_tenant_owner_set()` (el nombre se reutiliza para la interfaz runtime). Sin `SECURITY DEFINER` ni `BYPASSRLS` nuevos.
 
 **Lock de owner-set (0013) — jerarquía única:**
@@ -57,7 +58,7 @@ DELETE /api/v1/memberships/:membershipId/roles/:roleCode   tenant route: members
 app.owner_mutation_gate  ─►  fila public.workshops del tenant (FOR NO KEY UPDATE)  ─►  filas memberships / membership_roles
 ```
 
-- **Tenant-scoped (runtime con TenantContext):** puerta en `ACCESS SHARE` → fila `workshops` de `app.current_tenant_id()` (bajo RLS: solo su propio tenant es visible/lockeable) → filas. Interfaz: `app.lock_current_tenant_owner_set()`; la usan los comandos S1-05 y el handler S1-03, y el trigger `BEFORE … FOR EACH STATEMENT` de `memberships`/`membership_roles` para cualquier UPDATE/DELETE del runtime. La función falla (`55000`) sin tenant context o si el workshop no es visible. El trigger de sentencia toma los mismos locks sin ese error: si el workshop del contexto no es visible, bajo RLS tampoco lo es ninguna fila del tenant, y la sentencia sigue afectando 0 filas (comportamiento previo, cubierto por el test S1-03 de RLS del worker).
+- **Tenant-scoped (runtime con TenantContext):** puerta en `ACCESS SHARE` → fila `workshops` de `app.current_tenant_id()` (bajo RLS: solo su propio tenant es visible/lockeable) → filas. Interfaz: `app.lock_current_tenant_owner_set()`; la usan los comandos S1-05 y el handler S1-03, y el trigger `BEFORE … FOR EACH STATEMENT` de `memberships`/`membership_roles` para cualquier UPDATE/DELETE del runtime. Contrato de la función (0014): sin tenant context → `55000` (fail-closed); tenant context malformado → `22P02`; workshop visible → puerta `ACCESS SHARE` + fila `workshops` `FOR NO KEY UPDATE`; **workshop inexistente / no visible → puerta `ACCESS SHARE`, sin lock de fila y sin error** (no-op). **Un TenantContext válido cuyo workshop ya no existe/no es visible no convierte una operación de 0 filas en error de locking; se preserva el not_found del dominio** (p. ej. el handler S1-03 devuelve `not_found` como antes de 0013). Es seguro porque bajo RLS tampoco es visible ninguna fila de ese tenant (FK → `workshops`, mismo predicado), y no crea oráculo: un runtime solo ve su tenant ligado, así que "no visible" equivale a "no existe". El trigger de sentencia aplica la misma regla (desde 0013).
 - **Privilegiado / sin scope (superuser o `BYPASSRLS`):** el trigger de sentencia toma la puerta en `ACCESS EXCLUSIVE` **antes de tocar filas**; espera a todo holder tenant-scoped y luego toma la fila `workshops` de cada tenant afectado en los triggers de fila, cuando ninguna transacción tenant-scoped puede tener una. Esto elimina el ciclo 0012 (privilegiado: fila → lock de tenant; runtime: lock de tenant → fila) que producía `40P01`.
 - **Un runtime no puede apuntar a otro tenant:** no hay función runtime que acepte un tenant id; la fila `workshops` de otro tenant es invisible bajo RLS (el `FOR NO KEY UPDATE` devuelve 0 filas); con solo `SELECT` sobre la puerta, el único modo que un runtime puede tomar es `ACCESS SHARE` (los demás modos de `LOCK TABLE` exigen UPDATE/DELETE/TRUNCATE → 42501), que solo retrasa escrituras privilegiadas, nunca a otro tenant.
 - **Snapshot:** cada comprobación del invariante es una sentencia nueva ejecutada después de adquirir los locks → en READ COMMITTED ve todo lo confirmado mientras esperaba. Fuera de READ COMMITTED una reducción de owners falla cerrada.
@@ -68,13 +69,13 @@ app.owner_mutation_gate  ─►  fila public.workshops del tenant (FOR NO KEY UP
 
 **§4 `memberships` — añadir:** Invariante (S1-05, 0012/0013): una membership `active` que tiene rol `owner` no puede pasar a `suspended`/`revoked` (ni cambiar id/tenant, ni borrarse) si es la última owner activa del taller → `23514 m_last_active_owner`. No aplica a memberships sin rol owner ni a transiciones desde `suspended`/`revoked`; reactivar (`→ active`) no está restringido por este guard. Toda UPDATE/DELETE sobre `memberships` pasa por el lock de owner-set (ADR-009 §10). Las transiciones de estado de memberships siguen sin definirse en Estados y Transiciones v1 (S1-06).
 
-**§9 `membership_roles` — añadir tras "No UPDATE directo de rol…":** Implementado (0011–0013): runtime sin UPDATE; DELETE solo API bajo RLS tenant; `assigned_by_membership_id` = actor del TenantContext (FK compuesta mismo tenant). Trigger `app.enforce_membership_role_invariants`: `mr_membership_not_active` (INSERT sobre membership no `active`) y `mr_last_active_owner` (remoción de la última fila owner activa). "Guard de último owner se evalúa transaccionalmente" = lock de owner-set (puerta + fila `workshops`) + chequeo posterior al lock.
+**§9 `membership_roles` — añadir tras "No UPDATE directo de rol…":** Implementado (0011–0014): runtime sin UPDATE; DELETE solo API bajo RLS tenant; `assigned_by_membership_id` = actor del TenantContext (FK compuesta mismo tenant). Trigger `app.enforce_membership_role_invariants`: `mr_membership_not_active` (INSERT sobre membership no `active`) y `mr_last_active_owner` (remoción de la última fila owner activa). "Guard de último owner se evalúa transaccionalmente" = lock de owner-set (puerta + fila `workshops`) + chequeo posterior al lock.
 
 **Objeto de infraestructura (no de dominio):** `app.owner_mutation_gate` — tabla sin columnas ni filas usada solo como lock global del owner-set (ADR-009 §10). No contiene datos, no es tenant-owned, no aparece en `schema.ts`.
 
 ## D. ERD — regla "todo taller conserva al menos un owner activo"
 
-**Garantizado por PostgreSQL** (0011–0013) para toda escritura en `membership_roles` o `memberships` que reduzca el conjunto {membership `active` ∧ rol `owner`}, sea de runtime o de una sesión privilegiada con triggers activos:
+**Garantizado por PostgreSQL** (0011–0014) para toda escritura en `membership_roles` o `memberships` que reduzca el conjunto {membership `active` ∧ rol `owner`}, sea de runtime o de una sesión privilegiada con triggers activos:
 
 - remoción del rol `owner` (DELETE, o UPDATE por sesión privilegiada);
 - `memberships.status` `active → suspended` y `active → revoked` de una owner;
@@ -95,6 +96,7 @@ app.owner_mutation_gate  ─►  fila public.workshops del tenant (FOR NO KEY UP
 
 - El handler `identity.membership_revocation_requested` sigue: revoca memberships del usuario borrado salvo la última owner activa (`kept_last_owner`, auditada `membership.revoked`/`denied`/`last_owner_invariant`); no toca `users`; no reactiva nada.
 - Único cambio: llama `app.lock_current_tenant_owner_set()` (tenant = el del job, ya ligado como TenantContext por el worker) **antes** de sus row locks, igual que los comandos S1-05; tras la espera lee el estado confirmado. El trigger de `memberships` es el respaldo en DB.
+- Job cuyo tenant ya no existe (UUID válido sin workshop): el lock es un no-op (0014) y el handler termina en `not_found`, sin modificar memberships ni roles, sin auditoría ni outbox, y sin bloquear a tenants reales — igual que antes de 0013.
 
 ## DECISION_REQUIRED abiertas (no resueltas)
 
