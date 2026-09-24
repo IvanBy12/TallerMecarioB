@@ -78,6 +78,8 @@ declare module 'fastify' {
 const DURABLE_OUTCOME_STATUS = Object.freeze({
   UPLOAD_SESSION_EXPIRED: 409,
   MEDIA_SIZE_INVALID: 422,
+  // S1-04: a denied privilege-escalation attempt commits its `denied` audit row.
+  INVITATION_ROLE_NOT_ALLOWED: 403,
 } as const);
 
 export type DurableTenantOutcomeCode = keyof typeof DURABLE_OUTCOME_STATUS;

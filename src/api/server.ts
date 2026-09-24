@@ -16,6 +16,8 @@ import { loadWompiConfig } from '../integrations/wompi/config.js';
 import { PostgresWompiWebhookRepository } from '../integrations/wompi/repository.js';
 import { registerWompiWebhookRoute } from '../integrations/wompi/routes.js';
 import { registerOnboardingRoutes } from '../onboarding/routes.js';
+import { invitationsConfigured, loadInvitationTokenKey } from '../invitations/config.js';
+import { registerInvitationAcceptRoute, registerInvitationRoutes } from '../invitations/routes.js';
 
 /**
  * Used ONLY when no Clerk variable is configured at all (e.g. the local
@@ -61,7 +63,9 @@ async function main(): Promise<void> {
   const clerk = clerkConfigured()
     ? { config: loadClerkAuthenticationConfig(), webhookSigningSecret: loadClerkWebhookSigningSecret() }
     : null;
-  const port = Number(process.env.PORT ?? 3000);
+  // S1-04: any invitation variable present => the token secret is mandatory.
+  const invitationTokenKey = invitationsConfigured() ? loadInvitationTokenKey() : null;
+  const port =Number(process.env.PORT ?? 3000);
   const host = process.env.HOST ?? '0.0.0.0';
 
   // ADR-009: runtime connects NOBYPASSRLS, never as owner/migrator. The
@@ -94,8 +98,11 @@ async function main(): Promise<void> {
     },
     registerIdentityOnlyRoutes(server) {
       registerOnboardingRoutes(server, { database });
+      // Needs no secret: acceptance only hashes the presented token.
+      registerInvitationAcceptRoute(server, { database });
     },
     async registerRoutes(server) {
+      if (invitationTokenKey) registerInvitationRoutes(server, { tokenKey: invitationTokenKey });
       // Deploy-smoke-test only: proves the full protected-route pipeline
       // (rate limit -> auth -> TenantContext transaction -> RBAC) is wired
       // end to end in the deployed artifact. Not a product endpoint.
