@@ -398,3 +398,18 @@ test('config: fail closed on partial/invalid configuration; errors never echo va
   assert.throws(() => config.loadInvitationEmailConfig({ RESEND_API_KEY: 're_x' }), secretSafe);
   assert.equal(config.loadInvitationApiConfig({ ...full, MEMBERSHIP_INVITATION_ACCEPT_URL: 'http://localhost:5173/invite' }).acceptUrl, 'http://localhost:5173/invite');
 });
+
+test('env templates: every invitation variable is listed with an EMPTY value (template => disabled)', () => {
+  const { readFileSync } = require('node:fs');
+  const names = [
+    'MEMBERSHIP_INVITATION_TOKEN_SECRET', 'MEMBERSHIP_INVITATION_ACCEPT_URL', 'MEMBERSHIP_INVITATION_EMAIL_FROM',
+    'RESEND_API_KEY', 'RESEND_API_BASE_URL', 'RESEND_TIMEOUT_MS',
+  ];
+  for (const file of ['.env.example', 'staging.env.example']) {
+    const entries = Object.fromEntries(readFileSync(file, 'utf8').split(/\r?\n/u)
+      .filter((line) => /^[A-Z0-9_]+=/u.test(line))
+      .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+    for (const name of names) assert.equal(entries[name], '', `${file} ${name}`);
+    assert.equal(config.invitationsConfigured(entries), false, `${file} as shipped keeps invitations disabled`);
+  }
+});
