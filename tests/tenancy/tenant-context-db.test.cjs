@@ -409,12 +409,18 @@ describe('runtime role, bootstrap ACL and catalog prerequisites', () => {
         ? '(id = app.current_tenant_id())'
         : '(tenant_id = app.current_tenant_id())';
       const own = policies.filter((policy) => policy.tablename === table);
-      assert.deepEqual(own.map((policy) => policy.policyname).sort(), ['tenant_insert', 'tenant_select', 'tenant_update'], table);
+      // S1-05 (0011): membership_roles changes only by INSERT/DELETE; DELETE is api-only.
+      const expectedNames = table === 'membership_roles'
+        ? ['tenant_delete', 'tenant_insert', 'tenant_select']
+        : ['tenant_insert', 'tenant_select', 'tenant_update'];
+      assert.deepEqual(own.map((policy) => policy.policyname).sort(), expectedNames, table);
       for (const policy of own) {
         assert.equal(policy.permissive, 'PERMISSIVE');
-        assert.deepEqual([...policy.roles].sort(), ['tallermecario_api', 'tallermecario_worker']);
+        assert.deepEqual([...policy.roles].sort(), policy.cmd === 'DELETE'
+          ? ['tallermecario_api']
+          : ['tallermecario_api', 'tallermecario_worker']);
         assert.equal(policy.qual, policy.cmd === 'INSERT' ? null : predicate, `${table}.${policy.policyname} USING`);
-        assert.equal(policy.with_check, policy.cmd === 'SELECT' ? null : predicate, `${table}.${policy.policyname} WITH CHECK`);
+        assert.equal(policy.with_check, policy.cmd === 'SELECT' || policy.cmd === 'DELETE' ? null : predicate, `${table}.${policy.policyname} WITH CHECK`);
       }
     }
 

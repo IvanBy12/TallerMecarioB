@@ -78,6 +78,13 @@
       "when": 1790222868450,
       "tag": "0010_s1_04_worker_invitation_privileges",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790273308784,
+      "tag": "0011_s1_05_member_role_management",
+      "breakpoints": true
     }
   ]
 }
