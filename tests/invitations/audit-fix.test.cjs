@@ -15,6 +15,7 @@
  *   T-SAME-JOB-IDEMPOTENT     re-running a job never repeats internal effects
  *   T-LEASE-DEADLINE          no send starts once the local lease window closed
  *   T-DELIVERY-ISOLATION      lease table: RLS, no worker grant, tenant from job
+ *   T-DELIVERY-COMPLETE-TENANT  another tenant's job cannot complete/release a lease
  */
 
 const test = require('node:test');
@@ -546,8 +547,60 @@ test('T-DELIVERY-ISOLATION: lease rows are tenant-isolated, worker has no grant,
   `, (error) => error.constraint_name === 'mid_lease_coherence_check');
 });
 
+test('T-DELIVERY-COMPLETE-TENANT: a job of another tenant can neither complete nor release a lease; the lease stays intact', async () => {
+  await drain(new RecordingSender()); // clean slate
+  const { id } = await invite();
+  const [job] = await h.admin`SELECT id FROM public.outbox_events WHERE aggregate_id = ${id}`;
+  const claimed = await worker.claimBatch(h.workerPool, 50);
+  assert.ok(claimed.some((row) => row.outboxEventId === job.id), 'tenant A job claimed');
+  const leaseA = randomUUID();
+  const [acquired] = await h.workerPool`SELECT * FROM app.worker_acquire_invitation_email_lease(${job.id}, ${leaseA}, 30)`;
+  assert.equal(acquired.lease_outcome, 'acquired');
+
+  // A claimed job of tenant B that points at tenant A's invitation (the
+  // tenant of every lease function comes from the job, never a parameter).
+  const forged = randomUUID();
+  await h.admin`INSERT INTO public.outbox_events ${h.admin({
+    id: forged, tenant_id: t.b.tenantId, aggregate_type: 'membership_invitation', aggregate_id: id,
+    event_type: h.EMAIL_EVENT, event_version: 2, payload_json: h.admin.json({}), idempotency_key: forged, status: 'processing', attempts: 1,
+  })}`;
+  try {
+    // complete: stable refusal (no lease row for (tenant B, invitation)).
+    await assert.rejects(
+      h.workerPool`SELECT * FROM app.worker_complete_invitation_email_delivery(${forged}, ${leaseA}, 're_forged_completion')`,
+      (error) => error.code === '55000',
+    );
+    // release: no-op.
+    const [released] = await h.workerPool`SELECT app.worker_release_invitation_email_lease(${forged}, ${leaseA}) AS released`;
+    assert.equal(released.released, false);
+
+    // Tenant A's lease is exactly as acquired: not recorded, not released.
+    const delivery = await h.deliveryRow(id);
+    assert.equal(delivery.tenant_id, t.a.tenantId);
+    assert.equal(delivery.lease_id, leaseA);
+    assert.equal(delivery.lease_outbox_event_id, job.id);
+    assert.equal(delivery.sent_at, null);
+    assert.equal(delivery.provider_message_id, null);
+    assert.equal((await h.revokeInvitation(app, t.a.owner, t.a.tenantId, id)).status, 409, 'lease still blocks terminal transitions');
+    assert.equal((await h.auditsFor(id)).filter((a) => a.action === 'membership.invitation_email_sent').length, 0);
+  } finally {
+    await h.admin`UPDATE public.outbox_events SET status = 'failed' WHERE id = ${forged}`;
+  }
+
+  // The legitimate job still completes normally afterwards.
+  await h.expireDeliveryLease(id);
+  await worker.requeueStalled(h.workerPool, 0);
+  await makeDue(id);
+  const sender = new RecordingSender();
+  await drain(sender);
+  assert.equal(sender.for(id).length, 1);
+  // By id: the forged row shares the aggregate_id.
+  const [legit] = await h.admin`SELECT status FROM public.outbox_events WHERE id = ${job.id}`;
+  assert.equal(legit.status, 'processed');
+});
+
 /* -------------------------------------------------------------------------- */
-/* S104-04                                                                    */
+/* S104-04                                                                   */
 /* -------------------------------------------------------------------------- */
 
 test('T-WORKER-LEAST-PRIVILEGE: worker can only SELECT invitations, has no lease-table grant, and the email flow still works', async () => {
