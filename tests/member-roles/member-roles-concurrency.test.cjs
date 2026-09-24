@@ -122,9 +122,20 @@ test('assign vs remove of the same role race: final state matches the serialized
     assert.equal(remove.status, 404);
     assert.deepEqual(roles, ['service_advisor', 'technician']);
   }
+  // Rebuild the audit chain by content: audit_logs.created_at is now() = the
+  // TRANSACTION START, and the transaction that started first may take the
+  // lock and write second, so timestamp order is not write order.
   const audits = (await h.roleAudits(a.advisor.membershipId)).filter((row) => row.outcome === 'success');
-  for (let i = 1; i < audits.length; i += 1) assert.deepEqual(audits[i].before_json, audits[i - 1].after_json);
-  assert.deepEqual(audits.at(-1).after_json, { roles });
+  assert.equal(audits.length, remove.status === 200 ? 2 : 1);
+  let state = { roles: ['service_advisor'] };
+  const pending = [...audits];
+  while (pending.length > 0) {
+    const next = pending.findIndex((row) => JSON.stringify(row.before_json) === JSON.stringify(state));
+    assert.ok(next >= 0, `audit chain broken at ${JSON.stringify(state)}`);
+    state = pending[next].after_json;
+    pending.splice(next, 1);
+  }
+  assert.deepEqual(state, { roles });
 });
 
 test('assign vs remove of different roles on one membership: both apply, nothing is lost', async () => {
