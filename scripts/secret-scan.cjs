@@ -61,9 +61,10 @@ const ALLOWLIST_MATCHES = new Set([
   // server.ts/run.ts: assembles a connection string from process.env at
   // runtime (encodeURIComponent(user)/(password)) -- no literal secret here.
   // (Line numbers moved when S1-03 wired Clerk into both entrypoints; the
-  // flagged line is the same runtime assembly, re-reviewed.)
-  'src/api/server.ts:50',
-  'src/worker/run.ts:96',
+  // flagged line is the same runtime assembly, re-reviewed. Moved again by
+  // S1-04 invitation imports; same line content, re-reviewed.)
+  'src/api/server.ts:52',
+  'src/worker/run.ts:102',
 ]);
 
 const SKIP_EXTENSIONS = new Set([
