@@ -16,6 +16,13 @@
  *      token_hash) must FAIL the upgrade atomically: still at 0007, no
  *      partial 0008 objects.
  *
+ * S1-04 audit fix (0009 delivery lease, 0010 worker privileges):
+ *   - the 0007 path above applies 0008 + 0009 + 0010 in one run and checks
+ *     the lease table/functions/guard and the reduced worker grants;
+ *   - a third DB at the 0008 head (live invitations/memberships + a legacy
+ *     event_version 1 email job, worker still holding INSERT/UPDATE) is
+ *     upgraded, re-run as a no-op, data untouched, same head objects.
+ *
  * Local-only (AGENTS.md §10). Cleans up and fails if cleanup did not complete.
  */
 
@@ -56,6 +63,48 @@ function migrate(databaseUrl, folder) {
 }
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+
+/** S1-04 audit fix: first migration of the fix (0009) and the expected head objects. */
+const AUDIT_FIX_TAG = '0009_s1_04_invitation_delivery_lease';
+
+async function workerInvitationPrivileges(db) {
+  const [row] = await db`
+    SELECT
+      has_table_privilege('tallermecario_worker', 'public.membership_invitations', 'SELECT') AS "select",
+      has_table_privilege('tallermecario_worker', 'public.membership_invitations', 'INSERT') AS "insert",
+      has_table_privilege('tallermecario_worker', 'public.membership_invitations', 'UPDATE') AS "update",
+      has_table_privilege('tallermecario_worker', 'public.membership_invitations', 'DELETE') AS "delete"
+  `;
+  return { ...row };
+}
+
+async function assertAuditFixObjects(db) {
+  const [table] = await db`
+    SELECT c.relrowsecurity, c.relforcerowsecurity, pg_catalog.pg_get_userbyid(c.relowner) AS owner
+    FROM pg_catalog.pg_class c WHERE c.oid = to_regclass('public.membership_invitation_deliveries')
+  `;
+  assert.deepEqual({ ...table }, { relrowsecurity: true, relforcerowsecurity: true, owner: 'tallermecario_schema_owner' });
+  const functions = await db`
+    SELECT p.proname, pg_catalog.pg_get_userbyid(p.proowner) AS owner, p.prosecdef,
+      has_function_privilege('public', p.oid, 'EXECUTE') AS public_execute
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'app' AND p.proname IN (
+      'worker_acquire_invitation_email_lease', 'worker_complete_invitation_email_delivery', 'worker_release_invitation_email_lease')
+    ORDER BY 1
+  `;
+  assert.deepEqual(functions.map((row) => `${row.proname}:${row.owner}:${row.prosecdef}:${row.public_execute}`), [
+    'worker_acquire_invitation_email_lease:tallermecario_bootstrap_resolver:true:false',
+    'worker_complete_invitation_email_delivery:tallermecario_bootstrap_resolver:true:false',
+    'worker_release_invitation_email_lease:tallermecario_bootstrap_resolver:true:false',
+  ]);
+  const [{ guarded }] = await db`
+    SELECT pg_catalog.pg_get_functiondef('app.enforce_membership_invitation_lifecycle()'::regprocedure) LIKE '%mi_delivery_in_progress%' AS guarded
+  `;
+  assert.equal(guarded, true, 'lifecycle trigger carries the delivery-lease guard');
+  assert.deepEqual(await workerInvitationPrivileges(db), { select: true, insert: false, update: false, delete: false });
+  const [{ schemaCreate }] = await db`SELECT has_schema_privilege('tallermecario_bootstrap_resolver', 'app', 'CREATE') AS "schemaCreate"`;
+  assert.equal(schemaCreate, false, 'temporary CREATE on app revoked again');
+}
 
 async function seedPreviousHead(db) {
   const roles = Object.fromEntries((await db`SELECT id, code FROM public.roles`).map((row) => [row.code, row.id]));
@@ -105,8 +154,11 @@ async function main() {
   const upgradeIndex = journal.entries.findIndex((entry) => entry.tag === UPGRADE_TAG);
   if (upgradeIndex < 1) throw new Error('UPGRADE_MIGRATION_NOT_IN_JOURNAL');
 
+  const auditFixIndex = journal.entries.findIndex((entry) => entry.tag === AUDIT_FIX_TAG);
+  if (auditFixIndex !== upgradeIndex + 1) throw new Error('UPGRADE_MIGRATION_NOT_IN_JOURNAL');
+
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
-  const names = [`tallermecario_invupgrade_${suffix}`, `tallermecario_invupgbad_${suffix}`];
+  const names = [`tallermecario_invupgrade_${suffix}`, `tallermecario_invupgbad_${suffix}`, `tallermecario_invupg08_${suffix}`];
   const urls = names.map((name) => {
     const url = new URL(sourceUrl.toString());
     url.pathname = `/${name}`;
@@ -117,6 +169,7 @@ async function main() {
     SELECT rolname FROM pg_catalog.pg_roles WHERE rolname = ANY(${CANONICAL_ROLES})
   `).map((row) => row.rolname));
   const previousFolder = mkdtempSync(join(tmpdir(), 'tallermecario-inv-previous-head-'));
+  const s104Folder = mkdtempSync(join(tmpdir(), 'tallermecario-inv-0008-head-'));
   const created = [];
   const pools = [];
   let passed = false;
@@ -183,8 +236,58 @@ async function main() {
     // Terminal pre-existing rows are protected from now on.
     await assert.rejects(db`UPDATE public.membership_invitations SET status = 'pending', revoked_at = NULL, revoked_by_membership_id = NULL WHERE id = ${seeded.invitations.revoked}`,
       (error) => error.constraint_name === 'mi_terminal_state');
+    // 0007 -> 0008 + audit-fix migrations in one run.
+    await assertAuditFixObjects(db);
     passed = true;
     process.stdout.write('UPGRADE_FROM_PREVIOUS_HEAD_PASS\n');
+
+    /* ------------------ S1-04 audit fix: upgrade from 0008 ------------------ */
+    passed = false;
+    cpSync('drizzle', s104Folder, { recursive: true });
+    writeFileSync(join(s104Folder, 'meta', '_journal.json'), JSON.stringify({
+      ...journal, entries: journal.entries.slice(0, auditFixIndex),
+    }));
+    await maintenance.unsafe(`CREATE DATABASE ${names[2]}`);
+    created.push(names[2]);
+    const at08 = postgres(urls[2], { max: 2, onnotice: () => {} });
+    pools.push(at08);
+    assert.ok(migrate(urls[2], s104Folder), '0008 head migrates');
+    const [at08Count] = await at08`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`;
+    assert.equal(at08Count.n, auditFixIndex);
+    assert.deepEqual(await workerInvitationPrivileges(at08), { select: true, insert: true, update: true, delete: false },
+      '0008 head still carries the pre-existing worker write grants');
+    const live = await seedPreviousHead(at08);
+    // A legacy (event_version 1) email job already enqueued before the fix.
+    await at08`INSERT INTO public.outbox_events ${at08({
+      id: randomUUID(), tenant_id: live.tenant, aggregate_type: 'membership_invitation', aggregate_id: live.invitations.pending,
+      event_type: 'membership.invitation_email_requested', event_version: 1,
+      payload_json: at08.json({ invitation_id: live.invitations.pending, token_nonce: randomBytes(32).toString('base64url'), token_key_version: 1 }),
+      idempotency_key: live.invitations.pending,
+    })}`;
+    const liveSnapshot = async () => at08`
+      SELECT (SELECT json_agg(i ORDER BY i.id) FROM public.membership_invitations i) AS invitations,
+        (SELECT json_agg(m ORDER BY m.id) FROM public.memberships m) AS memberships,
+        (SELECT json_agg(o ORDER BY o.id) FROM public.outbox_events o) AS outbox,
+        (SELECT count(*)::int FROM public.audit_logs) AS audits
+    `;
+    const [liveBefore] = await liveSnapshot();
+    assert.ok(migrate(urls[2], resolve('drizzle')), 'upgrade 0008 -> audit fix');
+    assert.ok(migrate(urls[2], resolve('drizzle')), 're-run is a no-op');
+    const [at08After] = await at08`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`;
+    assert.equal(at08After.n, journal.entries.length);
+    const [liveAfter] = await liveSnapshot();
+    assert.deepEqual(liveAfter, liveBefore, 'existing invitations, memberships and jobs untouched');
+    await assertAuditFixObjects(at08);
+    const [{ deliveries }] = await at08`SELECT count(*)::int AS deliveries FROM public.membership_invitation_deliveries`;
+    assert.equal(deliveries, 0, 'lease rows are created lazily by the worker only');
+    // A pre-existing pending invitation can still be revoked (no lease exists).
+    await at08.begin(async (tx) => {
+      await tx`UPDATE public.membership_invitations SET status = 'revoked', revoked_at = now(), revoked_by_membership_id = (
+        SELECT invited_by_membership_id FROM public.membership_invitations WHERE id = ${live.invitations.pending}
+      ) WHERE id = ${live.invitations.pending}`;
+    });
+    passed = true;
+    process.stdout.write('UPGRADE_FROM_0008_TO_AUDIT_FIX_PASS\n');
 
     /* ------------------------ invalid legacy data -------------------------- */
     passed = false;
@@ -210,6 +313,7 @@ async function main() {
   } finally {
     for (const pool of pools) await pool.end({ timeout: 5 }).catch(() => undefined);
     rmSync(previousFolder, { recursive: true, force: true });
+    rmSync(s104Folder, { recursive: true, force: true });
     for (const name of created) {
       await maintenance`
         SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity
