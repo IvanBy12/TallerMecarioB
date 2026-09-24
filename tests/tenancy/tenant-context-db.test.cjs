@@ -579,11 +579,17 @@ describe('membership revalidation inside the request transaction', () => {
       assert.equal(before.ok, true);
       assert.equal(before.grants.length, 103);
 
-      await admin`
-        UPDATE public.memberships
-        SET status = 'suspended', suspended_at = now(), updated_at = now()
-        WHERE id = ${M.H1}
-      `;
+      // Fixture write (triggers off): H1 is T2's only owner, and the S1-05
+      // owner invariant (0012) would refuse this suspension. This test is
+      // about the authorization re-check, not about that invariant.
+      await admin.begin(async (tx) => {
+        await tx`SET LOCAL session_replication_role = replica`;
+        await tx`
+          UPDATE public.memberships
+          SET status = 'suspended', suspended_at = now(), updated_at = now()
+          WHERE id = ${M.H1}
+        `;
+      });
       assert.deepEqual(await db.loadMembershipAuthorization(conn, context), DENIED);
     }, 'ROLLBACK');
   });
