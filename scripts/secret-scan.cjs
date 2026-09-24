@@ -62,8 +62,9 @@ const ALLOWLIST_MATCHES = new Set([
   // runtime (encodeURIComponent(user)/(password)) -- no literal secret here.
   // (Line numbers moved when S1-03 wired Clerk into both entrypoints; the
   // flagged line is the same runtime assembly, re-reviewed. Moved again by
-  // S1-04 invitation imports; same line content, re-reviewed.)
-  'src/api/server.ts:52',
+  // S1-04 invitation imports and S1-05 member-role import; same line
+  // content, re-reviewed.)
+  'src/api/server.ts:53',
   'src/worker/run.ts:102',
 ]);
 

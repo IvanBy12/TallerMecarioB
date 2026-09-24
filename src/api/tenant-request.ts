@@ -80,6 +80,9 @@ const DURABLE_OUTCOME_STATUS = Object.freeze({
   MEDIA_SIZE_INVALID: 422,
   // S1-04: a denied privilege-escalation attempt commits its `denied` audit row.
   INVITATION_ROLE_NOT_ALLOWED: 403,
+  // S1-05: denied role-escalation / self-modification attempts commit their `denied` audit row.
+  ROLE_ASSIGNMENT_NOT_ALLOWED: 403,
+  SELF_ROLE_MODIFICATION_FORBIDDEN: 403,
 } as const);
 
 export type DurableTenantOutcomeCode = keyof typeof DURABLE_OUTCOME_STATUS;
