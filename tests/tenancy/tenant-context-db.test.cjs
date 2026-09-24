@@ -573,23 +573,34 @@ describe('membership revalidation inside the request transaction', () => {
   });
 
   test('TOCTOU: a membership suspended after bind yields no authorization rows (fresh snapshot re-check)', async () => {
+    // H1 is T2's only owner. A valid fixture (triggers ON) first gives T2 a
+    // second active owner, so suspending H1 respects the S1-05 owner
+    // invariant instead of bypassing it.
+    const coOwnerUser = id();
+    const coOwner = id();
+    await admin.begin(async (tx) => {
+      const [owner] = await tx`SELECT id FROM public.roles WHERE code = 'owner'`;
+      await tx`INSERT INTO users ${tx({
+        id: coOwnerUser, external_subject: `subject-${coOwnerUser}`, email: `${coOwnerUser}@tenant-context.test`,
+        full_name: 'Co-owner T2', status: 'active',
+      })}`;
+      await tx`INSERT INTO memberships ${tx({ id: coOwner, tenant_id: T.T2, user_id: coOwnerUser, status: 'active' })}`;
+      await tx`INSERT INTO membership_roles ${tx({
+        tenant_id: T.T2, membership_id: coOwner, role_id: owner.id, assigned_by_membership_id: coOwner,
+      })}`;
+    });
+
     await inRequestTransaction(api, async (conn) => {
       const context = await openContext(conn, 'H', 'H1', 'T2');
       const before = await db.loadMembershipAuthorization(conn, context);
       assert.equal(before.ok, true);
       assert.equal(before.grants.length, 103);
 
-      // Fixture write (triggers off): H1 is T2's only owner, and the S1-05
-      // owner invariant (0012) would refuse this suspension. This test is
-      // about the authorization re-check, not about that invariant.
-      await admin.begin(async (tx) => {
-        await tx`SET LOCAL session_replication_role = replica`;
-        await tx`
-          UPDATE public.memberships
-          SET status = 'suspended', suspended_at = now(), updated_at = now()
-          WHERE id = ${M.H1}
-        `;
-      });
+      await admin`
+        UPDATE public.memberships
+        SET status = 'suspended', suspended_at = now(), updated_at = now()
+        WHERE id = ${M.H1}
+      `;
       assert.deepEqual(await db.loadMembershipAuthorization(conn, context), DENIED);
     }, 'ROLLBACK');
   });
