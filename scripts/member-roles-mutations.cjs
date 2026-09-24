@@ -67,6 +67,21 @@ const MUTATIONS = {
   'self-modification': {
     js: [[SERVICE, 'if (membershipId === tenant.membershipId) {', 'if (false) {']],
   },
+  // 0012: drop the memberships status guard (the S1-03 handler keeps its own check).
+  'owner-status-guard': {
+    sql: ['DROP TRIGGER memberships_owner_invariant_trg ON public.memberships'],
+  },
+  // 0012: drop the lock-before-row-locks statement triggers (lock-order inversion).
+  'owner-set-lock-order': {
+    sql: [
+      'DROP TRIGGER memberships_owner_set_lock_trg ON public.memberships',
+      'DROP TRIGGER membership_roles_owner_set_lock_trg ON public.membership_roles',
+    ],
+  },
+  // S1-03 handler: drop its owner-set lock taken before the owner row locks.
+  'handler-lock-order': {
+    js: [['identity/sync/membership-revocation.js', 'await tx `SELECT app.lock_tenant_owner_set(app.current_tenant_id())`;', '']],
+  },
   // Authorize from the request-start TenantContext snapshot instead of fresh rows.
   'stale-permissions': {
     js: [[SERVICE, 'const permissions = await freshActorPermissions(sql, context);', 'const permissions = new Set(context.tenant.permissions.keys());']],

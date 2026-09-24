@@ -19,7 +19,6 @@ const provider = new ClerkIdentityProvider(h.clerkAuthenticationConfig(), { user
 const apiPool = h.runtimePool('api', 10);
 const workerPool = h.runtimePool('worker', 2);
 const BIG_LIMIT = { max: 100_000, timeWindow: '1 minute' };
-const TENANT_ROLE_LOCK_PREFIX = 'tallermecario.membership_roles.owner_set/';
 
 async function buildTestApp() {
   return buildApi({
@@ -156,7 +155,7 @@ async function roleAudits(entityId) {
 async function holdTenantRoleLock(tenantId) {
   const conn = await h.admin.reserve();
   await conn.unsafe('BEGIN');
-  await conn`SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${TENANT_ROLE_LOCK_PREFIX + tenantId}, 0))`;
+  await conn`SELECT app.lock_tenant_owner_set(${tenantId}::uuid)`;
   return {
     async release() {
       try { await conn.unsafe('COMMIT'); } finally { conn.release(); }

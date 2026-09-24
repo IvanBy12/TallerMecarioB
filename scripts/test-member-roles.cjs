@@ -203,6 +203,8 @@ main().catch((error) => {
     'MEMBER_ROLE_TESTS_FAILED',
     'TEST_DATABASE_CLEANUP_FAILED',
   ]);
-  process.stderr.write(`${safeMessages.has(error.message) ? error.message : 'MEMBER_ROLE_TEST_RUN_FAILED'}\n`);
+  // Mutation tooling errors name only the mutant and file (no secrets): keep them visible.
+  const mutationError = /^(MUTATION_ANCHOR_NOT_FOUND|UNKNOWN_MUTATION) /u.test(error.message);
+  process.stderr.write(`${safeMessages.has(error.message) || mutationError ? error.message : 'MEMBER_ROLE_TEST_RUN_FAILED'}\n`);
   process.exitCode = 1;
 });
