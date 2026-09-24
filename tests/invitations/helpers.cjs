@@ -31,7 +31,7 @@ const workerPool = h.runtimePool('worker', 4);
 const BIG_LIMIT = { max: 100_000, timeWindow: '1 minute' };
 const EMAIL_EVENT = email.INVITATION_EMAIL_EVENT_TYPE;
 
-async function buildTestApp() {
+async function buildTestApp(config = apiConfig) {
   return buildApi({
     database: apiPool,
     identityProvider: provider,
@@ -40,7 +40,7 @@ async function buildTestApp() {
       registerInvitationAcceptRoute(server, { database: apiPool, rateLimit: BIG_LIMIT });
     },
     registerRoutes(server) {
-      registerInvitationRoutes(server, { config: apiConfig, rateLimit: BIG_LIMIT });
+      registerInvitationRoutes(server, { config, rateLimit: BIG_LIMIT });
       server.get('/api/v1/__s104/whoami', { config: { permission: 'workshop.read' } }, async (request) => {
         const context = getTenantRequestContext(request);
         return {
@@ -205,6 +205,25 @@ async function injectFailure(table, whenSql = 'true') {
   };
 }
 
+/** The invitation's delivery lease row (0009), or null. */
+async function deliveryRow(invitationId) {
+  const [row] = await h.admin`SELECT * FROM public.membership_invitation_deliveries WHERE invitation_id = ${invitationId}`;
+  return row ?? null;
+}
+
+/**
+ * Simulates the passage of lease time (admin, test-only): moves an active
+ * delivery lease window into the past without touching owner/attempt.
+ */
+async function expireDeliveryLease(invitationId) {
+  const result = await h.admin`
+    UPDATE public.membership_invitation_deliveries
+    SET lease_acquired_at = now() - interval '10 minutes', lease_expires_at = now() - interval '5 minutes'
+    WHERE invitation_id = ${invitationId} AND lease_id IS NOT NULL
+  `;
+  return result.count;
+}
+
 /** Holds a row lock on an invitation from an admin transaction. */
 async function holdInvitationLock(invitationId) {
   const conn = await h.admin.reserve();
@@ -260,6 +279,8 @@ module.exports = {
   localUserId,
   auditsFor,
   injectFailure,
+  deliveryRow,
+  expireDeliveryLease,
   holdInvitationLock,
   waitForLockWaiters,
 };

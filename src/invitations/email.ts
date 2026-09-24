@@ -1,16 +1,33 @@
 /**
  * S1-04 invitation email delivery (ADR-004 outbox + ADR-009 §9 phased worker).
  *
- *   API transaction      invitation row + outbox job (nonce only, no token/PII)
+ *   API transaction      invitation row + outbox job (nonce + immutable
+ *                        delivery snapshot; no token, no recipient PII)
  *   worker PHASE A       claim + payload read (autocommit)
- *   worker PHASE B       one short READ transaction under the job's tenant
- *                        (committed before any network call): the invitation
- *                        must still be pending and unexpired; the token is
- *                        re-derived and checked against token_hash; then ONE
- *                        Resend call with no transaction, no reserved
- *                        connection and no lock, with a finite timeout and
- *                        `Idempotency-Key: membership-invitation/<id>`
- *   worker PHASE C       new short transaction: audit the delivery outcome
+ *   worker PHASE B       (1) one short READ transaction under the job's
+ *                            tenant: recipient + token_hash (immutable); for
+ *                            a pending invitation re-derive the token, check
+ *                            it against token_hash and render the message;
+ *                        (2) ONE autocommit call acquiring the delivery LEASE
+ *                            (0009 app.worker_acquire_invitation_email_lease):
+ *                            advisory lock -> still pending and valid for the
+ *                            whole lease -> no other active lease -> lease
+ *                            committed. While it is valid, accept/revoke/expire
+ *                            cannot commit (409 INVITATION_IN_PROGRESS);
+ *                        (3) ONE Resend call with no transaction, no reserved
+ *                            connection and no lock, only if this attempt's
+ *                            monotonic deadline (measured from BEFORE the
+ *                            acquire call, so it ends no later than the
+ *                            database lease) still covers the whole request
+ *                            timeout. `Idempotency-Key: membership-invitation/<id>`
+ *   worker PHASE C       new short transaction: record the provider acceptance
+ *                        + release the lease (0009 complete function), audit,
+ *                        outbox `processed` -- one commit.
+ *
+ * Invariant: once a terminal transition has committed, no provider request
+ * for that invitation can START: every lease acquired before it has expired
+ * (and with it every attempt's local send deadline) or was released after
+ * its request finished; every later acquire sees the terminal state.
  *
  * Retries never create an invitation or a token: the same nonce reproduces the
  * same token, every other message input comes from the immutable delivery
@@ -19,6 +36,7 @@
  * accepted/revoked/expired invitations are never emailed.
  */
 
+import { performance } from 'node:perf_hooks';
 import type postgres from 'postgres';
 import { z } from 'zod';
 import { ROLE_NAMES_ES, type RoleCode } from '../authz/rbac-matrix.js';
@@ -51,9 +69,35 @@ export interface EmailMessage {
   readonly text: string;
 }
 
+export interface EmailSendOptions {
+  /** Upper bound for this request (the lease's remaining send window). */
+  readonly timeoutMs?: number;
+}
+
 export interface EmailSender {
-  /** Throws TransientDispatchError (retryable) or PermanentDispatchError. */
-  send(message: EmailMessage, idempotencyKey: string): Promise<{ readonly providerMessageId: string }>;
+  /**
+   * Throws TransientDispatchError (retryable) or PermanentDispatchError. An
+   * error for which isProviderRejection() is true means the provider answered
+   * and definitively did NOT accept the message.
+   */
+  send(message: EmailMessage, idempotencyKey: string, options?: EmailSendOptions): Promise<{ readonly providerMessageId: string }>;
+}
+
+const providerRejections = new WeakSet<object>();
+
+/** Marks an error as "the provider answered and did not accept the message". */
+export function markProviderRejection<T extends Error>(error: T): T {
+  providerRejections.add(error);
+  return error;
+}
+
+/**
+ * True only when the provider definitively refused the request. Timeouts,
+ * network errors, 5xx, 408 and 409 concurrent-idempotency are AMBIGUOUS (the
+ * message may have been accepted) and keep the delivery lease until expiry.
+ */
+export function isProviderRejection(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && providerRejections.has(error);
 }
 
 type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
@@ -72,7 +116,8 @@ export class ResendEmailSender implements EmailSender {
     this.fetchImpl = fetchImpl ?? ((input, init) => fetch(input, init));
   }
 
-  async send(message: EmailMessage, idempotencyKey: string): Promise<{ providerMessageId: string }> {
+  async send(message: EmailMessage, idempotencyKey: string, options: EmailSendOptions = {}): Promise<{ providerMessageId: string }> {
+    const timeoutMs = Math.max(1, Math.floor(Math.min(this.config.resendTimeoutMs, options.timeoutMs ?? Infinity)));
     let response: Response;
     try {
       response = await this.fetchImpl(new URL('/emails', this.config.resendBaseUrl).toString(), {
@@ -89,7 +134,7 @@ export class ResendEmailSender implements EmailSender {
           html: message.html,
           text: message.text,
         }),
-        signal: AbortSignal.timeout(this.config.resendTimeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
         redirect: 'error',
       });
     } catch {
@@ -113,14 +158,18 @@ export class ResendEmailSender implements EmailSender {
 
     const status = response.status;
     const name = (body as { name?: unknown } | null)?.name;
-    // Same key still in flight on Resend's side: retry later.
+    // Same key still in flight on Resend's side: retry later (ambiguous).
     if (status === 409 && name === 'concurrent_idempotent_requests') {
       throw new TransientDispatchError('RESEND_HTTP_409_CONCURRENT');
     }
-    if (status === 408 || status === 429 || status >= 500 || status === 401 || status === 403) {
+    if (status === 408 || status >= 500) {
       throw new TransientDispatchError(`RESEND_HTTP_${status}`);
     }
-    throw new PermanentDispatchError(`RESEND_HTTP_${status}`);
+    // Any other 4xx: the provider answered and refused this request.
+    if (status === 429 || status === 401 || status === 403) {
+      throw markProviderRejection(new TransientDispatchError(`RESEND_HTTP_${status}`));
+    }
+    throw markProviderRejection(new PermanentDispatchError(`RESEND_HTTP_${status}`));
   }
 }
 
@@ -247,8 +296,19 @@ export interface InvitationEmailPayload {
 }
 
 export type InvitationEmailPrepared =
-  | { readonly kind: 'sent'; readonly invitationId: string; readonly providerMessageId: string }
-  | { readonly kind: 'skipped'; readonly invitationId: string; readonly reason: 'accepted' | 'revoked' | 'expired' };
+  | {
+    readonly kind: 'sent';
+    readonly invitationId: string;
+    readonly leaseId: string;
+    readonly providerMessageId: string;
+  }
+  | {
+    readonly kind: 'skipped';
+    readonly invitationId: string;
+    readonly reason: 'accepted' | 'revoked' | 'expired';
+    readonly priorAttemptUnconfirmed: boolean;
+  }
+  | { readonly kind: 'already_sent'; readonly invitationId: string };
 
 interface InvitationEmailRow {
   email: string;
@@ -257,18 +317,63 @@ interface InvitationEmailRow {
   token_hash: string;
 }
 
+type LeaseOutcome =
+  | 'acquired'
+  | 'skip_accepted'
+  | 'skip_revoked'
+  | 'skip_expired'
+  | 'already_sent'
+  | 'busy'
+  | 'not_claimed'
+  | 'not_found';
+
+interface LeaseRow {
+  lease_outcome: LeaseOutcome;
+  lease_until: Date | null;
+  prior_attempt_unconfirmed: boolean;
+}
+
+interface CompletionRow {
+  delivery_outcome: 'recorded' | 'already_recorded';
+  delivery_lease_state: 'held' | 'expired' | 'superseded' | null;
+  delivery_invitation_status: string | null;
+}
+
+/** Lease = request timeout + this margin (DB clamps the lease to 2..120 s). */
+export const INVITATION_EMAIL_LEASE_MARGIN_SECONDS = 15;
+/** Local safety margin subtracted from the lease before any send may start. */
+export const INVITATION_EMAIL_LEASE_SAFETY_MS = 2_000;
+/** Below this remaining window the attempt gives up instead of sending. */
+export const INVITATION_EMAIL_MIN_SEND_WINDOW_MS = 1_000;
+const DEFAULT_SEND_TIMEOUT_MS = 10_000;
+
 export interface InvitationEmailHandlerOptions {
   readonly config: Pick<InvitationEmailConfig, 'tokenKey'>;
   readonly sender: EmailSender;
+  /** The sender's own request timeout (RESEND_TIMEOUT_MS). */
+  readonly sendTimeoutMs?: number;
+  /** Override of the lease length in seconds (tests); default timeout + margin. */
+  readonly leaseSeconds?: number;
+  /** Monotonic clock in ms (tests); default performance.now. */
+  readonly now?: () => number;
 }
 
 export function invitationEmailIdempotencyKey(invitationId: string): string {
   return `membership-invitation/${invitationId}`;
 }
 
+async function releaseLease(pool: postgres.Sql, event: OutboxEvent, leaseId: string): Promise<void> {
+  // Best effort: a failed release only means the lease runs to expiry.
+  await pool`SELECT app.worker_release_invitation_email_lease(${event.id}, ${leaseId}) AS released`.catch(() => undefined);
+}
+
 export function createInvitationEmailHandler(
   options: InvitationEmailHandlerOptions,
 ): PhasedOutboxHandler<InvitationEmailPrepared> {
+  const sendTimeoutMs = options.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+  const leaseSeconds = options.leaseSeconds ?? Math.ceil(sendTimeoutMs / 1000) + INVITATION_EMAIL_LEASE_MARGIN_SECONDS;
+  const now = options.now ?? (() => performance.now());
+
   return {
     kind: 'phased',
 
@@ -286,7 +391,7 @@ export function createInvitationEmailHandler(
         throw new PermanentDispatchError('INVITATION_TOKEN_KEY_VERSION_UNKNOWN');
       }
 
-      // Short tenant-scoped READ transaction, committed before the network call.
+      // (1) Short tenant-scoped READ transaction, committed before anything else.
       const [row] = await pool.begin(async (tx) => {
         await tx`SELECT set_config('app.tenant_id', ${event.tenantId}, true)`;
         // Immutable columns only (0008 mi_immutable_columns) + status. Nothing
@@ -299,41 +404,124 @@ export function createInvitationEmailHandler(
       });
       if (!row) throw new PermanentDispatchError('INVITATION_EMAIL_TARGET_NOT_FOUND');
 
-      if (row.status === 'accepted' || row.status === 'revoked') {
-        return { kind: 'skipped', invitationId: payload.invitation_id, reason: row.status };
-      }
-      if (row.status === 'expired' || row.is_expired) {
-        return { kind: 'skipped', invitationId: payload.invitation_id, reason: 'expired' };
+      // This read only supplies the (immutable) recipient and token hash. It
+      // never decides: skip/send is decided by the lease acquisition below,
+      // which also reports an earlier attempt with an unknown outcome.
+      let message: EmailMessage | null = null;
+      if (row.status === 'pending' && !row.is_expired) {
+        const token = deriveInvitationToken(options.config.tokenKey, payload.invitation_id, payload.token_nonce);
+        if (!invitationTokenMatchesHash(token, row.token_hash)) {
+          // Wrong secret/key version on this worker: never send a dead link.
+          throw new PermanentDispatchError('INVITATION_TOKEN_MISMATCH');
+        }
+        message = renderInvitationEmail(
+          payload.delivery,
+          row.email,
+          invitationAcceptUrl(payload.delivery.accept_url, token),
+        );
       }
 
-      const token = deriveInvitationToken(options.config.tokenKey, payload.invitation_id, payload.token_nonce);
-      if (!invitationTokenMatchesHash(token, row.token_hash)) {
-        // Wrong secret/key version on this worker: never send a dead link.
-        throw new PermanentDispatchError('INVITATION_TOKEN_MISMATCH');
+      // (2) Lease. The local deadline starts BEFORE the call, so it can only
+      // end earlier than the database lease (which starts inside the call).
+      const leaseId = uuidV7();
+      const startedAt = now();
+      const [lease] = await pool<LeaseRow[]>`
+        SELECT lease_outcome, lease_until, prior_attempt_unconfirmed
+        FROM app.worker_acquire_invitation_email_lease(${event.id}, ${leaseId}, ${leaseSeconds})
+      `;
+      switch (lease?.lease_outcome) {
+        case 'acquired':
+          break;
+        case 'skip_accepted':
+        case 'skip_revoked':
+        case 'skip_expired':
+          return {
+            kind: 'skipped',
+            invitationId: payload.invitation_id,
+            reason: lease.lease_outcome.slice('skip_'.length) as 'accepted' | 'revoked' | 'expired',
+            priorAttemptUnconfirmed: lease.prior_attempt_unconfirmed,
+          };
+        case 'already_sent':
+          return { kind: 'already_sent', invitationId: payload.invitation_id };
+        case 'busy':
+          throw new TransientDispatchError('INVITATION_EMAIL_LEASE_BUSY');
+        case 'not_claimed':
+          throw new TransientDispatchError('INVITATION_EMAIL_JOB_NOT_CLAIMED');
+        case 'not_found':
+          throw new PermanentDispatchError('INVITATION_EMAIL_TARGET_NOT_FOUND');
+        default:
+          throw new TransientDispatchError('INVITATION_EMAIL_LEASE_RESULT_INVALID');
       }
 
-      const message = renderInvitationEmail(
-        payload.delivery,
-        row.email,
-        invitationAcceptUrl(payload.delivery.accept_url, token),
-      );
-      const { providerMessageId } = await options.sender.send(message, invitationEmailIdempotencyKey(payload.invitation_id));
-      return { kind: 'sent', invitationId: payload.invitation_id, providerMessageId };
+      if (!message) {
+        // Terminal/expired on the read but leased now: impossible (terminal
+        // states are final, expiry is checked by the lease). Fail closed.
+        await releaseLease(pool, event, leaseId);
+        throw new TransientDispatchError('INVITATION_EMAIL_STATE_INCONSISTENT');
+      }
+
+      // (3) Send only if the whole request fits inside this attempt's lease.
+      const deadline = startedAt + leaseSeconds * 1000 - INVITATION_EMAIL_LEASE_SAFETY_MS;
+      const window = Math.min(sendTimeoutMs, deadline - now());
+      if (window < INVITATION_EMAIL_MIN_SEND_WINDOW_MS) {
+        await releaseLease(pool, event, leaseId); // no request was made
+        throw new TransientDispatchError('INVITATION_EMAIL_LEASE_WINDOW_TOO_SHORT');
+      }
+      try {
+        const { providerMessageId } = await options.sender.send(
+          message,
+          invitationEmailIdempotencyKey(payload.invitation_id),
+          { timeoutMs: window },
+        );
+        return { kind: 'sent', invitationId: payload.invitation_id, leaseId, providerMessageId };
+      } catch (error) {
+        // Definitive refusal: nothing can be in flight, free the invitation
+        // now. Ambiguous failure: keep the lease until it expires.
+        if (isProviderRejection(error)) await releaseLease(pool, event, leaseId);
+        throw error;
+      }
     },
 
     async apply(event: OutboxEvent, prepared: InvitationEmailPrepared, tx: postgres.ReservedSql): Promise<void> {
+      let action: string;
+      let metadata: postgres.JSONValue;
+      if (prepared.kind === 'already_sent') return; // recorded once already: no second audit
+      if (prepared.kind === 'sent') {
+        const [completion] = await tx<CompletionRow[]>`
+          SELECT delivery_outcome, delivery_lease_state, delivery_invitation_status
+          FROM app.worker_complete_invitation_email_delivery(${event.id}, ${prepared.leaseId}, ${prepared.providerMessageId})
+        `;
+        if (!completion) throw new Error('INVITATION_EMAIL_COMPLETION_MISSING');
+        if (completion.delivery_outcome === 'already_recorded') return;
+        action = 'membership.invitation_email_sent';
+        metadata = {
+          provider: 'resend',
+          provider_message_id: prepared.providerMessageId,
+          outbox_event_id: event.id,
+          attempt: event.attempts,
+          lease_state: completion.delivery_lease_state,
+          // Only when this attempt's lease had lapsed before the recording.
+          ...(completion.delivery_lease_state === 'held'
+            ? {}
+            : { invitation_status_at_record: completion.delivery_invitation_status }),
+        };
+      } else {
+        action = 'membership.invitation_email_skipped';
+        metadata = {
+          reason: prepared.reason,
+          outbox_event_id: event.id,
+          attempt: event.attempts,
+          ...(prepared.priorAttemptUnconfirmed ? { prior_attempt_unconfirmed: true } : {}),
+        };
+      }
       await tx`
         INSERT INTO public.audit_logs (
           id, tenant_id, actor_type, action, outcome, entity_type, entity_id,
           reason_code, metadata_json, request_id
         ) VALUES (
-          ${uuidV7()}, ${event.tenantId}, 'system',
-          ${prepared.kind === 'sent' ? 'membership.invitation_email_sent' : 'membership.invitation_email_skipped'},
+          ${uuidV7()}, ${event.tenantId}, 'system', ${action},
           'success', 'membership_invitation', ${prepared.invitationId}, 'membership_invitation',
-          ${tx.json(prepared.kind === 'sent'
-            ? { provider: 'resend', provider_message_id: prepared.providerMessageId, outbox_event_id: event.id, attempt: event.attempts }
-            : { reason: prepared.reason, outbox_event_id: event.id, attempt: event.attempts })},
-          ${`outbox:${event.id}`}
+          ${tx.json(metadata)}, ${`outbox:${event.id}`}
         )
       `;
     },

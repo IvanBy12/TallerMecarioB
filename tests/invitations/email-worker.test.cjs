@@ -133,6 +133,9 @@ test('Y: transient failure -> retry reuses the same invitation, token, body and 
   let job = await jobOf(id);
   assert.equal(job.status, 'pending', 'scheduled for retry');
   assert.equal(job.last_error, 'RESEND_HTTP_503');
+  // A 503 is ambiguous: the lease is kept until it expires (never released early).
+  assert.ok((await h.deliveryRow(id)).lease_id, 'lease kept after an ambiguous failure');
+  assert.equal(await h.expireDeliveryLease(id), 1);
   await makeDue(id);
   await drain(sender);
   job = await jobOf(id);
@@ -160,12 +163,25 @@ test('Y: a re-delivered job after a lost completion re-sends idempotently (same 
     await remove();
   }
   assert.equal((await jobOf(id)).status, 'pending');
+  // The completion rolled back, so the lease of attempt 1 is still active:
+  // an immediate retry is refused (never two concurrent holders).
+  await makeDue(id);
+  await drain(sender);
+  assert.equal(sender.for(id).length, 1, 'busy lease: no second send yet');
+  assert.equal((await jobOf(id)).last_error, 'INVITATION_EMAIL_LEASE_BUSY');
+  assert.equal(await h.expireDeliveryLease(id), 1);
   await makeDue(id);
   await drain(sender);
   const calls = sender.for(id);
   assert.equal(calls.length, 2);
   assert.equal(calls[1].idempotencyKey, calls[0].idempotencyKey, 'Resend deduplicates the second delivery');
+  assert.deepStrictEqual(calls[1], calls[0], 'identical request under the same key');
   assert.equal((await jobOf(id)).status, 'processed');
+  const sent = (await h.auditsFor(id)).filter((a) => a.action === 'membership.invitation_email_sent');
+  assert.equal(sent.length, 1, 'one internal effect');
+  const delivery = await h.deliveryRow(id);
+  assert.equal(delivery.provider_message_id, sent[0].metadata_json.provider_message_id);
+  assert.equal(delivery.lease_id, null, 'lease released on completion');
 });
 
 test('Y: accepted / revoked / expired invitations are never emailed', async () => {

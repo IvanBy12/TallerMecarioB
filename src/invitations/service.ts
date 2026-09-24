@@ -112,6 +112,11 @@ function isDatabaseError(error: unknown, code: string, constraint?: string): boo
   return candidate?.code === code && (constraint === undefined || candidate.constraint_name === constraint);
 }
 
+/** 0009: a terminal transition was refused because an email delivery holds a valid lease. */
+function isDeliveryInProgress(error: unknown): boolean {
+  return isDatabaseError(error, '55006', 'mi_delivery_in_progress');
+}
+
 function parseRole(value: unknown): RoleCode {
   const role = ROLE_CODES.find((code) => code === value);
   if (!role) throw new Error('INVITATION_ROLE_UNKNOWN');
@@ -399,15 +404,23 @@ export async function revokeInvitation(
   if (row.status === 'accepted') throw invitationError('INVITATION_ALREADY_ACCEPTED');
   if (row.status === 'expired' || row.is_expired) throw invitationError('INVITATION_EXPIRED');
 
-  const [revoked] = await sql<InvitationRow[]>`
-    UPDATE public.membership_invitations AS i
-    SET status = 'revoked',
-      revoked_at = pg_catalog.clock_timestamp(),
-      revoked_by_membership_id = ${tenant.membershipId}
-    WHERE i.id = ${row.id} AND i.tenant_id = ${tenant.tenantId} AND i.status = 'pending'
-    RETURNING i.id, i.email, ${role}::text AS role_code, i.status, false AS is_expired,
-      i.expires_at, i.created_at, i.accepted_at, i.revoked_at
-  `;
+  let revoked: InvitationRow | undefined;
+  try {
+    [revoked] = await sql<InvitationRow[]>`
+      UPDATE public.membership_invitations AS i
+      SET status = 'revoked',
+        revoked_at = pg_catalog.clock_timestamp(),
+        revoked_by_membership_id = ${tenant.membershipId}
+      WHERE i.id = ${row.id} AND i.tenant_id = ${tenant.tenantId} AND i.status = 'pending'
+      RETURNING i.id, i.email, ${role}::text AS role_code, i.status, false AS is_expired,
+        i.expires_at, i.created_at, i.accepted_at, i.revoked_at
+    `;
+  } catch (error) {
+    // S104-03: an email delivery holds a valid lease (0009 lifecycle trigger).
+    // Nothing is committed; the caller retries once the delivery finishes.
+    if (isDeliveryInProgress(error)) throw invitationError('INVITATION_IN_PROGRESS');
+    throw error;
+  }
   if (!revoked) throw new Error('INVITATION_REVOKE_RESULT_MISSING');
 
   await insertAudit(sql, meta, [{
@@ -664,7 +677,7 @@ export async function acceptInvitation(input: AcceptInvitationInput): Promise<Ac
     await rollbackAndRelease(sql);
     if (isDatabaseError(error, '23514', 'mi_accept_after_deadline')) throw invitationError('INVITATION_EXPIRED');
     if (isDatabaseError(error, '23505', 'memberships_tenant_user_key')) throw invitationError('MEMBERSHIP_ALREADY_EXISTS');
-    if (isDatabaseError(error, '55P03')) throw invitationError('INVITATION_IN_PROGRESS');
+    if (isDatabaseError(error, '55P03') || isDeliveryInProgress(error)) throw invitationError('INVITATION_IN_PROGRESS');
     throw error;
   }
 }

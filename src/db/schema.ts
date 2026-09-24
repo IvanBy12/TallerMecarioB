@@ -428,6 +428,51 @@ export const membershipInvitations = pgTable(
   ],
 );
 
+/**
+ * S1-04 audit fix (0009): delivery lease of the invitation email, one row per
+ * invitation, created lazily by the worker. While a lease is active
+ * (`lease_expires_at > now`) no pending -> accepted/revoked/expired
+ * transition can commit (lifecycle trigger, INVITATION_IN_PROGRESS), and a
+ * lease never outlives the invitation's `expires_at`. Written only through
+ * the allowlisted SECURITY DEFINER worker functions of 0009; runtime API can
+ * only SELECT it under tenant RLS; the worker role has no direct grant.
+ * `lease_outbox_event_id` has no FK on purpose: outbox retention must not be
+ * blocked by delivery bookkeeping.
+ */
+export const membershipInvitationDeliveries = pgTable(
+  'membership_invitation_deliveries',
+  {
+    tenantId: tenantId(),
+    invitationId: uuid('invitation_id').notNull(),
+    leaseId: uuid('lease_id'),
+    leaseOutboxEventId: uuid('lease_outbox_event_id'),
+    leaseAttempt: integer('lease_attempt'),
+    leaseAcquiredAt: ts('lease_acquired_at'),
+    leaseExpiresAt: ts('lease_expires_at'),
+    leaseCount: integer('lease_count').notNull().default(0),
+    sentAt: ts('sent_at'),
+    providerMessageId: varchar('provider_message_id', { length: 128 }),
+    ...timestamps(),
+  },
+  (t) => [
+    primaryKey({ name: 'mid_pk', columns: [t.tenantId, t.invitationId] }),
+    foreignKey({
+      name: 'mid_invitation_fk',
+      columns: [t.tenantId, t.invitationId],
+      foreignColumns: [membershipInvitations.tenantId, membershipInvitations.id],
+    }),
+    rawCheck(
+      'mid_lease_coherence_check',
+      'num_nulls("lease_id", "lease_outbox_event_id", "lease_attempt", "lease_acquired_at", "lease_expires_at") IN (0, 5)',
+    ),
+    rawCheck('mid_lease_window_check', '"lease_expires_at" IS NULL OR "lease_expires_at" > "lease_acquired_at"'),
+    rawCheck('mid_lease_attempt_check', '"lease_attempt" IS NULL OR "lease_attempt" > 0'),
+    rawCheck('mid_lease_count_check', '"lease_count" >= 0'),
+    rawCheck('mid_sent_coherence_check', '("sent_at" IS NULL) = ("provider_message_id" IS NULL)'),
+    rawCheck('mid_provider_message_id_check', `"provider_message_id" IS NULL OR length("provider_message_id") BETWEEN 1 AND 128`),
+  ],
+);
+
 /* ========================================================================== */
 /* 3. CRM: clientes y vehículos                                               */
 /* ========================================================================== */

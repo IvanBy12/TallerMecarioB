@@ -796,7 +796,11 @@ test('resolver: exact hash only, minimal output, least privilege, no PUBLIC/work
     WHERE grantee = 'tallermecario_bootstrap_resolver' AND table_name = 'membership_invitations'
     ORDER BY column_name, privilege_type
   `;
-  assert.deepEqual(columnGrants.map((g) => `${g.column_name}:${g.privilege_type}`), ['id:SELECT', 'tenant_id:SELECT', 'token_hash:SELECT']);
+  // 0008: id/tenant_id/token_hash (exact-hash resolver). 0009: status/expires_at
+  // (read-only, delivery-lease functions). Never any write on this table.
+  assert.deepEqual(columnGrants.map((g) => `${g.column_name}:${g.privilege_type}`), [
+    'expires_at:SELECT', 'id:SELECT', 'status:SELECT', 'tenant_id:SELECT', 'token_hash:SELECT',
+  ]);
   const tableGrants = await h.admin`
     SELECT privilege_type FROM information_schema.role_table_grants
     WHERE grantee = 'tallermecario_bootstrap_resolver' AND table_name = 'membership_invitations'

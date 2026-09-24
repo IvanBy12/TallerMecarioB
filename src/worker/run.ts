@@ -136,6 +136,8 @@ async function main(): Promise<void> {
     phasedHandlers[INVITATION_EMAIL_EVENT_TYPE] = createInvitationEmailHandler({
       config: invitationEmail,
       sender: new ResendEmailSender(invitationEmail),
+      // The delivery lease covers the whole request (timeout + margin).
+      sendTimeoutMs: invitationEmail.resendTimeoutMs,
     });
   }
 
