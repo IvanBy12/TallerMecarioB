@@ -99,6 +99,13 @@
       "when": 1790280822455,
       "tag": "0013_s1_05_owner_lock_hierarchy",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1790283688875,
+      "tag": "0014_s1_05_owner_lock_missing_workshop",
+      "breakpoints": true
     }
   ]
 }
