@@ -197,6 +197,84 @@ test('cross-tenant: a tenant-A runtime cannot lock tenant B by any supported mea
 test('cross-tenant: the runtime lock refuses to run without a tenant context', async () => {
   await assert.rejects(h.apiPool.begin((tx) => tx`SELECT app.lock_current_tenant_owner_set()`), (e) => e?.code === '55000');
   await assert.rejects(h.workerPool.begin((tx) => tx`SELECT app.lock_current_tenant_owner_set()`), (e) => e?.code === '55000');
+  // A malformed tenant context keeps failing closed (invalid uuid cast).
+  await assert.rejects(h.apiPool.begin(async (tx) => {
+    await tx`SELECT set_config('app.tenant_id', 'not-a-uuid', true)`;
+    await tx`SELECT app.lock_current_tenant_owner_set()`;
+  }), (e) => e?.code === '22P02');
+});
+
+/** Outbox rows: the S1-03 handler must enqueue nothing for a ghost tenant. */
+async function outboxCount() {
+  const [row] = await h.admin`SELECT count(*)::int AS n FROM public.outbox_events`;
+  return row.n;
+}
+
+test('S1-03 revoke with a valid TenantContext whose workshop does not exist: not_found, no 55000, no side effects', async () => {
+  const { a, b } = await h.twoTenants();
+  const ghostTenant = randomUUID();
+  for (const target of [a.owner, a.technician, { membershipId: randomUUID(), user: { id: randomUUID() } }]) {
+    const outboxBefore = await outboxCount();
+    const outcomes = [];
+    const handler = createMembershipRevocationHandler({ onOutcome: (outcome) => outcomes.push(outcome.outcome) });
+    // Keep the ghost-tenant job transaction OPEN after the handler ran, and
+    // prove real tenants are not blocked by it meanwhile.
+    const job = await openTx('worker', ghostTenant, (conn) => handler(revocationEvent(ghostTenant, target), conn));
+    try {
+      assert.deepEqual(outcomes, ['not_found']);
+      const assign = await within(h.assignRole(app, a.owner, a.tenantId, a.advisor.membershipId, { role_code: 'technician' }), 3000);
+      assert.notEqual(assign, TIMEOUT, 'tenant A blocked by the ghost-tenant job');
+      assert.ok([201, 409].includes(assign.status), JSON.stringify(assign.json));
+      const status = await within(settle(runtime(h.workerPool, b.tenantId, (tx) => setStatus(tx, b.technician.membershipId, 'suspended'))), 3000);
+      assert.equal(status, 'ok', 'tenant B blocked by the ghost-tenant job');
+      await runtime(h.workerPool, b.tenantId, (tx) => setStatus(tx, b.technician.membershipId, 'active'));
+    } finally {
+      await job.commit();
+    }
+    // The ghost job itself changed nothing (the real-tenant control writes
+    // above touch other rows and emit no outbox event).
+    const [jobAudits] = await h.admin`
+      SELECT count(*)::int AS n FROM public.audit_logs
+      WHERE action = 'membership.revoked' AND (tenant_id = ${ghostTenant} OR entity_id = ${target.membershipId})
+    `;
+    assert.equal(jobAudits.n, 0, 'no revocation audit from the ghost job');
+    assert.equal(await outboxCount(), outboxBefore, 'no outbox side effect');
+    assert.equal(await h.statusOf(a.owner.membershipId), 'active');
+    assert.equal(await h.statusOf(a.technician.membershipId), 'active');
+    assert.deepEqual(await h.roleCodes(a.owner.membershipId), ['owner']);
+    assert.deepEqual(await h.roleCodes(a.technician.membershipId), ['technician']);
+  }
+  // The last owner of a real tenant is still protected afterwards.
+  await assert.rejects(runtime(h.workerPool, a.tenantId, (tx) => setStatus(tx, a.owner.membershipId, 'revoked')), ownerViolation);
+});
+
+test('owner-set lock: an existing tenant really locks its workshop; a context without a visible workshop is a no-op', async () => {
+  const { a, b } = await h.twoTenants();
+  const nowaitRow = async (tenantId) => settle(privileged((tx) => tx`SELECT id FROM public.workshops WHERE id = ${tenantId} FOR NO KEY UPDATE NOWAIT`));
+  const lockNotAvailable = (e) => e?.code === '55P03';
+
+  const holderA = await openTx('api', a.tenantId, (conn) => conn`SELECT app.lock_current_tenant_owner_set()`);
+  try {
+    assert.ok(lockNotAvailable(await nowaitRow(a.tenantId)), 'A workshop row is held');
+    assert.equal(await nowaitRow(b.tenantId), 'ok', 'B workshop row is free');
+  } finally {
+    await holderA.commit();
+  }
+
+  // Nonexistent tenant in the context: no error, nothing locked, and the same
+  // statement-level behavior as before 0013 (UPDATE matches zero rows).
+  const ghost = await openTx('worker', randomUUID(), async (conn) => {
+    await conn`SELECT app.lock_current_tenant_owner_set()`;
+    const updated = await conn`UPDATE public.memberships SET status = 'revoked', revoked_at = now() WHERE id = ${a.owner.membershipId}`;
+    assert.equal(updated.count, 0);
+  });
+  try {
+    assert.equal(await nowaitRow(a.tenantId), 'ok');
+    assert.equal(await nowaitRow(b.tenantId), 'ok');
+  } finally {
+    await ghost.commit();
+  }
+  assert.equal(await h.statusOf(a.owner.membershipId), 'active');
 });
 
 /* -------------------------------------------------------------------------- */

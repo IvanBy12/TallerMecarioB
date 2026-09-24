@@ -110,6 +110,24 @@ const MUTATIONS = {
         END $f$`,
     ],
   },
+  // 0014 (round 3): restore the 0013 RAISE when the context's workshop is not visible.
+  'nonexistent-tenant-raise': {
+    sql: [
+      `CREATE OR REPLACE FUNCTION app.lock_current_tenant_owner_set() RETURNS void
+        LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog, public AS $f$
+        DECLARE v_tenant_id uuid := app.current_tenant_id();
+        BEGIN
+          IF v_tenant_id IS NULL THEN
+            RAISE EXCEPTION 'owner-set lock requires a tenant context' USING ERRCODE = 'object_not_in_prerequisite_state';
+          END IF;
+          LOCK TABLE app.owner_mutation_gate IN ACCESS SHARE MODE;
+          PERFORM 1 FROM public.workshops AS w WHERE w.id = v_tenant_id FOR NO KEY UPDATE OF w;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'workshop of the tenant context is not visible' USING ERRCODE = 'object_not_in_prerequisite_state';
+          END IF;
+        END $f$`,
+    ],
+  },
   // Authorize from the request-start TenantContext snapshot instead of fresh rows.
   'stale-permissions': {
     js: [[SERVICE, 'const permissions = await freshActorPermissions(sql, context);', 'const permissions = new Set(context.tenant.permissions.keys());']],

@@ -5,7 +5,8 @@
  *
  *   0010 head -> HEAD   (applies 0011 + 0012 + 0013 in one run)
  *   0011 head -> HEAD   (applies 0012 + 0013)
- *   0012 head -> HEAD   (applies 0013: lock hierarchy)
+ *   0012 head -> HEAD   (applies 0013 lock hierarchy + 0014)
+ *   0013 head -> HEAD   (applies 0014: no-op lock for a missing workshop)
  *
  * For each start head: disposable local DB migrated with a COPY of drizzle/
  * whose journal stops at that head; seed a single-owner tenant, a two-owner
@@ -30,6 +31,7 @@ const START_HEADS = [
   '0010_s1_04_worker_invitation_privileges',
   '0011_s1_05_member_role_management',
   '0012_s1_05_owner_status_invariant',
+  '0013_s1_05_owner_lock_hierarchy',
 ];
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner', 'tallermecario_migrator', 'tallermecario_api',
@@ -163,6 +165,12 @@ async function main() {
           triggers: 4, policies: ['tenant_delete', 'tenant_insert', 'tenant_select'], api_update: false, api_delete: true,
           gate: true, runtime_owner_functions: ['app.lock_current_tenant_owner_set()'],
         }, `${head}: HEAD objects`);
+
+        // 0014: a valid context whose workshop does not exist is a no-op, not 55000.
+        await sql.begin(async (tx) => {
+          await tx`SELECT set_config('app.tenant_id', ${randomUUID()}, true)`;
+          await tx`SELECT app.lock_current_tenant_owner_set()`;
+        });
 
         // Invariant on upgraded data (privileged session: triggers apply to everyone).
         await assert.rejects(sql`UPDATE public.memberships SET status = 'revoked', revoked_at = now() WHERE id = ${tenants.single.memberships[0]}`,
