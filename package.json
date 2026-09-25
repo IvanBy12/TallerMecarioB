@@ -66,6 +66,7 @@
     "test:cross-tenant:final:ci": "node scripts/test-cross-tenant-final.cjs",
     "test:cross-tenant:mutations": "node --env-file=.env scripts/test-cross-tenant-mutations.cjs",
     "test:cross-tenant:mutations:ci": "node scripts/test-cross-tenant-mutations.cjs",
+    "test:crm:db": "node scripts/test-crm-db.cjs",
     "smoke:clerk:dev": "npm run build && node --env-file=.env scripts/smoke-clerk-dev.cjs",
     "rbac:generate-seed-sql": "node scripts/generate-rbac-seed-sql.cjs",
     "rbac:check-doc-parity": "node scripts/check-rbac-matrix-doc.cjs",
