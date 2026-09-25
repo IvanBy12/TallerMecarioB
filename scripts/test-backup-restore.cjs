@@ -216,7 +216,7 @@ async function main() {
         { id: fixture.customerA, tenant_id: fixture.tenantA, first_name: 'Carlos', last_name: 'Tenant-A', phone: '3000000001' },
         { id: fixture.customerB, tenant_id: fixture.tenantB, first_name: 'Beatriz', last_name: 'Tenant-B', phone: '3000000002' },
       ])}`;
-      await tx`INSERT INTO vehicles ${tx({ id: fixture.vehicleA, tenant_id: fixture.tenantA, plate: `BKP${fixture.vehicleA.slice(0, 5)}`, vehicle_type: 'car', brand: 'Mazda', model: '3' })}`;
+      await tx`INSERT INTO vehicles ${tx({ id: fixture.vehicleA, tenant_id: fixture.tenantA, plate: `BKP${fixture.vehicleA.slice(0, 5).toUpperCase()}`, vehicle_type: 'car', brand: 'Mazda', model: '3' })}`;
       await tx`INSERT INTO receptions ${tx({ id: fixture.receptionA, tenant_id: fixture.tenantA, vehicle_id: fixture.vehicleA, customer_id: fixture.customerA, received_by_membership_id: fixture.membershipA, mileage_km: 42000 })}`;
       await tx`INSERT INTO service_orders ${tx({ id: fixture.orderA, tenant_id: fixture.tenantA, reception_id: fixture.receptionA, vehicle_id: fixture.vehicleA, customer_id: fixture.customerA, order_number: 900001, created_by_membership_id: fixture.membershipA })}`;
       await tx`

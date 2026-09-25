@@ -99,7 +99,7 @@ async function makeTenant({ members = 2, withOrder = false } = {}) {
       t.vehicle = id();
       t.reception = id();
       t.order = id();
-      await tx`INSERT INTO vehicles ${tx({ id: t.vehicle, tenant_id: t.tenant, plate: `P${t.vehicle.slice(0, 6)}`, vehicle_type: 'car', brand: 'b', model: 'm' })}`;
+      await tx`INSERT INTO vehicles ${tx({ id: t.vehicle, tenant_id: t.tenant, plate: `P${t.vehicle.slice(0, 6).toUpperCase()}`, vehicle_type: 'car', brand: 'b', model: 'm' })}`;
       await tx`INSERT INTO receptions ${tx({ id: t.reception, tenant_id: t.tenant, vehicle_id: t.vehicle, customer_id: t.customer, received_by_membership_id: t.members[0], mileage_km: 1 })}`;
       await tx`INSERT INTO service_orders ${tx({ id: t.order, tenant_id: t.tenant, reception_id: t.reception, vehicle_id: t.vehicle, customer_id: t.customer, order_number: 1, created_by_membership_id: t.members[0] })}`;
     }

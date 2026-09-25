@@ -127,6 +127,13 @@
       "when": 1790307594101,
       "tag": "0017_s1_07_audit_log_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790371765309,
+      "tag": "0018_s2_03_crm_hardening",
+      "breakpoints": true
     }
   ]
 }

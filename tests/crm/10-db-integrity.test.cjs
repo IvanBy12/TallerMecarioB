@@ -102,6 +102,7 @@ test('DB-01 catalog: CRM tables, tenant identities, composite FKs, CHECKs and in
     ['vehicles_type_check', 'c', /vehicle_type/u],
     ['vehicles_model_year_check', 'c', /model_year/u],
     ['vehicles_mileage_check', 'c', /current_mileage_km/u],
+    ['vehicles_plate_normalized_check', 'c', /btrim/u],
     ['vehicle_owners_relationship_check', 'c', /relationship_type/u],
     ['vehicle_owners_validity_check', 'c', /valid_to/u],
     ['vehicle_owners_vehicle_fk', 'f', /FOREIGN KEY \(tenant_id, vehicle_id\) REFERENCES vehicles\(tenant_id, id\)/u],
@@ -153,12 +154,12 @@ test('DB-02 RLS catalog: ENABLE + FORCE and exactly SELECT/INSERT/UPDATE policie
   }
 });
 
-test('DB-03 BASELINE SNAPSHOT: API/worker table grants and PUBLIC', async () => {
+test('DB-03 API SELECT/INSERT and column UPDATE; worker and PUBLIC denied', async () => {
   for (const role of ['tallermecario_api', 'tallermecario_worker']) {
     for (const table of ['customers', 'vehicles', 'vehicle_owners']) {
       for (const privilege of ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) {
         const [r] = await admin`SELECT has_table_privilege(${role}, ${table}, ${privilege}) AS allowed`;
-        assert.equal(r.allowed, ['SELECT', 'INSERT', 'UPDATE'].includes(privilege), `${role}.${table}.${privilege}`);
+        assert.equal(r.allowed, role === 'tallermecario_api' && ['SELECT', 'INSERT'].includes(privilege), `${role}.${table}.${privilege}`);
       }
     }
   }
@@ -166,13 +167,14 @@ test('DB-03 BASELINE SNAPSHOT: API/worker table grants and PUBLIC', async () => 
   assert.equal(publicGrants.length, 0);
 });
 
-test('DB-04 runtime isolation for all CRM tables, with and without tenant context; worker included', async () => {
-  for (const sql of [api, worker]) {
+test('DB-04 API cross-tenant isolation; worker denied CRM access', async () => {
+  for (const sql of [api]) {
     for (const [table, foreignId] of [['customers', b.customer], ['vehicles', b.vehicle], ['vehicle_owners', b.owner]]) {
       assert.equal((await sql.unsafe(`SELECT id FROM ${table}`)).length, 0);
       await scoped(sql, a.tenant, async (c) => {
         assert.equal((await c.unsafe(`SELECT id FROM ${table} WHERE tenant_id = '${b.tenant}'`)).length, 0);
-        assert.equal((await c.unsafe(`UPDATE ${table} SET id = id WHERE id = '${foreignId}'`)).count, 0);
+        const column = { customers: 'notes', vehicles: 'model', vehicle_owners: 'valid_to' }[table];
+        assert.equal((await c.unsafe(`UPDATE ${table} SET ${column} = ${column} WHERE id = '${foreignId}'`)).count, 0);
       });
     }
     await assert.rejects(customer(sql, a.tenant), error('42501'));
@@ -185,6 +187,11 @@ test('DB-04 runtime isolation for all CRM tables, with and without tenant contex
         if (kind === 'owner') await ownership(c, b.tenant, b.vehicle, b.customer);
       }), error('42501'));
     }
+  }
+  for (const table of ['customers', 'vehicles', 'vehicle_owners']) {
+    await assert.rejects(worker.unsafe(`SELECT id FROM ${table}`), error('42501'));
+    await assert.rejects(worker.unsafe(`INSERT INTO ${table} DEFAULT VALUES`), error('42501'));
+    await assert.rejects(worker.unsafe(`UPDATE ${table} SET id=id`), error('42501'));
   }
 });
 
@@ -214,14 +221,11 @@ test('DB-06 concurrent plate INSERT blocks then loses on UNIQUE after winner COM
   assert.equal((await admin`SELECT count(*)::int AS n FROM vehicles WHERE tenant_id=${a.tenant} AND plate='XYZ789'`)[0].n, 1);
 });
 
-test('CH-04 CHARACTERIZATION / KNOWN GAP: unnormalized plates remain distinct', async () => {
-  await scoped(api, a.tenant, async (c) => {
-    await vehicle(c, a.tenant, 'abc123');
-    await vehicle(c, a.tenant, ' ABC123 ');
-  });
-  const plates = await admin`SELECT plate FROM vehicles WHERE tenant_id=${a.tenant} AND plate IN ('ABC123','abc123',' ABC123 ') ORDER BY plate`;
-  assert.equal(plates.length, 3);
-  process.stdout.write('CH-04 CHARACTERIZATION / KNOWN GAP: case and surrounding spaces accepted; Sprint 2 Gate remains open\n');
+test('CH-04 SECURITY INVARIANT: lowercase and edge spaces rejected', async () => {
+  for (const plate of ['abc123', 'AbC123', ' ABC123', 'ABC123 ']) {
+    await assert.rejects(scoped(api, a.tenant, (c) => vehicle(c, a.tenant, plate)),
+      error('23514', 'vehicles_plate_normalized_check'));
+  }
 });
 
 test('DB-07 composite FKs reject cross-tenant vehicle and customer even with privileged context', async () => {
@@ -295,19 +299,15 @@ test('DB-09 concurrent ownership changes serialize on vehicle row and retain his
   assert.ok(rows[0].valid_to && rows[1].valid_to);
 });
 
-test('CH-05 CHARACTERIZATION / KNOWN GAP: runtime can rewrite historical ownership fields', async () => {
+test('CH-05 SECURITY INVARIANT: API cannot rewrite historical ownership fields', async () => {
   const [historical] = await admin`SELECT id, customer_id, created_at FROM vehicle_owners WHERE tenant_id=${a.tenant} AND vehicle_id=${a.vehicle} AND valid_to IS NOT NULL`;
   const c = await begin(api, a.tenant);
   try {
-    const changed = await c`UPDATE vehicle_owners SET customer_id=${a.customer2}, created_at=${new Date('2020-01-01')}, is_primary=false WHERE id=${historical.id} RETURNING customer_id, created_at, is_primary`;
-    assert.equal(changed.length, 1);
-    assert.equal(changed[0].customer_id, a.customer2);
-    assert.equal(changed[0].is_primary, false);
+    await assert.rejects(c`UPDATE vehicle_owners SET customer_id=${a.customer2}, created_at=${new Date('2020-01-01')}, is_primary=false WHERE id=${historical.id}`, error('42501'));
   } finally { await close(c); }
   const [preserved] = await admin`SELECT customer_id, created_at FROM vehicle_owners WHERE id=${historical.id}`;
   assert.equal(preserved.customer_id, historical.customer_id);
   assert.equal(preserved.created_at.getTime(), historical.created_at.getTime());
-  process.stdout.write('CH-05 CHARACTERIZATION / KNOWN GAP: historical columns writable by runtime; Sprint 2 Gate remains open\n');
 });
 
 test('DB-10 CHECK constraints reject invalid vehicle and ownership values', async () => {
@@ -316,7 +316,7 @@ test('DB-10 CHECK constraints reject invalid vehicle and ownership values', asyn
     [{ model_year: 1885 }, 'vehicles_model_year_check'],
     [{ current_mileage_km: -1 }, 'vehicles_mileage_check'],
   ]) {
-    await assert.rejects(scoped(api, a.tenant, (c) => vehicle(c, a.tenant, `N${id().slice(0, 6)}`, id(), extra)),
+    await assert.rejects(scoped(api, a.tenant, (c) => vehicle(c, a.tenant, `N${id().slice(0, 6).toUpperCase()}`, id(), extra)),
       error('23514', constraint));
   }
   await assert.rejects(scoped(api, a.tenant, (c) => ownership(c, a.tenant, a.vehicle, a.customer, id(), {

@@ -530,6 +530,7 @@ export const vehicles = pgTable(
   (t) => [
     unique('vehicles_tenant_id_key').on(t.tenantId, t.id),
     unique('vehicles_tenant_plate_key').on(t.tenantId, t.plate),
+    rawCheck('vehicles_plate_normalized_check', '"plate" = btrim("plate") AND "plate" = upper("plate" COLLATE "C")'),
     enumCheck('vehicles_type_check', t.vehicleType, ['car', 'motorcycle', 'other']),
     rawCheck('vehicles_model_year_check', '"model_year" BETWEEN 1886 AND 2200'),
     rawCheck('vehicles_mileage_check', '"current_mileage_km" >= 0'),
