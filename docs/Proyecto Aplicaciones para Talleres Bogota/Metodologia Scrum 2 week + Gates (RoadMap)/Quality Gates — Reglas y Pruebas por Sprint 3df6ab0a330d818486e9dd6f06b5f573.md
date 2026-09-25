@@ -182,7 +182,7 @@ Un FAILED se corrige y se vuelve a ejecutar; no se cambia manualmente a PASSED.
 - [ ]  Relación cruzada rechazada por DB donde aplique.
 - [ ]  Sesión expirada/revocada manejada.
 - [ ]  Audit log de cambios sensibles.
-- [ ]  E2E login → tenant → dashboard.
+- [ ]  E2E login → tenant → shell/home protegida: login Clerk válido en navegador → identidad Clerk válida (JWT con `azp` autorizado y `sid`) → `TenantContext` resuelto → acceso autorizado al workshop con membership `active` → entrada a la shell/home protegida de la app (puede ser placeholder o harness). En Sprint 1, “dashboard” significa solo ese destino protegido: **no** exige dashboard de métricas, KPIs ni widgets owner/admin, que pertenecen a Sprint 11 (§14, `dashboard.business.read`).
 
 **FAIL crítico:** fuga entre tenants o bypass de permisos.
 
