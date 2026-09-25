@@ -14,6 +14,11 @@ sigue gitignored).
 | `Diccionario de Datos v1 — PostgreSQL/Diccionario 01 …md` | §4 `memberships`, §9 `membership_roles`, nota de objeto `app.owner_mutation_gate` | C |
 | `Modelo de Datos ERD v1 — PostgreSQL …md` | reglas de integridad ("todo taller conserva al menos un owner activo") | D |
 
+## Estado (cierre documental, 2026-09-24)
+
+- **Fusionado al docs canónico** (`TallerMecarioB/docs`, gitignored) por secciones desde esta rama (`5553279`): Arquitectura nuevo §13.2 (A + DECISION_REQUIRED S1-05); ADR-009 §6.1 (nota `membership_roles`), §10 viñetas S1-05 y nuevo §10.1 (B + interacción S1-03 + datos legacy); Diccionario 01 §4 y §9 + nota `app.owner_mutation_gate` (C); ERD regla de owner activo + nueva subsección «Invariante de owner activo» con dependencias 0011→0014 (D).
+- Verificado: solo 2 líneas originales sustituidas (ampliadas, no borradas), 0 `.rej`/conflictos; contenido S1-03 (`identity_sync_states`, Clerk lifecycle) y S1-04 (`membership_invitation_deliveries`, lease) intacto; ninguna afirmación de `user disabled ⇒ membership revoked`; la única mención de los helpers UUID de 0012 es su eliminación en 0013. Notion no fue editado.
+
 ---
 
 ## A. Arquitectura §13.2 — Roles de memberships (S1-05) — contrato backend ↔ PWA
