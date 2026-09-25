@@ -83,6 +83,9 @@ const DURABLE_OUTCOME_STATUS = Object.freeze({
   // S1-05: denied role-escalation / self-modification attempts commit their `denied` audit row.
   ROLE_ASSIGNMENT_NOT_ALLOWED: 403,
   SELF_ROLE_MODIFICATION_FORBIDDEN: 403,
+  // S1-06: denied self-management / insufficient-authority membership commands
+  // commit their `denied` audit row (Estados y Transiciones v1 §9).
+  DOMAIN_ACTION_FORBIDDEN: 403,
 } as const);
 
 export type DurableTenantOutcomeCode = keyof typeof DURABLE_OUTCOME_STATUS;
