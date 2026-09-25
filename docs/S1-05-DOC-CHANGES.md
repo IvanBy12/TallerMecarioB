@@ -1,4 +1,4 @@
-# S1-05 member role management (+ audit fixes 1 y 2) — cambios de documentación preparados (NO canónicos todavía)
+# S1-05 member role management — cambios de documentación tras audit fixes 1–3 (0011–0014, NO canónicos todavía)
 
 Preparado 2026-09-24 en el worktree `task/s1-05-audit-fix-3` (base `0e7a7b8`). Estado final de la
 implementación: migraciones **0011 + 0012 + 0013 + 0014**. El docs canónico del checkout principal y Notion
