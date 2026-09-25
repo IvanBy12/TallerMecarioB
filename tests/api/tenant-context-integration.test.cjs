@@ -482,7 +482,12 @@ function httpRequest(port, { method = 'GET', path, headers = {}, body }) {
 
 async function setMembershipStatus(membershipId, status) {
   if (status === 'active') {
-    await admin`UPDATE public.memberships SET status = 'active', suspended_at = NULL, revoked_at = NULL WHERE id = ${membershipId}`;
+    // Test SETUP reset (superuser, triggers off): reactivation is not a
+    // transition of the membership state machine (0016); the CHECK still applies.
+    await admin.begin(async (tx) => {
+      await tx`SET LOCAL session_replication_role = replica`;
+      await tx`UPDATE public.memberships SET status = 'active', suspended_at = NULL, revoked_at = NULL WHERE id = ${membershipId}`;
+    });
   } else {
     await admin`UPDATE public.memberships SET status = 'suspended', suspended_at = now() WHERE id = ${membershipId}`;
   }

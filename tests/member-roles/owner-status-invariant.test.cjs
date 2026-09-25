@@ -33,12 +33,15 @@ const ownerViolation = (error) => error?.code === '23514' && error?.constraint_n
 const roleOwnerViolation = (error) => error?.code === '23514' && error?.constraint_name === 'mr_last_active_owner';
 const anyOwnerViolation = (error) => ownerViolation(error) || roleOwnerViolation(error);
 
+const statusTransitionViolation = (error) => error?.code === '23514' && error?.constraint_name === 'm_status_transition';
+
+/** A contract-valid status write (0016): only the timestamp of the entered state changes. */
 function setStatus(conn, membershipId, status) {
   return conn`
     UPDATE public.memberships
     SET status = ${status},
-      suspended_at = CASE WHEN ${status} = 'suspended' THEN now() ELSE NULL END,
-      revoked_at = CASE WHEN ${status} = 'revoked' THEN now() ELSE NULL END,
+      suspended_at = CASE WHEN ${status} = 'suspended' THEN now() ELSE suspended_at END,
+      revoked_at = CASE WHEN ${status} = 'revoked' THEN now() ELSE revoked_at END,
       updated_at = now()
     WHERE id = ${membershipId}
   `;
@@ -134,8 +137,18 @@ test('I: a suspended/revoked owner does not count as an active owner', async () 
     { label: 'revkowner', roles: ['owner'], status: 'revoked' },
   ]);
   await assert.rejects(runtime(h.apiPool, a.tenantId, (tx) => setStatus(tx, a.owner.membershipId, 'revoked')), ownerViolation);
-  // Reactivating an owner is an addition: no lock needed, always allowed by this guard.
-  await runtime(h.apiPool, a.tenantId, (tx) => setStatus(tx, a.suspowner.membershipId, 'active'));
+  // Reactivation is not a runtime transition (0016 state machine), so the
+  // suspended/revoked owners can never be turned back into active owners here.
+  for (const target of [a.suspowner, a.revkowner]) {
+    await assert.rejects(runtime(h.apiPool, a.tenantId, (tx) => setStatus(tx, target.membershipId, 'active')), statusTransitionViolation);
+  }
+  assert.equal(await h.activeOwners(a.tenantId), 1);
+  // Adding an active owner (role INSERT on an active membership) is what lets the first one go.
+  const ownerRole = await h.roleId('owner');
+  await runtime(h.apiPool, a.tenantId, (tx) => tx`
+    INSERT INTO public.membership_roles (tenant_id, membership_id, role_id, assigned_by_membership_id)
+    VALUES (${a.tenantId}, ${a.admin.membershipId}, ${ownerRole}, ${a.owner.membershipId})
+  `);
   assert.equal(await h.activeOwners(a.tenantId), 2);
   await runtime(h.apiPool, a.tenantId, (tx) => setStatus(tx, a.owner.membershipId, 'revoked'));
   assert.equal(await h.activeOwners(a.tenantId), 1);
@@ -156,9 +169,9 @@ test('C: with two active owners one may be suspended or revoked; the second one 
 test('H: non-owner memberships change status freely, even in a tenant that already has no active owner', async () => {
   const { a } = await h.twoTenants([{ label: 'extra', roles: ['service_advisor', 'admin'] }]);
   await runtime(h.apiPool, a.tenantId, (tx) => setStatus(tx, a.technician.membershipId, 'suspended'));
-  await runtime(h.apiPool, a.tenantId, (tx) => setStatus(tx, a.technician.membershipId, 'active'));
+  await runtime(h.apiPool, a.tenantId, (tx) => setStatus(tx, a.technician.membershipId, 'revoked'));
   await runtime(h.workerPool, a.tenantId, (tx) => setStatus(tx, a.extra.membershipId, 'revoked'));
-  assert.equal(await h.statusOf(a.technician.membershipId), 'active');
+  assert.equal(await h.statusOf(a.technician.membershipId), 'revoked');
   assert.equal(await h.statusOf(a.extra.membershipId), 'revoked');
 
   // Legacy/broken tenant with zero active owners: the guard never blocks non-owners.

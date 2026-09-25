@@ -42,15 +42,28 @@ const settle = (promise) => promise.then(() => 'ok', (error) => error);
 const TIMEOUT = Symbol('timeout');
 const within = (promise, ms) => Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(TIMEOUT), ms))]);
 
+/** A contract-valid status write (0016): only the timestamp of the entered state changes. */
 function setStatus(conn, membershipId, status) {
   return conn`
     UPDATE public.memberships
     SET status = ${status},
-      suspended_at = CASE WHEN ${status} = 'suspended' THEN now() ELSE NULL END,
-      revoked_at = CASE WHEN ${status} = 'revoked' THEN now() ELSE NULL END,
+      suspended_at = CASE WHEN ${status} = 'suspended' THEN now() ELSE suspended_at END,
+      revoked_at = CASE WHEN ${status} = 'revoked' THEN now() ELSE revoked_at END,
       updated_at = now()
     WHERE id = ${membershipId}
   `;
+}
+
+/**
+ * Test SETUP only (superuser, triggers off): puts a membership back to a
+ * clean `active` state between iterations. Reactivation is not a runtime
+ * transition (0016); the CHECK still applies.
+ */
+async function resetActiveFixture(membershipId) {
+  await h.admin.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`UPDATE public.memberships SET status = 'active', suspended_at = NULL, revoked_at = NULL WHERE id = ${membershipId}`;
+  });
 }
 
 function deleteOwnerRole(conn, membershipId) {
@@ -227,7 +240,7 @@ test('S1-03 revoke with a valid TenantContext whose workshop does not exist: not
       assert.ok([201, 409].includes(assign.status), JSON.stringify(assign.json));
       const status = await within(settle(runtime(h.workerPool, b.tenantId, (tx) => setStatus(tx, b.technician.membershipId, 'suspended'))), 3000);
       assert.equal(status, 'ok', 'tenant B blocked by the ghost-tenant job');
-      await runtime(h.workerPool, b.tenantId, (tx) => setStatus(tx, b.technician.membershipId, 'active'));
+      await resetActiveFixture(b.technician.membershipId);
     } finally {
       await job.commit();
     }
