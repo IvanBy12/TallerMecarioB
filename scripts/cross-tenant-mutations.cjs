@@ -25,6 +25,9 @@ const MUTATIONS = Object.freeze({
   ] },
   'worker-claim-tenant-check-removed': { js: [['worker/outbox-worker.js',
     'if (job.outboxEventId !== event.id || job.tenantId !== event.tenantId) {', 'if (false) {']] },
+  'phased-worker-claim-tenant-check-removed': { js: [['worker/outbox-worker.js',
+    'async function processPhasedJob(options, job, event, handler) {\n    assertClaimMatchesEvent(job, event);',
+    'async function processPhasedJob(options, job, event, handler) {']] },
 });
 
 async function applyMutation(phase, { admin, compiledRoot } = {}) {
