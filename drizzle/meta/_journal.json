@@ -113,6 +113,13 @@
       "when": 1790301026657,
       "tag": "0015_s1_06_membership_lifecycle_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790303994101,
+      "tag": "0016_s1_06_membership_state_machine",
+      "breakpoints": true
     }
   ]
 }

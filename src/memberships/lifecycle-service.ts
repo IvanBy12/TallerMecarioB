@@ -10,6 +10,11 @@
  *   revoke    active    -> revoked     audit membership.revoked
  *   revoke    suspended -> revoked     audit membership.revoked (suspended_at kept)
  *
+ * PostgreSQL enforces the same table for every writer (0016: triggers
+ * m_status_transition / m_lifecycle_history + CHECK
+ * memberships_lifecycle_state_check); the checks here only turn it into
+ * stable API errors before the write.
+ *
  * Anything else is 409 DOMAIN_INVALID_STATE_TRANSITION with no effect. There is
  * NO reactivation command (suspended|revoked -> active): the canonical docs do
  * not define it (DECISION_REQUIRED, docs/S1-06-DOC-CHANGES.md), so it fails

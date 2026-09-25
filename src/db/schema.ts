@@ -328,6 +328,14 @@ export const memberships = pgTable(
        AND ("status" <> 'suspended' OR "suspended_at" IS NOT NULL)
        AND ("status" <> 'revoked' OR "revoked_at" IS NOT NULL)`,
     ),
+    // S1-06 audit fix (0016): exact timestamps per state. Transitions and
+    // timestamp history are enforced by triggers in the migration SQL.
+    rawCheck(
+      'memberships_lifecycle_state_check',
+      `("status" = 'active' AND "suspended_at" IS NULL AND "revoked_at" IS NULL)
+       OR ("status" = 'suspended' AND "suspended_at" IS NOT NULL AND "revoked_at" IS NULL)
+       OR ("status" = 'revoked' AND "revoked_at" IS NOT NULL)`,
+    ),
   ],
 );
 
