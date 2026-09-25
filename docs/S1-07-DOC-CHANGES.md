@@ -59,13 +59,13 @@ servidor (UUIDv7, nunca `X-Request-Id` del cliente) en filas de la API; correlac
 | `role.assigned` | S1-01, S1-04, S1-05 | taller | user | success → `workshop_onboarding` \| `membership_invitation` \| `member_role_management`; denied → `role_assignment_not_permitted` (+`missing_permissions`) \| `self_role_modification` | membership_role / membership objetivo | before/after `{roles}`; metadata `{role}` (S1-05), `{assigned_by_membership_id, invitation_id}` (S1-04), `{assigned_by_membership_id, bootstrap}` (S1-01) |
 | `role.revoked` | S1-05 | taller | user | success → `member_role_management`; denied → ídem `role.assigned` | membership_role / membership objetivo | before/after `{roles}`; metadata `{role}` |
 | `membership.invited` | S1-04 | taller | user | success → `membership_invitation`; denied → `role_assignment_not_permitted` | membership_invitation / invitación (NULL si denied) | after `{status, target_role, expires_at}`; denied metadata `{target_role, required_permission}` |
-| `membership.invitation_revoked` | S1-04 | taller | user | success → `membership_invitation`; denied → `role_assignment_not_permitted` | membership_invitation | before/after `{status}`; metadata `{target_role}` |
-| `membership.invitation_accepted` | S1-04 | taller de la invitación | user (sin membership si denied) | success → `membership_invitation`; denied → `invitation_email_mismatch` | membership_invitation | after `{status, accepted_membership_id}` |
+| `membership.invitation_revoked` | S1-04 | taller | user | success → `membership_invitation`; denied → `role_assignment_not_permitted` | membership_invitation | success: before/after `{status}`, metadata `{target_role}`; denied: metadata `{target_role, required_permission}` |
+| `membership.invitation_accepted` | S1-04 | taller de la invitación | user (sin membership si denied) | success → `membership_invitation`; denied → `invitation_email_mismatch` | membership_invitation | success: before `{status: pending}`, after `{status, accepted_membership_id}`; denied: sin before/after/metadata |
 | `membership.invitation_expired` | S1-04 (materialización al crear/aceptar) | taller | **system** | success → `membership_invitation` | membership_invitation | before/after `{status}`; metadata `{materialized_by, target_role}` |
 | `membership.invitation_email_sent` | S1-04 worker | taller | **system** | success → `membership_invitation` | membership_invitation | metadata `{provider, provider_message_id, outbox_event_id, attempt, lease_state[, invitation_status_at_record]}` |
 | `membership.invitation_email_skipped` | S1-04 worker | taller | **system** | success → `membership_invitation` | membership_invitation | metadata `{reason, outbox_event_id, attempt[, prior_attempt_unconfirmed]}` |
 | `membership.suspended` | S1-06 | taller | user | success → `member_status_management`; denied → `membership_management_not_permitted` (+`missing_permissions`) \| `self_membership_modification` | membership | before/after `{status}`; metadata `{command, roles}` |
-| `membership.revoked` | S1-06, S1-03 worker | taller | user (S1-06) \| **provider** (S1-03) | S1-06 como `membership.suspended`; S1-03 success → `identity_provider_user_deleted`, denied → `last_owner_invariant` | membership | before/after `{status}`; metadata S1-03 `{reason, user_id, webhook_event_id}` |
+| `membership.revoked` | S1-06, S1-03 worker | taller | user (S1-06) \| **provider** (S1-03) | S1-06 como `membership.suspended`; S1-03 success → `identity_provider_user_deleted`, denied → `last_owner_invariant` | membership | before/after `{status}` (en `last_owner_invariant` before = after: la membership se conserva); metadata S1-03 `{reason, user_id, webhook_event_id}` |
 | `identity.user_provisioned_webhook` | S1-03 worker | NULL | **provider** | success → NULL | user | metadata `{identity_provider, provider_event_type, status}` |
 | `identity.user_profile_synced` | S1-03 worker | NULL | **provider** | success → NULL | user | metadata `{identity_provider, provider_event_type, changed_fields}` (nombres de campo, nunca valores) |
 | `identity.user_disabled` | S1-03 worker | NULL | **provider** | success → NULL | user | metadata `{identity_provider, provider_event_type, reason}` |
@@ -107,7 +107,22 @@ S1-03 y S1-04; el catálogo anterior es la fuente única propuesta (texto E).
   - worker: solo `system`/`provider` sin ids de actor (un job nunca actúa como usuario, exista o no).
   - Rechazo: `42501`, constraint `audit_logs_actor_guard`.
   - Las funciones `SECURITY DEFINER` allowlisted (JIT, lifecycle de identidad) corren como su owner NOLOGIN y conservan su
-    propio contrato (acciones/entidades allowlisted, actor fijo).
+    propio contrato (acciones/entidades allowlisted, actor fijo). Rutas que escriben fuera del guard, por diseño:
+    `app.bootstrap_provision_user` (EXECUTE api; fila JIT, actor = el usuario provisionado),
+    `app.ingest_verified_clerk_webhook` (EXECUTE api; `identity.webhook_event_conflict`, actor `provider`) y
+    `app.identity_sync_apply` (EXECUTE worker; `identity.*`, actor `provider`). Solo escriben filas **sin tenant** y nunca
+    atribuyen a un usuario distinto del provisionado; su `request_id` lo aporta quien llama (correlación, no autoridad).
+- **Límite del guard (threat model ADR-009 §1/§3/§10.1, verificado en el audit final):** `app.tenant_id`,
+  `app.user_id`, `app.membership_id` y `app.request_id` son **contexto transaction-local fijado por la aplicación**
+  (`bindTenantContext` a partir de una membership validada en la misma transacción), **no prueba criptográfica**. Una
+  sesión runtime con SQL arbitrario puede ejecutar `SET LOCAL app.user_id/app.membership_id = …` (o `app.tenant_id`)
+  y luego insertar una fila atribuida a otro miembro, o a otro tenant, exactamente igual que puede leer/escribir los
+  datos de ese tenant bajo RLS. El guard **no** protege contra una credencial runtime comprometida ni contra SQL
+  directo malicioso. Lo que sí garantiza es que el código de la aplicación no puede escribir un actor, un tenant o un
+  `request_id` distintos del contexto que ligó; contra ese tipo de error (bugs, valores tomados del request) está
+  probado con mutantes. Tampoco verifica que `app.membership_id` pertenezca a `app.user_id`; ambos los fija
+  `bindTenantContext` a partir de la misma fila. La FK compuesta sí impide una membership de otro tenant. Filas
+  `system` de la API: el guard no restringe la acción; hoy la API solo escribe `membership.invitation_expired`.
 
 ## 3. Semántica de tenant
 
@@ -125,9 +140,12 @@ S1-03 y S1-04; el catálogo anterior es la fuente única propuesta (texto E).
 ## 4. Append-only
 
 - Grants: runtime `SELECT` + `INSERT` por columnas; sin `UPDATE`/`DELETE`/`TRUNCATE`/`REFERENCES`/`TRIGGER`.
-- Trigger defensivo 0002 (`audit_logs_append_only_row_trg`, `…_truncate_trg`) rechaza UPDATE/DELETE/TRUNCATE de runtime
-  aunque una migración futura re-otorgara el privilegio. Runtime no puede deshabilitar triggers (no es owner) ni usar
-  `session_replication_role` (requiere superusuario).
+- Tres capas independientes (verificado en el audit final): (1) **grants**: el rechazo primario es
+  `42501 permission denied for table audit_logs`, antes de cualquier trigger; (2) **RLS**: no existe policy
+  UPDATE/DELETE, así que con un grant regresado UPDATE/DELETE afectan 0 filas; (3) **trigger defensivo 0002**
+  (`audit_logs_append_only_row_trg`, `…_truncate_trg`): rechaza TRUNCATE con el grant regresado, y UPDATE/DELETE si
+  además regresara una policy. Runtime no puede deshabilitar triggers (no es owner) ni usar `session_replication_role`
+  (requiere superusuario; `pg_parameter_acl` vacío).
 - Ninguna FK apunta a `audit_logs` (no hay CASCADE posible); sus FKs salientes son `NO ACTION`.
 - 0017 no reescribe historia: filas legacy (p. ej. `user_agent` de antes de S1-04) quedan intactas (upgrade test).
 - Purge por retención (24 meses) = proceso privilegiado futuro, fuera de Sprint 1.
@@ -170,6 +188,21 @@ cross-tenant (403, ver §3); ids inexistentes/de otro tenant (404); transiciones
 `LAST_OWNER_REQUIRED` (invariante, no autorización); tokens de invitación inválidos/usados/revocados. Cada intento
 denegado durable es una fila (sin deduplicar), acotado por el rate limit de la ruta. Ver DECISION_REQUIRED D1.
 
+Por qué casos parecidos se tratan distinto (sin inconsistencia):
+
+- **Último owner.** `LAST_OWNER_REQUIRED` (API, 409) no se audita: vía API es inalcanzable por construcción (solo un
+  owner tiene `roles.assign_owner` y nadie se modifica a sí mismo); el trigger `m_last_active_owner`/`mr_last_active_owner`
+  es solo un backstop (Arquitectura §13.2/§13.3) y el request no cambia nada. `last_owner_invariant` (worker S1-03) **sí**
+  se audita: es el resultado real de un evento del proveedor (la identidad se borró pero la membership se **conserva**
+  deliberadamente), una decisión de estado que sin la fila no dejaría rastro.
+- **Invitaciones.** El token inválido (404) no se resuelve a tenant ni a entidad, así que no hay tenant donde escribir y
+  el runtime no puede escribir filas sin tenant. El token usado, revocado o vencido es un replay sin efecto (la
+  expiración se materializa como fila `system`). El email distinto **sí** se audita: es una credencial **válida y viva**
+  usada por otra identidad verificada, es decir, un posible mal uso.
+- **Permisos.** La falta de `memberships.manage_staff`/`invite_staff`, sea en el guard de ruta o en la relectura fresca,
+  es de la clase "sin acceso a la función" y no se persiste en ningún módulo. La falta del permiso de **asignación** de
+  un rol (escalada) o de autoridad sobre el objetivo se persiste en todos los módulos (S1-04, S1-05 y S1-06).
+
 ## 7. Atribución system / worker / provider
 
 - Worker: `actor_type` `system` (efectos propios: correo) o `provider` (efectos de Clerk: lifecycle, revocación);
@@ -186,6 +219,12 @@ denegado durable es una fila (sin deduplicar), acotado por el rate limit de la r
 Permitido (allowlist por evento, §1): ids internos (UUID), códigos de rol/permiso/estado/comando, nombres de
 campos cambiados, proveedor y id de mensaje del proveedor, número de intento, estado del lease, `expires_at`,
 `timezone`/`currency`, IP del socket (columna `ip_address`, solo API).
+
+**Política de IP (implementada, no ampliar sin decisión):** `ip_address` = `request.ip` de Fastify **sin
+`trustProxy`**, es decir la dirección del peer TCP; no se interpreta `X-Forwarded-For` ni otro header del cliente. Detrás
+de un proxy o balanceador sería la IP del proxy. Se guarda solo en filas de la API: onboarding, invitaciones (incluida la
+aceptación, sus denegados y la expiración materializada), roles y memberships. **No** se guarda en filas del worker ni
+en las de funciones bootstrap (`identity.user_provisioned_jit`, `identity.*`).
 
 Prohibido (recursivo en `before_json`/`after_json`/`metadata_json`, y en `request_id`/`reason_code`):
 JWT/session tokens, `Authorization`, cookies, token de invitación en claro, `token_hash`, nonce, cualquier digest
@@ -270,9 +309,17 @@ allí son los «intentos de escalada de privilegio relevantes» de esta sección
 
 Conflicto: §19 dice que `identity.user_provisioned_jit` registra "IP/user-agent cuando proceda"; Operación §5.1 (S1-04)
 prohíbe persistir el header `User-Agent` (queda NULL). La fila JIT tampoco tiene IP (la función bootstrap no la recibe).
-Resolución propuesta (Operación es la fuente más específica y posterior): reemplazar por "registrar: user_id interno,
-identity_provider, request_id, timestamp y resultado. Nunca JWT, payload de Clerk ni headers libres del cliente
-(`User-Agent` incluido)". No bloquea S1-07.
+Resolución (Operación es la fuente más específica y posterior; refleja la implementación auditada). En §19, reemplazar
+la frase "Para `identity.user_provisioned_jit`, registrar: … IP/user-agent cuando proceda y resultado. **No registrar JWT
+ni payload completo de Clerk.**" por:
+
+> Para `identity.user_provisioned_jit`, registrar: user_id interno (actor y entidad), `identity_provider`, `request_id`,
+> timestamp (`created_at`) y resultado. Este evento no registra IP ni User-Agent: la función bootstrap no los recibe y,
+> desde S1-04, ningún header libre del cliente (`User-Agent`, `Referer`, …) se persiste en `audit_logs`. **No registrar
+> JWT ni payload de Clerk.** En los eventos escritos por la API, `ip_address` es la IP del peer de la conexión (sin
+> `X-Forwarded-For`); los eventos de worker/proveedor no llevan IP (Operación §5.1).
+
+Estado: **CLOSED** a nivel documental (texto final listo). Falta fusionarlo en el doc canónico. No bloquea S1-07.
 
 ## G. Arquitectura §15
 
@@ -284,7 +331,8 @@ y privilegios en Operación §5.1–§5.2; garantías en PostgreSQL (append-only
 ## DOC_CONFLICT
 
 1. **Security Baseline §19 ↔ Operación §5.1 (S1-04)** — `user_agent` en el evento JIT. Tarea afectada: S1-07
-   (campos de `identity.user_provisioned_jit`). Implementación sigue Operación (NULL). Texto F.
+   (campos de `identity.user_provisioned_jit`). Implementación sigue Operación (NULL). Texto F, final: **CLOSED**
+   (resuelto documentalmente; pendiente de fusión al canónico).
 
 ## DOC_UPDATE_REQUIRED
 
@@ -314,6 +362,42 @@ Textos A–G (catálogo único, 0017 en ADR-009/Diccionario/ERD, RBAC §20 → c
   `test:audit:mutations`.
 - S107-06: alinear `app.reject_runtime_append_only_mutation()` (0002) a `pg_has_role` como 0017.
 - Retención/purge privilegiado de auditoría (24 meses) y `trace_id`: fuera de Sprint 1 (gate transversal).
+- Logins huérfanos del clúster local `tm_test_mlapi_2ca50082c46d4843` / `tm_test_mlwrk_2ca50082c46d4843` (miembros de
+  api/worker) quedaron de una corrida S1-06 interrumpida. No forman parte de ninguna migración y no afectan a los
+  tests. Limpieza manual posterior: `DROP ROLE` en el clúster local.
+
+## Audit final de arquitectura (2026-09-25, worktree `.claude/worktrees/s1-07-final-audit` @ `0106bdd`)
+
+Primera pasada de solo lectura, con un probe independiente de la suite contra PostgreSQL real y logins NOBYPASSRLS
+(65 comprobaciones; los únicos fallos iniciales se debían a regex del probe con mensajes en español y se
+re-verificaron aparte). Segunda pasada: solo este documento.
+
+- ACL 0017: sin INSERT de tabla; columnas exactas para api y worker; resolver sin cambio; identity_sync sin INSERT;
+  PUBLIC sin ACL de tabla ni de columna; api/worker no son miembros de ningún rol; `pg_parameter_acl` vacío.
+- Spoof de actor por SQL directo: API (`provider`, `platform`, `system`+ids, otro user o membership de A, user de B,
+  user inexistente, membership NULL, `request_id` forjado) → todos `42501 audit_logs_actor_guard`. Worker (`user` con o
+  sin GUCs de usuario, `provider`+ids, `platform`) → guard. Tenant B desde el contexto A → 42501 (RLS).
+- GUC spoofing: aceptado tras `SET LOCAL app.*` (atribuir a otro miembro, escribir en otro tenant), que es el límite
+  documentado en §2 (ADR-009 §1/§3/§10.1). Una membership de otro tenant sigue bloqueada por la FK compuesta.
+- 0017 con precondición inválida (drift `UPDATE(outcome)` a api, `SELECT` a PUBLIC): rechazado atómicamente (ledger
+  en 17, sin función ni trigger, grants intactos). Un drift `INSERT(user_agent)` al worker lo elimina el REVOKE y 0017
+  aplica.
+- Funciones que escriben `audit_logs`: exactamente 2 directas (resolver, `SECURITY DEFINER`, `search_path` fijo, sin
+  PUBLIC) y 2 indirectas (`ingest_verified_clerk_webhook` para api, `identity_sync_apply` para worker; owner
+  identity_sync). Solo escriben filas sin tenant con actor fijo; ver §2.
+- Mutaciones: las 15 de la rama más 3 del auditor (`grant-table-insert`, `grant-created-at`, `grant-worker-ip`,
+  ejecutadas desde una copia fuera del repo) → 18/18 KILLED.
+
+Observaciones nuevas (LOW/INFO; no bloquean y no requieren cambio de código en S1-07):
+
+- **LOW** El guard no restringe la acción de las filas `system` escritas por la API (hoy solo
+  `membership.invitation_expired`). Endurecimiento futuro posible: allowlist de acciones `system` para la API.
+- **INFO** El guard omite la comprobación (`RETURN NEW`) si `current_user` no apareciera en `pg_roles`; en la práctica
+  es imposible. Es fail-open teórico; alinearlo cuando se toque 0002 (S107-06).
+- **INFO (pre-S1, fuera de alcance)** `app.append_wompi_webhook_attempt` (0004) es `SECURITY DEFINER` con owner
+  `tallermecario_schema_owner` y EXECUTE para el worker. Su SQL es estático y solo toca `webhook_processing_attempts`,
+  así que no salta 0017. ADR-009 §8 pide un owner dedicado; queda registrado para Wompi y Sprint 0.
+- **INFO** `ip_address` detrás de un proxy es la IP del proxy (sin `trustProxy`); ver la política de IP en §8.
 
 ## Evidencia (2026-09-24, PostgreSQL local real)
 
@@ -328,3 +412,5 @@ Textos A–G (catálogo único, 0017 en ADR-009/Diccionario/ERD, RBAC §20 → c
   (+upgrade), invitations 56/56 (+upgrade), onboarding 53/53, authz 26/26, authz:db 4/4, tenant-context core 70/70,
   db 27/27, api 51/51, api:security 12/12, api:multitenant 4/4, db:sprint0 59/59, migration-lock, wompi 20/20,
   outbox worker 19/19, secret scan PASS, `npm audit --omit=dev` 0 vulnerabilidades.
+- Audit final (2026-09-25, @ `0106bdd`, en serie): la misma regresión en verde (`test:audit` 65/65 con 0 skipped y
+  0 todo; `invitations:upgrade` PASS; `identity:upgrade` PASS) y 18/18 mutantes muertos.
