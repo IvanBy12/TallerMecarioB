@@ -67,3 +67,5 @@ Transversal: npm run test:authz:db:ci; npm run test:tenant-context:db:ci
 ```
 
 S1-08 queda cerrado técnicamente y su documentación fusionada en esta rama. Esto no declara `PASSED` el Quality Gate final de Sprint 1; la deuda CI permanece abierta.
+
+**Actualización del Quality Gate final (2026-09-25):** la rama `task/sprint-1-final-quality-gate` añade al workflow CI las suites funcionales y de upgrade S1-04…S1-08, identidad, `authz:db` y `tenant-context:db`, en pasos seriales. Las mutaciones S1-05…S1-08 se ejecutan como gate manual/pre-release. S1-04 incluye sondas de mutación con rollback dentro de `test:invitations`; no tiene runner separado. La afirmación de deuda abierta arriba describe el estado histórico de S1-08.

@@ -10,7 +10,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18
@@ -49,17 +49,22 @@ jobs:
       - name: Secret scan
         run: npm run security:secret-scan
 
-      - name: Dependency audit (high/critical blocks the build)
-        run: npm audit --omit=dev --audit-level=high
+      - name: Dependency audit (zero production vulnerabilities)
+        run: npm audit --omit=dev
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Build
+        run: npm run build
 
       - name: RBAC matrix and TenantContext core (S1-02, no database)
         run: |
           npm run test:authz
           npm run test:tenant-context-core
 
+      # GitHub Actions runs these steps in order. Each DB suite uses its own
+      # disposable database; never launch migration suites in parallel here.
       - name: Clean migration and PostgreSQL suite
         run: npm run test:db:sprint0:ci
 
@@ -86,6 +91,29 @@ jobs:
 
       - name: Workshop onboarding (S1-01)
         run: npm run test:onboarding:ci
+
+      - name: Membership invitations (S1-04)
+        run: |
+          npm run test:invitations:ci
+          npm run test:invitations:upgrade:ci
+
+      - name: Membership roles (S1-05)
+        run: |
+          npm run test:member-roles:ci
+          npm run test:member-roles:upgrade:ci
+
+      - name: Membership lifecycle (S1-06)
+        run: |
+          npm run test:member-lifecycle:ci
+          npm run test:member-lifecycle:upgrade:ci
+
+      - name: Sprint 1 audit (S1-07)
+        run: |
+          npm run test:audit:ci
+          npm run test:audit:upgrade:ci
+
+      - name: Final cross-tenant isolation (S1-08)
+        run: npm run test:cross-tenant:final:ci
 
       - name: Outbox worker regression
         run: npm run test:outbox:ci
