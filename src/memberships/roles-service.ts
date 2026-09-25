@@ -37,14 +37,24 @@
 import type postgres from 'postgres';
 import { ApiError, type TenantRequestContext } from '../api/app.js';
 import { PermissionDeniedError } from '../authz/authorize.js';
-import { ROLE_CODES, type PermissionCode, type RoleCode } from '../authz/rbac-matrix.js';
+import type { PermissionCode, RoleCode } from '../authz/rbac-matrix.js';
 import { ROLE_ASSIGNMENT_PERMISSION } from '../authz/role-assignment.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
+import {
+  freshActorPermissions,
+  lockCurrentTenantOwnerSet,
+  type MemberRoleDto,
+  type MembershipStatus,
+  OWNER_ROLE,
+  parseRole,
+  remainingActiveOwners,
+  rolesOf,
+} from './membership-access.js';
+
+export type { MemberRoleDto } from './membership-access.js';
 
 const REASON_CODE = 'member_role_management';
 const MANAGE_PERMISSION: PermissionCode = 'memberships.manage_staff';
-/** The invariant subject of ERD "al menos un owner activo" (not an authorization shortcut). */
-const OWNER_ROLE: RoleCode = 'owner';
 
 export const MEMBER_ROLE_ERRORS = Object.freeze({
   MEMBERSHIP_NOT_FOUND: { status: 404, message: 'The membership was not found.' },
@@ -78,18 +88,12 @@ export interface RequestMeta {
   readonly ipAddress: string;
 }
 
-export interface MemberRoleDto {
-  readonly role: RoleCode;
-  readonly assignedAt: string;
-}
-
 export interface MemberRolesDto {
   readonly membershipId: string;
-  readonly status: 'active' | 'suspended' | 'revoked';
+  readonly status: MembershipStatus;
   readonly roles: readonly MemberRoleDto[];
 }
 
-type MembershipStatus = MemberRolesDto['status'];
 type RoleAction = 'role.assigned' | 'role.revoked';
 
 interface DatabaseError {
@@ -102,22 +106,6 @@ function isDatabaseError(error: unknown, code: string, constraint: string): bool
   return candidate?.code === code && candidate.constraint_name === constraint;
 }
 
-function parseRole(value: unknown): RoleCode {
-  const role = ROLE_CODES.find((code) => code === value);
-  if (!role) throw new Error('MEMBER_ROLE_UNKNOWN');
-  return role;
-}
-
-function iso(value: Date | string): string {
-  return (value instanceof Date ? value : new Date(value)).toISOString();
-}
-
-/** Canonical order (ROLE_CODES), independent of the database row order. */
-function sortedRoles(roles: Iterable<RoleCode>): RoleCode[] {
-  const held = new Set(roles);
-  return ROLE_CODES.filter((code) => held.has(code));
-}
-
 /* -------------------------------------------------------------------------- */
 /* Queries (all on the request's reserved, tenant-bound transaction)          */
 /* -------------------------------------------------------------------------- */
@@ -125,22 +113,6 @@ function sortedRoles(roles: Iterable<RoleCode>): RoleCode[] {
 interface TargetRow {
   id: string;
   status: MembershipStatus;
-}
-
-interface RoleRow {
-  role_code: string;
-  assigned_at: Date;
-}
-
-/**
- * The tenant owner-set lock (0013): owner_mutation_gate ACCESS SHARE, then the
- * TenantContext tenant's workshop row FOR NO KEY UPDATE (under RLS: only the
- * bound tenant can be locked; no tenant id is passed). One serialization point
- * per tenant for every role change and every owner status change, always
- * taken before any membership row lock.
- */
-async function lockTenantRoleChanges(sql: postgres.ReservedSql): Promise<void> {
-  await sql`SELECT app.lock_current_tenant_owner_set()`;
 }
 
 async function lockTarget(sql: postgres.ReservedSql, tenantId: string, membershipId: string): Promise<TargetRow> {
@@ -160,56 +132,6 @@ async function readTarget(sql: postgres.ReservedSql, tenantId: string, membershi
   `;
   if (!row) throw memberRoleError('MEMBERSHIP_NOT_FOUND');
   return row;
-}
-
-async function rolesOf(sql: postgres.ReservedSql, tenantId: string, membershipId: string): Promise<MemberRoleDto[]> {
-  const rows = await sql<RoleRow[]>`
-    SELECT r.code AS role_code, mr.assigned_at
-    FROM public.membership_roles AS mr
-    JOIN public.roles AS r ON r.id = mr.role_id
-    WHERE mr.tenant_id = ${tenantId} AND mr.membership_id = ${membershipId}
-  `;
-  const byRole = new Map(rows.map((row) => [parseRole(row.role_code), iso(row.assigned_at)]));
-  return sortedRoles(byRole.keys()).map((role) => ({ role, assignedAt: byRole.get(role)! }));
-}
-
-/**
- * The actor's tenant-wide permission codes, re-read from PostgreSQL rows
- * AFTER the locks (never from the request-start TenantContext snapshot, the
- * JWT, the body or RBAC_MATRIX_V1). The actor row is share-locked so its
- * status cannot change before COMMIT; an inactive actor has no permissions.
- */
-async function freshActorPermissions(sql: postgres.ReservedSql, context: TenantRequestContext): Promise<Set<string>> {
-  const { tenant } = context;
-  const [actor] = await sql<{ id: string }[]>`
-    SELECT m.id FROM public.memberships AS m
-    WHERE m.id = ${tenant.membershipId} AND m.tenant_id = ${tenant.tenantId}
-      AND m.user_id = ${tenant.userId} AND m.status = 'active'
-    FOR SHARE OF m
-  `;
-  if (!actor) return new Set();
-  const rows = await sql<{ code: string }[]>`
-    SELECT DISTINCT p.code
-    FROM public.membership_roles AS mr
-    JOIN public.role_permissions AS rp ON rp.role_id = mr.role_id AND rp.resource_scope = 'tenant'
-    JOIN public.permissions AS p ON p.id = rp.permission_id
-    WHERE mr.tenant_id = ${tenant.tenantId} AND mr.membership_id = ${tenant.membershipId}
-  `;
-  return new Set(rows.map((row) => row.code));
-}
-
-async function remainingActiveOwners(sql: postgres.ReservedSql, tenantId: string, excludedMembershipId: string): Promise<number> {
-  const [row] = await sql<{ n: number }[]>`
-    SELECT count(*)::int AS n
-    FROM public.membership_roles AS mr
-    JOIN public.roles AS r ON r.id = mr.role_id
-    JOIN public.memberships AS m ON m.tenant_id = mr.tenant_id AND m.id = mr.membership_id
-    WHERE mr.tenant_id = ${tenantId}
-      AND r.code = ${OWNER_ROLE}
-      AND m.status = 'active'
-      AND mr.membership_id <> ${excludedMembershipId}
-  `;
-  return row?.n ?? 0;
 }
 
 interface AuditInput {
@@ -284,7 +206,7 @@ async function prepareChange(
     throw new RoleChangeDeniedError('SELF_ROLE_MODIFICATION_FORBIDDEN');
   }
 
-  await lockTenantRoleChanges(sql);
+  await lockCurrentTenantOwnerSet(sql);
   const permissions = await freshActorPermissions(sql, context);
   const target = await lockTarget(sql, tenant.tenantId, membershipId);
   const roles = await rolesOf(sql, tenant.tenantId, target.id);

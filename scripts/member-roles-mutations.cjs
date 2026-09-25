@@ -51,7 +51,8 @@ const MUTATIONS = {
   // Drop the last-owner guard everywhere: app check + 0011 trigger.
   'last-owner-guard': {
     js: [
-      [SERVICE, 'if (role === OWNER_ROLE && await remainingActiveOwners(sql, tenant.tenantId, target.id) === 0) {', 'if (false) {'],
+      // S1-06: helpers moved to membership-access.ts; compiled as (0, mod.fn)(...).
+      [SERVICE, 'if (role === membership_access_js_1.OWNER_ROLE && await (0, membership_access_js_1.remainingActiveOwners)(sql, tenant.tenantId, target.id) === 0) {', 'if (false) {'],
     ],
     sql: ['DROP TRIGGER membership_roles_invariants_trg ON public.membership_roles'],
   },
@@ -130,7 +131,7 @@ const MUTATIONS = {
   },
   // Authorize from the request-start TenantContext snapshot instead of fresh rows.
   'stale-permissions': {
-    js: [[SERVICE, 'const permissions = await freshActorPermissions(sql, context);', 'const permissions = new Set(context.tenant.permissions.keys());']],
+    js: [[SERVICE, 'const permissions = await (0, membership_access_js_1.freshActorPermissions)(sql, context);', 'const permissions = new Set(context.tenant.permissions.keys());']],
   },
 };
 
