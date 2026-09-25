@@ -84,6 +84,24 @@ const MUTATIONS = {
   'column-grants': {
     sql: ['GRANT UPDATE ON TABLE public.memberships TO tallermecario_api, tallermecario_worker'],
   },
+  // Audit fix (0016): remove the whole database state-machine guard.
+  'db-state-machine-guard': {
+    sql: [
+      'DROP TRIGGER memberships_status_transition_trg ON public.memberships',
+      'DROP TRIGGER memberships_timestamp_history_trg ON public.memberships',
+      'ALTER TABLE public.memberships DROP CONSTRAINT memberships_lifecycle_state_check',
+    ],
+  },
+  // 0016, one piece at a time: transitions / timestamp history / per-state CHECK.
+  'db-transition-trigger': {
+    sql: ['DROP TRIGGER memberships_status_transition_trg ON public.memberships'],
+  },
+  'db-history-trigger': {
+    sql: ['DROP TRIGGER memberships_timestamp_history_trg ON public.memberships'],
+  },
+  'db-state-check': {
+    sql: ['ALTER TABLE public.memberships DROP CONSTRAINT memberships_lifecycle_state_check'],
+  },
 };
 
 function selected() {
