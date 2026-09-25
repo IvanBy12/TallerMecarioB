@@ -120,6 +120,13 @@
       "when": 1790303994101,
       "tag": "0016_s1_06_membership_state_machine",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790307594101,
+      "tag": "0017_s1_07_audit_log_guards",
+      "breakpoints": true
     }
   ]
 }
