@@ -1,7 +1,9 @@
 # S1-06 member management — cambios de documentación (NO canónicos todavía)
 
-Preparado 2026-09-24 en el worktree `task/s1-06-member-management` (base `task/s1-05-audit-fix-3` = `4fa2e66`).
-Implementación: comandos de ciclo de vida de memberships + migración **0015**. El docs canónico del checkout
+Preparado 2026-09-24 en el worktree `task/s1-06-member-management` (base `task/s1-05-audit-fix-3` = `4fa2e66`);
+actualizado por el audit fix `task/s1-06-audit-fix` (base `b2406ce`).
+Implementación: comandos de ciclo de vida de memberships + migraciones **0015** (grants de columnas) y **0016**
+(máquina de estados en PostgreSQL). El docs canónico del checkout
 principal y Notion **no** se editaron. Copiar **por secciones** (no reemplazar archivos). Requerido antes de merge:
 AGENTS.md §1 (contrato consumido por la PWA → documentado antes de merge) y §3 (privilegios de runtime → ADR-009).
 Este archivo se versiona con `git add -f` (el resto de `docs/` sigue gitignored).
@@ -15,8 +17,35 @@ Este archivo se versiona con `git add -f` (el resto de `docs/` sigue gitignored)
 | `RBAC — Matriz completa de roles y permisos v1 …md` | §16 (nota de aplicación a estado de membership) | E | DOC_UPDATE_REQUIRED |
 | `Modelo de Datos ERD v1 — PostgreSQL …md` | `## memberships` + «Invariante de owner activo» | F | DOC_UPDATE_REQUIRED |
 
-Sin cambio estructural de tablas/columnas/constraints (0015 solo cambia GRANTs). Sin nuevo ADR (no cambia una
-decisión arquitectónica: aplica ADR-009 §10 "UPDATE solo donde se requiere").
+Sin tablas/columnas nuevas. **Cambio de constraints (0016):** nuevo CHECK `memberships_lifecycle_state_check` + dos
+triggers en `memberships` → ERD + Diccionario deben actualizarse antes del merge (AGENTS.md §1/§3; secciones D y F).
+Sin nuevo ADR (no cambia una decisión arquitectónica: aplica ADR-009 §10 "UPDATE solo donde se requiere" y Estados §1
+"transiciones solo por comandos"; PostgreSQL pasa a ser la autoridad del contrato vigente).
+
+## IMPLEMENTADO AHORA (audit fix, migración 0016)
+
+PostgreSQL impide cualquier transición fuera del contrato vigente, también para SQL directo de
+`tallermecario_api` / `tallermecario_worker` (y de sesiones privilegiadas con triggers activos):
+
+- **Únicas transiciones:** `active → suspended`, `active → revoked`, `suspended → revoked`. Todo lo demás —
+  `suspended → active`, `revoked → active`, `revoked → suspended` y cualquier escritura de `status` al mismo valor —
+  se rechaza con `23514 m_status_transition` (trigger `BEFORE UPDATE OF status`, se dispara siempre que `status`
+  está en el `SET`).
+- **Timestamps por estado** (CHECK `memberships_lifecycle_state_check`, validado contra las filas existentes):
+  `active` ⇒ `suspended_at` y `revoked_at` NULL; `suspended` ⇒ `suspended_at` NOT NULL y `revoked_at` NULL;
+  `revoked` ⇒ `revoked_at` NOT NULL (`suspended_at` NULL si se revocó directamente, conservado si venía de `suspended`).
+  Aplica a INSERT y UPDATE, y no lo desactiva `session_replication_role`.
+- **Historial de timestamps** (trigger `BEFORE UPDATE`, `23514 m_lifecycle_history`): solo cambia el timestamp del estado
+  al que se entra; no se reescriben ni borran `suspended_at`/`revoked_at`. `UPDATE` solo de `updated_at` sigue permitido.
+- Funciones `SECURITY INVOKER`, `search_path` fijo, sin EXECUTE para PUBLIC/api/worker, sin lectura de tablas ni locks
+  (no toca la jerarquía 0013/0014 ni el invariante de owner). Grants 0015 intactos. Sin `SECURITY DEFINER`, `BYPASSRLS`
+  ni grants nuevos.
+- Límite documentado (ADR-009 §10.1): solo una sesión superusuario con `session_replication_role = replica`
+  (setup/mantenimiento) omite los triggers; el CHECK sigue aplicando.
+- Upgrade: si existen filas legacy incoherentes (p. ej. `active` con `suspended_at`), 0016 falla atómicamente (ledger sin
+  cambio); se reparan por mantenimiento explícito y se re-ejecuta.
+- Fixtures S1-02/S1-05 que reactivaban como runtime o borraban el timestamp del estado previo fueron corregidos
+  (escrituras válidas; reset a `active` solo como setup privilegiado con `replica`).
 
 **DOC_CONFLICT:** ninguno bloqueante encontrado. (Observación menor, no conflicto: el bloque `## memberships` del ERD no
 enumera `suspended_at`/`revoked_at`; el Diccionario, que gobierna columnas según AGENTS.md §3, sí → se completa en F.)
@@ -88,8 +117,11 @@ Estados: `active`, `suspended`, `revoked` (CHECK `memberships_status_check` + `m
 | `revokeMembershipForDeletedIdentity` (worker S1-03) | `active`, `suspended` | `revoked` | salvo última owner activa (`kept_last_owner`) | audit `membership.revoked` (actor `provider`) |
 | creación (onboarding S1-01 / invitación S1-04) | — | `active` | — | audit `membership.activated` |
 
-- `revoked` es terminal (§1). `suspended → active` **no definido** (DECISION_REQUIRED).
-- Transición inválida → `409 DOMAIN_INVALID_STATE_TRANSITION`, sin efectos.
+- `revoked` es terminal (§1). `suspended → active` **no permitido** hoy (su eventual aprobación es DECISION_REQUIRED).
+- **Autoridad PostgreSQL (0016):** la tabla anterior es el contrato que la DB impone a toda escritura (triggers
+  `m_status_transition` / `m_lifecycle_history` + CHECK `memberships_lifecycle_state_check`); la API valida primero
+  para devolver errores estables, la DB es el backstop contra SQL directo.
+- Transición inválida → `409 DOMAIN_INVALID_STATE_TRANSITION` (API) / `23514` (SQL directo), sin efectos.
 - Concurrencia: serializada por el lock de owner-set del tenant + `FOR UPDATE` del objetivo; dos comandos
   incompatibles desde el mismo estado nunca aplican ambos.
 - `users.status = disabled` no implica cambio de `memberships.status` y viceversa.
@@ -109,6 +141,14 @@ Estados: `active`, `suspended`, `revoked` (CHECK `memberships_status_check` + `m
   estrecharlo requiere ajustar esos fixtures.
 - Sustituye la frase de la viñeta S1-05 (0012/0013) "API conserva UPDATE de tabla (…; ningún endpoint escribe
   `status`)" por: "UPDATE solo de columnas de ciclo de vida desde 0015; los comandos S1-06 escriben `status`".
+- **S1-06 audit fix (0016) `memberships`:** máquina de estados en PostgreSQL. CHECK `memberships_lifecycle_state_check`
+  (timestamps exactos por estado; validado contra filas existentes). Triggers `memberships_status_transition_trg`
+  (`BEFORE UPDATE OF status`; solo `active→suspended`, `active→revoked`, `suspended→revoked`; `23514 m_status_transition`)
+  y `memberships_timestamp_history_trg` (`BEFORE UPDATE`; solo cambia el timestamp del estado de entrada;
+  `23514 m_lifecycle_history`). Funciones `app.enforce_membership_status_transition()` /
+  `app.enforce_membership_lifecycle_history()`: SECURITY INVOKER, owner `tallermecario_schema_owner`,
+  `search_path = pg_catalog, public`, sin EXECUTE para nadie, no leen tablas ni toman locks. Aplican a runtime y a sesiones
+  privilegiadas con triggers activos; sin grants, `SECURITY DEFINER` ni `BYPASSRLS` nuevos; grants 0015 intactos.
 
 **§10.1:** en "Tenant-scoped", añadir los comandos S1-06 (`suspend`/`revoke`) a los usuarios de
 `app.lock_current_tenant_owner_set()` (antes de cualquier row lock). En "Interacción con S1-03": el handler revoca
@@ -124,9 +164,15 @@ definirse…") por:
 > `active|suspended → revoked` (`revoked_at`, conserva `suspended_at`), solo mediante los comandos
 > `suspend`/`revoke` del API (§13.3) y el handler S1-03; sin reactivación, sin borrado. Mutabilidad runtime (0015):
 > solo `status`, `suspended_at`, `revoked_at`, `updated_at`; `id`, `tenant_id`, `user_id`, `joined_at`, `created_at`
-> inmutables para `tallermecario_api`/`tallermecario_worker`. La máquina de estados se aplica en la aplicación; la DB
-> aplica coherencia (CHECK) y el invariante de owner activo, pero no bloquea una reactivación escrita por runtime
-> (DECISION_REQUIRED).
+> inmutables para `tallermecario_api`/`tallermecario_worker`. PostgreSQL impone la máquina de estados (0016): solo
+> esas tres transiciones (`23514 m_status_transition`; incluye escrituras de `status` al mismo valor), historial de
+> timestamps (`23514 m_lifecycle_history`) y CHECK `memberships_lifecycle_state_check`:
+> `active` ⇒ `suspended_at` y `revoked_at` NULL; `suspended` ⇒ `suspended_at` NOT NULL, `revoked_at` NULL;
+> `revoked` ⇒ `revoked_at` NOT NULL. Ninguna reactivación es posible por SQL de runtime; habilitarla exige una decisión
+> y una migración nueva.
+
+Añadir a "Constraints": `memberships_lifecycle_state_check` (0016); triggers `memberships_status_transition_trg`,
+`memberships_timestamp_history_trg` (0016).
 
 ## E. RBAC §16 — nota nueva (tras la regla 8)
 
@@ -140,7 +186,10 @@ definirse…") por:
 - `## memberships`: listar `suspended_at timestamptz nullable`, `revoked_at timestamptz nullable` (ya en Diccionario/0000).
 - «Invariante de owner activo»: añadir "Escritores de estado: comandos S1-06 `suspend`/`revoke` (API) y handler S1-03
   (worker), ambos tras `app.lock_current_tenant_owner_set()`". Dependencias de migración: `… → 0014 → 0015` (grants
-  de columnas de `memberships`; sin cambio estructural).
+  de columnas de `memberships`) `→ 0016` (CHECK `memberships_lifecycle_state_check` + triggers de transición/historial;
+  falla atómicamente si hay filas legacy incoherentes).
+- `## memberships`, reglas: "Transiciones solo `active→suspended`, `active→revoked`, `suspended→revoked`, impuestas por
+  PostgreSQL (0016); timestamps exactos por estado".
 
 ---
 
@@ -149,7 +198,8 @@ definirse…") por:
 1. **Reactivación** `suspended → active` (y si `revoked` es reactivable, o si se re-ingresa solo por nueva invitación —
    enlaza con el pendiente S1-04 "reactivar vía invitación"). Hoy: sin ruta (404), revoked terminal. Si se aprueba:
    nombre de evento propio (`membership.activated` ya se usa para creación en onboarding/invitación), guard de
-   `users.status`, y si la DB debe bloquear reactivaciones de runtime (hoy no lo hace, ver D).
+   `users.status`, y **una migración nueva que relaje explícitamente** el guard 0016 (hoy PostgreSQL rechaza toda
+   reactivación; eso NO es una decisión abierta, es el contrato vigente implementado).
 2. **Autogestión / "salir del taller"**: hoy 403 `DOMAIN_ACTION_FORBIDDEN` para suspender/revocar la propia membership,
    incluso con co-owner. ¿Existe un comando dedicado `leave`? ¿Reautenticación reciente (como `ownership.transfer`)?
 3. **Datos de usuario en la lista** (nombre/email): requiere función allowlisted nueva (runtime no lee `users`) +
@@ -162,6 +212,11 @@ definirse…") por:
 8. **Worker: `UPDATE(suspended_at)`** — estrechar a `(status, revoked_at, updated_at)` ajustando fixtures S1-05.
 9. Heredado S1-05 (4) "semántica administrativa S1-06": **resuelto** para suspender/revocar (derivado de RBAC §4/§16/§20
    + ERD); reactivación → punto 1.
+
+## Deuda LOW / QUALITY-GATE DEBT
+
+- **CI no ejecuta S1-04/S1-05/S1-06** (`.github/workflows/ci.yml` no corre `test:invitations*`, `test:member-roles*`
+  ni `test:member-lifecycle*`). La evidencia actual es local. No se amplió el CI en este audit fix; queda abierto.
 
 ## Interacción con S1-03 (sin cambio de semántica)
 
