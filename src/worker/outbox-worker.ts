@@ -192,6 +192,13 @@ export interface ProcessResult {
   attempts: number | null;
 }
 
+/** A claimed ID and tenant must still match the durable outbox row. */
+function assertClaimMatchesEvent(job: ClaimedJob, event: OutboxEvent): void {
+  if (job.outboxEventId !== event.id || job.tenantId !== event.tenantId) {
+    throw new Error('OUTBOX_CLAIM_TENANT_MISMATCH');
+  }
+}
+
 /**
  * Processes one claimed job end to end in a brand-new, tenant-scoped
  * transaction: opens the connection, sets TenantContext from the job's own
@@ -211,6 +218,7 @@ export async function processClaimedJob(
   if (options.phasedHandlers && Object.keys(options.phasedHandlers).length > 0) {
     const event = await getClaimedEvent(options.database, job.outboxEventId);
     if (!event) return { outboxEventId: job.outboxEventId, outcome: 'already_finished', attempts: null };
+    assertClaimMatchesEvent(job, event);
     const phased = options.phasedHandlers[event.eventType];
     if (phased) return processPhasedJob(options, job, event, phased);
   }
@@ -240,6 +248,7 @@ export async function processClaimedJob(
       inTransaction = false;
       return { outboxEventId: job.outboxEventId, outcome: 'already_finished', attempts: null };
     }
+    assertClaimMatchesEvent(job, event);
 
     try {
       const handler = handlers[event.eventType];
@@ -297,6 +306,7 @@ export async function processPhasedJob(
   event: OutboxEvent,
   handler: PhasedOutboxHandler<any>,
 ): Promise<ProcessResult> {
+  assertClaimMatchesEvent(job, event);
   const {
     database,
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
