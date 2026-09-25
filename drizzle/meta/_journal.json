@@ -29,6 +29,104 @@
       "when": 1790050297199,
       "tag": "0003_outbox_worker",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790110241648,
+      "tag": "0004_wompi_sandbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790120000000,
+      "tag": "0005_s1_01_onboarding",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790134025729,
+      "tag": "0006_rbac_resource_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790179341798,
+      "tag": "0007_s1_03_clerk_identity_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790216219361,
+      "tag": "0008_s1_04_membership_invitations",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790222221883,
+      "tag": "0009_s1_04_invitation_delivery_lease",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790222868450,
+      "tag": "0010_s1_04_worker_invitation_privileges",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790273308784,
+      "tag": "0011_s1_05_member_role_management",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790276314403,
+      "tag": "0012_s1_05_owner_status_invariant",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790280822455,
+      "tag": "0013_s1_05_owner_lock_hierarchy",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1790283688875,
+      "tag": "0014_s1_05_owner_lock_missing_workshop",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1790301026657,
+      "tag": "0015_s1_06_membership_lifecycle_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790303994101,
+      "tag": "0016_s1_06_membership_state_machine",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790307594101,
+      "tag": "0017_s1_07_audit_log_guards",
+      "breakpoints": true
     }
   ]
 }

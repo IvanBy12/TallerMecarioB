@@ -46,6 +46,31 @@ export type OutboxHandler = (
   tx: postgres.ReservedSql,
 ) => Promise<void>;
 
+/**
+ * Handler for jobs that must call an external provider WITHOUT holding a
+ * PostgreSQL transaction (or connection) open across the network call:
+ *
+ *   PHASE A  claim (claimBatch) + read the claimed payload: autocommit
+ *            statements on the pool, nothing left open.
+ *   PHASE B  `prepare`: runs with NO transaction and NO reserved connection.
+ *            The only place a network call is allowed. It may issue its own
+ *            autocommit reads through `pool` (e.g. a cheap stale pre-check).
+ *   PHASE C  `apply`: a NEW short transaction on a freshly reserved
+ *            connection. It must lock + re-read its state before mutating (the
+ *            world may have moved while PHASE B waited on the network). The
+ *            `processed` transition commits atomically with it.
+ *
+ * Failures in B or C never mark the job processed; C's writes are rolled back
+ * and the retry/failed/dead_letter transition is recorded separately.
+ */
+export interface PhasedOutboxHandler<Prepared = unknown> {
+  readonly kind: 'phased';
+  prepare(event: OutboxEvent, pool: postgres.Sql): Promise<Prepared>;
+  apply(event: OutboxEvent, prepared: Prepared, tx: postgres.ReservedSql): Promise<void>;
+  /** Optional evidence of a failed attempt (autocommit, after rollback). Must not throw. */
+  recordFailure?(event: OutboxEvent, error: unknown, retryable: boolean, pool: postgres.Sql): Promise<void>;
+}
+
 /** A classified transient failure (network timeout, 5xx, 429): eligible for retry. */
 export class TransientDispatchError extends Error {
   readonly retryable = true as const;
@@ -59,6 +84,8 @@ export class PermanentDispatchError extends Error {
 export interface OutboxWorkerOptions {
   database: postgres.Sql;
   handlers: Record<string, OutboxHandler>;
+  /** Network-calling handlers, processed with processPhasedJob (see PhasedOutboxHandler). */
+  phasedHandlers?: Record<string, PhasedOutboxHandler<any>>;
   /** Attempts (inclusive) after which a retryable failure becomes dead_letter instead of retry. */
   maxAttempts?: number;
   baseDelaySeconds?: number;
@@ -121,7 +148,7 @@ interface RawClaimedEventRow {
 }
 
 export async function getClaimedEvent(
-  tx: postgres.ReservedSql,
+  tx: postgres.Sql,
   outboxEventId: string,
 ): Promise<OutboxEvent | null> {
   const [row] = await tx<RawClaimedEventRow[]>`
@@ -145,7 +172,7 @@ export async function getClaimedEvent(
 
 /** Returns false when the row was no longer 'processing' (already finished elsewhere): a safe no-op. */
 export async function finishOutboxEvent(
-  tx: postgres.ReservedSql,
+  tx: postgres.Sql,
   outboxEventId: string,
   outcome: OutboxOutcome,
   error?: string,
@@ -165,6 +192,13 @@ export interface ProcessResult {
   attempts: number | null;
 }
 
+/** A claimed ID and tenant must still match the durable outbox row. */
+function assertClaimMatchesEvent(job: ClaimedJob, event: OutboxEvent): void {
+  if (job.outboxEventId !== event.id || job.tenantId !== event.tenantId) {
+    throw new Error('OUTBOX_CLAIM_TENANT_MISMATCH');
+  }
+}
+
 /**
  * Processes one claimed job end to end in a brand-new, tenant-scoped
  * transaction: opens the connection, sets TenantContext from the job's own
@@ -179,6 +213,16 @@ export async function processClaimedJob(
   options: OutboxWorkerOptions,
   job: ClaimedJob,
 ): Promise<ProcessResult> {
+  // Phased handlers never share the single-transaction path below: PHASE A
+  // needs the event type, read here with one autocommit statement.
+  if (options.phasedHandlers && Object.keys(options.phasedHandlers).length > 0) {
+    const event = await getClaimedEvent(options.database, job.outboxEventId);
+    if (!event) return { outboxEventId: job.outboxEventId, outcome: 'already_finished', attempts: null };
+    assertClaimMatchesEvent(job, event);
+    const phased = options.phasedHandlers[event.eventType];
+    if (phased) return processPhasedJob(options, job, event, phased);
+  }
+
   const {
     database,
     handlers,
@@ -204,6 +248,7 @@ export async function processClaimedJob(
       inTransaction = false;
       return { outboxEventId: job.outboxEventId, outcome: 'already_finished', attempts: null };
     }
+    assertClaimMatchesEvent(job, event);
 
     try {
       const handler = handlers[event.eventType];
@@ -243,4 +288,81 @@ export async function processClaimedJob(
   } finally {
     tx.release();
   }
+}
+
+function failureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * PHASE B + PHASE C for a phased handler (PHASE A — claim + payload read — is
+ * already done by the caller with autocommit statements). No transaction and
+ * no reserved connection exist while `prepare` runs; `apply` gets a brand-new
+ * transaction. See PhasedOutboxHandler.
+ */
+export async function processPhasedJob(
+  options: OutboxWorkerOptions,
+  job: ClaimedJob,
+  event: OutboxEvent,
+  handler: PhasedOutboxHandler<any>,
+): Promise<ProcessResult> {
+  assertClaimMatchesEvent(job, event);
+  const {
+    database,
+    maxAttempts = DEFAULT_MAX_ATTEMPTS,
+    baseDelaySeconds = DEFAULT_BASE_DELAY_SECONDS,
+    maxDelaySeconds = DEFAULT_MAX_DELAY_SECONDS,
+  } = options;
+
+  const fail = async (error: unknown): Promise<ProcessResult> => {
+    const retryable = !(error instanceof PermanentDispatchError);
+    if (handler.recordFailure) {
+      await handler.recordFailure(event, error, retryable, database).catch(() => undefined);
+    }
+    const message = failureMessage(error);
+    if (retryable && event.attempts < maxAttempts) {
+      const delay = computeRetryDelaySeconds(event.attempts, baseDelaySeconds, maxDelaySeconds);
+      await finishOutboxEvent(database, job.outboxEventId, 'retry', message, delay);
+      return { outboxEventId: job.outboxEventId, outcome: 'retry', attempts: event.attempts };
+    }
+    const outcome: OutboxOutcome = retryable ? 'dead_letter' : 'failed';
+    await finishOutboxEvent(database, job.outboxEventId, outcome, message);
+    return { outboxEventId: job.outboxEventId, outcome, attempts: event.attempts };
+  };
+
+  // PHASE B — network allowed, no transaction open.
+  let prepared: unknown;
+  try {
+    prepared = await handler.prepare(event, database);
+  } catch (error) {
+    return fail(error);
+  }
+
+  // PHASE C — new short transaction on a freshly reserved connection.
+  const tx = await database.reserve();
+  let inTransaction = false;
+  let failure: { error: unknown } | null = null;
+  let result: ProcessResult | null = null;
+  try {
+    await tx.unsafe('BEGIN');
+    inTransaction = true;
+    if (job.tenantId) {
+      await tx`SELECT set_config('app.tenant_id', ${job.tenantId}, true)`;
+    }
+    await handler.apply(event, prepared, tx);
+    const done = await finishOutboxEvent(tx, job.outboxEventId, 'processed');
+    await tx.unsafe('COMMIT');
+    inTransaction = false;
+    result = { outboxEventId: job.outboxEventId, outcome: done ? 'processed' : 'already_finished', attempts: event.attempts };
+  } catch (error) {
+    if (inTransaction) {
+      await tx.unsafe('ROLLBACK').catch(() => undefined);
+      inTransaction = false;
+    }
+    failure = { error };
+  } finally {
+    tx.release();
+  }
+  if (failure) return fail(failure.error);
+  return result!;
 }

@@ -6,6 +6,7 @@ const { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSyn
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const postgres = require('postgres');
+const { expectedMigrationCount } = require('./migration-count.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -134,7 +135,7 @@ async function main() {
     [migrationState] = await testAdmin`
       SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
     `;
-    if (migrationState.count !== 4) throw new Error('FULL_MIGRATION_STATE_INVALID');
+    if (migrationState.count !== expectedMigrationCount()) throw new Error('FULL_MIGRATION_STATE_INVALID');
 
     await testAdmin`
       SELECT pg_catalog.pg_advisory_lock(

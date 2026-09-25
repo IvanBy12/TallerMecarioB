@@ -156,9 +156,18 @@ export const rolePermissions = pgTable(
   {
     roleId: uuid('role_id').notNull().references(() => roles.id),
     permissionId: uuid('permission_id').notNull().references(() => permissions.id),
+    /** Scope de la celda role×permission. Ver RBAC_MATRIX_V1 (src/authz/rbac-matrix.ts). */
+    resourceScope: varchar('resource_scope', { length: 16 }).notNull(),
     createdAt: createdAt(),
   },
-  (t) => [primaryKey({ name: 'role_permissions_pk', columns: [t.roleId, t.permissionId] })],
+  (t) => [
+    primaryKey({ name: 'role_permissions_pk', columns: [t.roleId, t.permissionId] }),
+    enumCheck('role_permissions_resource_scope_check', t.resourceScope, [
+      'tenant',
+      'assigned',
+      'quality_control',
+    ]),
+  ],
 );
 
 /** Planes SaaS. Tabla global sin `tenant_id`; read-only para el runtime de tenant. */
@@ -262,6 +271,41 @@ export const users = pgTable(
   ],
 );
 
+/**
+ * S1-03 — estado técnico de sincronización de identidad por sujeto externo
+ * (global, sin tenant_id). Guarda solo la posición del último evento del
+ * proveedor aplicado (monotonicidad), el ciclo de vida local derivado y el
+ * tombstone; nunca el perfil ni el payload del proveedor. Sin grants runtime:
+ * solo funciones SECURITY DEFINER allowlisted (migración 0007).
+ */
+export const identitySyncStates = pgTable(
+  'identity_sync_states',
+  {
+    id: pk(),
+    identityProvider: varchar('identity_provider', { length: 32 }).notNull(),
+    externalSubject: varchar('external_subject', { length: 255 }).notNull(),
+    userId: uuid('user_id').references(() => users.id),
+    lifecycleState: varchar('lifecycle_state', { length: 16 }).notNull().default('active'),
+    lastEventId: varchar('last_event_id', { length: 128 }).notNull(),
+    lastEventType: varchar('last_event_type', { length: 64 }).notNull(),
+    lastEventOccurredAt: ts('last_event_occurred_at').notNull(),
+    lastEventRank: smallint('last_event_rank').notNull(),
+    deletedAt: ts('deleted_at'),
+    ...timestamps(),
+  },
+  (t) => [
+    unique('identity_sync_states_identity_key').on(t.identityProvider, t.externalSubject),
+    index('identity_sync_states_user_idx').on(t.userId),
+    enumCheck('identity_sync_states_provider_check', t.identityProvider, ['clerk']),
+    enumCheck('identity_sync_states_lifecycle_check', t.lifecycleState, ['active', 'blocked', 'deleted']),
+    rawCheck('identity_sync_states_rank_check', 'last_event_rank IN (0, 1)'),
+    rawCheck(
+      'identity_sync_states_tombstone_check',
+      "(lifecycle_state = 'deleted') = (deleted_at IS NOT NULL)",
+    ),
+  ],
+);
+
 export const memberships = pgTable(
   'memberships',
   {
@@ -283,6 +327,14 @@ export const memberships = pgTable(
       `("status" <> 'active' OR "revoked_at" IS NULL)
        AND ("status" <> 'suspended' OR "suspended_at" IS NOT NULL)
        AND ("status" <> 'revoked' OR "revoked_at" IS NOT NULL)`,
+    ),
+    // S1-06 audit fix (0016): exact timestamps per state. Transitions and
+    // timestamp history are enforced by triggers in the migration SQL.
+    rawCheck(
+      'memberships_lifecycle_state_check',
+      `("status" = 'active' AND "suspended_at" IS NULL AND "revoked_at" IS NULL)
+       OR ("status" = 'suspended' AND "suspended_at" IS NOT NULL AND "revoked_at" IS NULL)
+       OR ("status" = 'revoked' AND "revoked_at" IS NOT NULL)`,
     ),
   ],
 );
@@ -344,6 +396,20 @@ export const membershipInvitations = pgTable(
     unique('mi_tenant_id_key').on(t.tenantId, t.id),
     unique('mi_token_hash_key').on(t.tokenHash),
     enumCheck('mi_status_check', t.status, ['pending', 'accepted', 'expired', 'revoked']),
+    // S1-04 (0008): state coherence, and token_hash is always a SHA-256 hex
+    // digest -- a raw base64url token can never satisfy it.
+    rawCheck(
+      'mi_accepted_coherence_check',
+      `("status" = 'accepted' AND "accepted_at" IS NOT NULL AND "accepted_by_user_id" IS NOT NULL AND "accepted_membership_id" IS NOT NULL)
+       OR ("status" <> 'accepted' AND "accepted_at" IS NULL AND "accepted_by_user_id" IS NULL AND "accepted_membership_id" IS NULL)`,
+    ),
+    rawCheck(
+      'mi_revoked_coherence_check',
+      `("status" = 'revoked' AND "revoked_at" IS NOT NULL AND "revoked_by_membership_id" IS NOT NULL)
+       OR ("status" <> 'revoked' AND "revoked_at" IS NULL AND "revoked_by_membership_id" IS NULL)`,
+    ),
+    rawCheck('mi_token_hash_format_check', `"token_hash" ~ '^[0-9a-f]{64}$'`),
+    rawCheck('mi_expiry_after_creation_check', '"expires_at" > "created_at"'),
     foreignKey({
       name: 'mi_invited_by_fk',
       columns: [t.tenantId, t.invitedByMembershipId],
@@ -367,6 +433,51 @@ export const membershipInvitations = pgTable(
     uniqueIndex('mi_one_pending_per_email_uq')
       .on(t.tenantId, t.emailNormalized)
       .where(sql`status = 'pending'`),
+  ],
+);
+
+/**
+ * S1-04 audit fix (0009): delivery lease of the invitation email, one row per
+ * invitation, created lazily by the worker. While a lease is active
+ * (`lease_expires_at > now`) no pending -> accepted/revoked/expired
+ * transition can commit (lifecycle trigger, INVITATION_IN_PROGRESS), and a
+ * lease never outlives the invitation's `expires_at`. Written only through
+ * the allowlisted SECURITY DEFINER worker functions of 0009; runtime API can
+ * only SELECT it under tenant RLS; the worker role has no direct grant.
+ * `lease_outbox_event_id` has no FK on purpose: outbox retention must not be
+ * blocked by delivery bookkeeping.
+ */
+export const membershipInvitationDeliveries = pgTable(
+  'membership_invitation_deliveries',
+  {
+    tenantId: tenantId(),
+    invitationId: uuid('invitation_id').notNull(),
+    leaseId: uuid('lease_id'),
+    leaseOutboxEventId: uuid('lease_outbox_event_id'),
+    leaseAttempt: integer('lease_attempt'),
+    leaseAcquiredAt: ts('lease_acquired_at'),
+    leaseExpiresAt: ts('lease_expires_at'),
+    leaseCount: integer('lease_count').notNull().default(0),
+    sentAt: ts('sent_at'),
+    providerMessageId: varchar('provider_message_id', { length: 128 }),
+    ...timestamps(),
+  },
+  (t) => [
+    primaryKey({ name: 'mid_pk', columns: [t.tenantId, t.invitationId] }),
+    foreignKey({
+      name: 'mid_invitation_fk',
+      columns: [t.tenantId, t.invitationId],
+      foreignColumns: [membershipInvitations.tenantId, membershipInvitations.id],
+    }),
+    rawCheck(
+      'mid_lease_coherence_check',
+      'num_nulls("lease_id", "lease_outbox_event_id", "lease_attempt", "lease_acquired_at", "lease_expires_at") IN (0, 5)',
+    ),
+    rawCheck('mid_lease_window_check', '"lease_expires_at" IS NULL OR "lease_expires_at" > "lease_acquired_at"'),
+    rawCheck('mid_lease_attempt_check', '"lease_attempt" IS NULL OR "lease_attempt" > 0'),
+    rawCheck('mid_lease_count_check', '"lease_count" >= 0'),
+    rawCheck('mid_sent_coherence_check', '("sent_at" IS NULL) = ("provider_message_id" IS NULL)'),
+    rawCheck('mid_provider_message_id_check', `"provider_message_id" IS NULL OR length("provider_message_id") BETWEEN 1 AND 128`),
   ],
 );
 

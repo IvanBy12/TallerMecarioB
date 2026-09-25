@@ -59,6 +59,11 @@ test.before(async () => {
     await sql`INSERT INTO workshops ${sql({ id: fixture.tenant, slug: `s-${fixture.tenant}`, legal_name: 'T', display_name: 'T' })}`;
     await sql`INSERT INTO users ${sql({ id: fixture.user, external_subject: fixture.subject, email: `${fixture.user}@test.invalid` })}`;
     await sql`INSERT INTO memberships ${sql({ id: fixture.membership, tenant_id: fixture.tenant, user_id: fixture.user })}`;
+    await sql`
+      INSERT INTO membership_roles (tenant_id, membership_id, role_id, assigned_by_membership_id)
+      SELECT ${fixture.tenant}, ${fixture.membership}, r.id, ${fixture.membership}
+      FROM public.roles AS r WHERE r.code = 'owner'
+    `;
   });
 
   app = await buildApi({
@@ -66,11 +71,11 @@ test.before(async () => {
     identityProvider,
     corsAllowedOrigins: ['https://allowed.example'],
     async registerRoutes(server) {
-      server.get('/api/v1/__test/ping', async (request) => {
+      server.get('/api/v1/__test/ping', { config: { permission: 'workshop.read' } }, async (request) => {
         const context = getTenantRequestContext(request);
         return { tenantId: context.tenant.tenantId };
       });
-      server.get('/api/v1/__test/boom', async () => {
+      server.get('/api/v1/__test/boom', { config: { permission: 'workshop.read' } }, async () => {
         throw new Error('leaking a raw SQL string or stack trace would be a Security Baseline §15 violation');
       });
     },
@@ -83,7 +88,7 @@ test.before(async () => {
     identityProvider,
     rateLimit: { max: 2, timeWindow: '1 minute' },
     async registerRoutes(server) {
-      server.get('/api/v1/__test/ping', async (request) => {
+      server.get('/api/v1/__test/ping', { config: { permission: 'workshop.read' } }, async (request) => {
         const context = getTenantRequestContext(request);
         return { tenantId: context.tenant.tenantId };
       });
@@ -197,5 +202,41 @@ test('rate limiting exempts /health/* so orchestrator polling is never throttled
   for (let i = 0; i < 5; i += 1) {
     const response = await rateLimitedApp.inject({ method: 'GET', url: '/health/live' });
     assert.equal(response.statusCode, 200);
+  }
+});
+
+test('MEDIUM-02: a per-route config.rateLimit (the automatic @fastify/rate-limit onRoute path, distinct from the manual global hook above) returns 429 RATE_LIMIT_EXCEEDED with Retry-After and request_id -- never 500', async () => {
+  const perRouteApp = await buildApi({
+    database,
+    identityProvider,
+    async registerRoutes(server) {
+      server.get('/api/v1/__test/tight-limit', {
+        config: { permission: 'workshop.read', rateLimit: { max: 1, timeWindow: '1 minute' } },
+      }, async (request) => {
+        const context = getTenantRequestContext(request);
+        return { tenantId: context.tenant.tenantId };
+      });
+    },
+  });
+  try {
+    const first = await perRouteApp.inject({
+      method: 'GET',
+      url: '/api/v1/__test/tight-limit',
+      headers: { authorization: `Bearer token-${fixture.subject}` },
+    });
+    assert.equal(first.statusCode, 200);
+
+    const second = await perRouteApp.inject({
+      method: 'GET',
+      url: '/api/v1/__test/tight-limit',
+      headers: { authorization: `Bearer token-${fixture.subject}` },
+    });
+    assert.equal(second.statusCode, 429);
+    assert.equal(second.json().error.code, 'RATE_LIMIT_EXCEEDED');
+    assert.ok(second.headers['retry-after'], 'expected a Retry-After header');
+    assert.ok(second.json().error.request_id, 'expected a request_id in the error body');
+    assert.equal('stack' in second.json().error, false);
+  } finally {
+    await perRouteApp.close();
   }
 });

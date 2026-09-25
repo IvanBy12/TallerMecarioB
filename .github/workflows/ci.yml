@@ -10,7 +10,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18
@@ -49,17 +49,106 @@ jobs:
       - name: Secret scan
         run: npm run security:secret-scan
 
-      - name: Dependency audit (high/critical blocks the build)
-        run: npm audit --omit=dev --audit-level=high
+      - name: Dependency audit (zero production vulnerabilities)
+        run: npm audit --omit=dev
 
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Build
+        run: npm run build
+
+      - name: RBAC matrix and TenantContext core (S1-02, no database)
+        run: |
+          npm run test:authz
+          npm run test:tenant-context-core
+
+      # GitHub Actions runs these steps in order. Each DB suite uses its own
+      # disposable database; never launch migration suites in parallel here.
       - name: Clean migration and PostgreSQL suite
         run: npm run test:db:sprint0:ci
+
+      - name: RBAC and TenantContext PostgreSQL foundations (S1-02)
+        run: |
+          npm run test:authz:db:ci
+          npm run test:tenant-context:db:ci
 
       - name: Fastify multitenant API
         run: npm run test:api:multitenant:ci
 
+      - name: TenantContext + RBAC request lifecycle (S1-02)
+        run: npm run test:tenant-context:api:ci
+
+      # Hermetic: per-run RSA/Svix keys and a fake Clerk Backend API; no Clerk
+      # instance, no secrets, no internet (the runner strips CLERK_* vars).
+      - name: Clerk identity lifecycle (S1-03)
+        run: |
+          npm run test:identity:ci
+          npm run test:identity:upgrade:ci
+
       - name: API health/readiness, CORS, rate limiting, security headers
         run: npm run test:api:security:ci
+
+      - name: Workshop onboarding (S1-01)
+        run: npm run test:onboarding:ci
+
+      - name: Membership invitations (S1-04)
+        run: |
+          npm run test:invitations:ci
+          npm run test:invitations:upgrade:ci
+
+      - name: Membership roles (S1-05)
+        run: |
+          npm run test:member-roles:ci
+          npm run test:member-roles:upgrade:ci
+
+      - name: Membership lifecycle (S1-06)
+        run: |
+          npm run test:member-lifecycle:ci
+          npm run test:member-lifecycle:upgrade:ci
+
+      - name: Sprint 1 audit (S1-07)
+        run: |
+          npm run test:audit:ci
+          npm run test:audit:upgrade:ci
+
+      - name: Final cross-tenant isolation (S1-08)
+        run: npm run test:cross-tenant:final:ci
+
+      - name: Outbox worker regression
+        run: npm run test:outbox:ci
+
+      - name: Wompi contract and integration regression
+        run: npm run test:wompi
+
+      - name: Concurrent-migration lock protection
+        run: npm run test:db:migration-lock:ci
+
+  staging:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Sprint 0: no real cloud staging account is provisioned for this
+      # project yet (see docs/ADR-007 -- portability principle, not a
+      # decided provider). This drill IS staging for now: it builds the
+      # ADR-007 image, brings up an isolated, disposable docker-compose
+      # stack (own Postgres, own network, its own generated secrets -- see
+      # staging.env.example), runs migrations through the concurrency-safe
+      # lock, deploys the API, smoke-tests it, then proves a bad deploy is
+      # detected and rolled back. Everything is torn down at the end
+      # regardless of outcome.
+      - name: Build image, deploy to local "staging", migrate, smoke test, rollback drill
+        run: npm run staging:deploy-drill:ci

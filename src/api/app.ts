@@ -1,34 +1,50 @@
 import fastify, {
   type FastifyInstance,
+  type FastifyReply,
   type FastifyRequest,
 } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import type postgres from 'postgres';
-import type { IdentityProvider } from '../identity/identity-provider.js';
+import type {
+  IdentityProvider,
+  VerifiedIdentity,
+  VerifiedIdentityProfile,
+} from '../identity/identity-provider.js';
+import { IdentityProfileNotFoundError } from '../identity/identity-provider.js';
+import { uuidV7 } from '../platform/uuid-v7.js';
+import { ApiError, mapDomainError } from './errors.js';
 import { checkDatabaseReady } from './health.js';
+import { registerMeRoute } from './me.js';
+import {
+  recordVerifiedIdentity,
+  setIdentityOnlyRequestContext,
+  setIdentityProfileRequestContext,
+} from './request-context.js';
+import { registerTenantRequestLifecycle, rollbackTenantRequest } from './tenant-request.js';
 
-export interface TenantContext {
-  tenantId: string;
-  userId: string;
-  membershipId: string;
-  requestId: string;
-}
+export { ApiError } from './errors.js';
+export {
+  getIdentityOnlyRequestContext,
+  getIdentityProfileRequestContext,
+  identityAwareRateLimitKey,
+  type IdentityOnlyRequestContext,
+  type IdentityProfileRequestContext,
+} from './request-context.js';
+export {
+  getTenantRequestContext,
+  markDurableTenantOutcome,
+  TenantRouteConfigurationError,
+  type TenantRequestContext,
+} from './tenant-request.js';
+export { markResourceAuthorizationSatisfied } from '../authz/resource-authorization.js';
+export type { TenantContext } from '../tenancy/tenant-context.js';
 
-export interface TenantRequestContext {
-  tenant: TenantContext;
-  sql: postgres.ReservedSql;
-}
-
-interface ActiveMembershipRow {
-  tenant_id: string;
-  user_id: string;
-  membership_id: string;
-}
-
-interface RequestState extends TenantRequestContext {
-  transactionOpen: boolean;
+declare module 'fastify' {
+  interface FastifyContextConfig {
+    identityProfile?: 'required';
+  }
 }
 
 export interface RateLimitOptions {
@@ -39,6 +55,13 @@ export interface RateLimitOptions {
 export interface BuildApiOptions {
   database: postgres.Sql;
   identityProvider: IdentityProvider;
+  registerPublicRoutes?: (app: FastifyInstance) => void | Promise<void>;
+  /** Identity-authenticated routes without TenantContext (onboarding, /me). */
+  registerIdentityOnlyRoutes?: (app: FastifyInstance) => void | Promise<void>;
+  /**
+   * Tenant routes. Every route MUST declare `config.permission` (and may set
+   * `config.permissionScope: 'resource'`); registration fails otherwise.
+   */
   registerRoutes?: (app: FastifyInstance) => void | Promise<void>;
   /** Security Baseline §16: explicit allowlist, never `*` with credentials. Empty = no browser cross-origin caller allowed. */
   corsAllowedOrigins?: string[];
@@ -50,49 +73,158 @@ export interface BuildApiOptions {
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { max: 300, timeWindow: '1 minute' };
 const DEFAULT_READINESS_TIMEOUT_MS = 2000;
 
-class ApiError extends Error {
-  constructor(
-    readonly statusCode: number,
-    readonly code: string,
-    message: string,
-  ) {
-    super(message);
-  }
+const rawRequestBodies = new WeakMap<FastifyRequest, Buffer>();
+
+export function getRawRequestBody(request: FastifyRequest): Buffer {
+  const body = rawRequestBodies.get(request);
+  if (!body) throw new ApiError(400, 'RAW_BODY_UNAVAILABLE', 'Raw request body is unavailable.');
+  return body;
 }
 
-const requestStates = new WeakMap<FastifyRequest, RequestState>();
+function authenticationRequired(): ApiError {
+  return new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
+}
 
-async function finishTransaction(
+/**
+ * ADR-006 boundary: the provider only proves WHO the caller is. Only
+ * `identityProvider` + `externalSubject` are kept (bounded like the users.*
+ * columns); any other field a provider returns — claims, metadata, roles —
+ * is dropped here and never reaches membership discovery or authorization.
+ */
+async function authenticate(
+  identityProvider: IdentityProvider,
   request: FastifyRequest,
-  action: 'COMMIT' | 'ROLLBACK',
-): Promise<void> {
-  const state = requestStates.get(request);
-  if (!state?.transactionOpen) return;
-
-  state.transactionOpen = false;
+): Promise<VerifiedIdentity> {
+  let verified: VerifiedIdentity | null;
   try {
-    await state.sql.unsafe(action);
-  } finally {
-    state.sql.release();
+    verified = await identityProvider.verifyRequest(request);
+  } catch {
+    throw authenticationRequired();
   }
+
+  if (!verified
+    || typeof verified.identityProvider !== 'string'
+    || verified.identityProvider.length === 0
+    || verified.identityProvider.length > 32
+    || typeof verified.externalSubject !== 'string'
+    || verified.externalSubject.length === 0
+    || verified.externalSubject.length > 255) {
+    throw authenticationRequired();
+  }
+
+  const identity: VerifiedIdentity = Object.freeze({
+    identityProvider: verified.identityProvider,
+    externalSubject: verified.externalSubject,
+  });
+  recordVerifiedIdentity(request, identity);
+  return identity;
 }
 
-export function getTenantRequestContext(request: FastifyRequest): TenantRequestContext {
-  const state = requestStates.get(request);
-  if (!state?.transactionOpen) {
-    throw new ApiError(500, 'TENANT_CONTEXT_UNAVAILABLE', 'Tenant context is unavailable.');
+function mapFrameworkError(error: unknown): ApiError | null {
+  const candidate = error as { code?: string; statusCode?: number; validation?: unknown };
+  if (candidate.code === 'FST_ERR_VALIDATION' || candidate.validation) {
+    return new ApiError(400, 'REQUEST_VALIDATION_FAILED', 'The request body is invalid.');
   }
-  return state;
+  if (candidate.code === 'FST_ERR_CTP_BODY_TOO_LARGE' || candidate.statusCode === 413) {
+    return new ApiError(413, 'PAYLOAD_TOO_LARGE', 'The request body is too large.');
+  }
+  if (candidate.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE' || candidate.statusCode === 415) {
+    return new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json.');
+  }
+  if (candidate.code === 'FST_ERR_CTP_INVALID_JSON_BODY'
+    || (candidate.statusCode === 400 && error instanceof SyntaxError)) {
+    return new ApiError(400, 'REQUEST_BODY_MALFORMED', 'The JSON request body is malformed.');
+  }
+  return null;
+}
+
+const TENANT_ERROR_HEADERS = new Set([
+  'access-control-allow-origin', 'access-control-allow-credentials',
+  'access-control-expose-headers', 'vary', 'retry-after', 'www-authenticate',
+  'cache-control', 'content-security-policy', 'content-security-policy-report-only',
+  'cross-origin-embedder-policy', 'cross-origin-opener-policy',
+  'cross-origin-resource-policy', 'origin-agent-cluster', 'referrer-policy',
+  'strict-transport-security', 'x-content-type-options', 'x-dns-prefetch-control',
+  'x-download-options', 'x-frame-options', 'x-permitted-cross-domain-policies',
+  'x-xss-protection',
+]);
+
+/** Fastify's fallback exposes error.message if an error response's onSend fails. */
+function sendTenantErrorWithoutOnSend(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  statusCode: number,
+  code: string,
+  message: string,
+): void {
+  const payload = JSON.stringify({ error: { code, message, request_id: request.id } });
+  if (reply.raw.headersSent) {
+    reply.raw.destroy();
+    return;
+  }
+  const headers = Object.fromEntries(Object.entries(reply.getHeaders()).filter(([name]) =>
+    TENANT_ERROR_HEADERS.has(name.toLowerCase())
+    || name.toLowerCase().startsWith('ratelimit-')
+    || name.toLowerCase().startsWith('x-ratelimit-')));
+  reply.hijack();
+  reply.raw.writeHead(statusCode, {
+    ...headers,
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload),
+  });
+  reply.raw.end(payload);
 }
 
 export async function buildApi(options: BuildApiOptions): Promise<FastifyInstance> {
-  const app = fastify({ logger: false });
+  const app = fastify({
+    logger: false,
+    genReqId: () => uuidV7(),
+    ajv: {
+      customOptions: {
+        coerceTypes: false,
+        removeAdditional: false,
+      },
+    },
+  });
+
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (request, body, done) => {
+    const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body);
+    rawRequestBodies.set(request, rawBody);
+    try {
+      done(null, JSON.parse(rawBody.toString('utf8')));
+    } catch {
+      done(new ApiError(400, 'REQUEST_BODY_MALFORMED', 'The JSON request body is malformed.'), undefined);
+    }
+  });
 
   app.setErrorHandler(async (error, request, reply) => {
-    const known = error instanceof ApiError;
-    const statusCode = known ? error.statusCode : 500;
-    const code = known ? error.code : 'INTERNAL_ERROR';
-    const message = known ? error.message : 'The request could not be completed.';
+    // Backstop: an error response never leaves a tenant transaction open
+    // (the tenant context's onError hook normally rolled back already).
+    await rollbackTenantRequest(request);
+
+    const mapped = error instanceof ApiError
+      ? error
+      : mapDomainError(error) ?? mapFrameworkError(error);
+    const statusCode = mapped?.statusCode ?? 500;
+    const tenantRoute = request.routeOptions.config.permission !== undefined;
+    const explicitTripwire = mapped?.code === 'RESOURCE_AUTHORIZATION_CHECK_MISSING';
+    const code = tenantRoute && statusCode === 500 && !explicitTripwire
+      ? 'INTERNAL_ERROR' : mapped?.code ?? 'INTERNAL_ERROR';
+    const message = tenantRoute && statusCode === 500 ? 'The request could not be completed.'
+      : mapped?.message ?? 'The request could not be completed.';
+
+    for (const [name, value] of Object.entries(mapped?.headers ?? {})) {
+      reply.header(name, value);
+    }
+
+    // Error responses on tenant routes must not re-enter route or ancestor
+    // onSend hooks. A second onSend failure makes Fastify's fallback serialize
+    // the internal exception rather than invoking this mapper again.
+    if (tenantRoute) {
+      sendTenantErrorWithoutOnSend(request, reply, statusCode, code, message);
+      return;
+    }
 
     await reply.code(statusCode).send({
       error: { code, message, request_id: request.id },
@@ -134,15 +266,28 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
   // a single Sprint-0 instance, revisit with a shared store before scaling
   // horizontally). Routes with stricter documented limits (uploads, OTP,
   // login) override via their own route `config.rateLimit`.
+  //
+  // `errorResponseBuilder` feeds two different call sites: our own manual
+  // `createRateLimit()` hooks below (which only read the returned value's
+  // shape and reply directly -- never throw it) AND `@fastify/rate-limit`'s
+  // own automatic per-route enforcement, wired via `config.rateLimit` on
+  // individual routes (e.g. onboarding, media uploads). That second path
+  // does `throw params.errorResponseBuilder(...)` internally, so it MUST
+  // return a real `Error`; returning a plain object here previously meant
+  // that throw reached our `setErrorHandler` as an unrecognized error and
+  // was reported as 500 INTERNAL_ERROR instead of 429. An `ApiError`
+  // satisfies both call sites: its fields are readable like the old plain
+  // object, and `instanceof ApiError` still maps it to 429 when thrown.
   const rateLimitConfig = options.rateLimit ?? DEFAULT_RATE_LIMIT;
   app.register(rateLimit, {
     global: true,
     max: rateLimitConfig.max,
     timeWindow: rateLimitConfig.timeWindow,
     keyGenerator: (request) => request.ip,
-    errorResponseBuilder: (request) => ({
-      error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests.', request_id: request.id },
-    }),
+    // `Retry-After` is already set on the reply by the plugin itself
+    // (`addHeaders[retryAfter]`, before it throws this); `request_id` is
+    // added by `setErrorHandler` from `request.id`. Nothing else to attach.
+    errorResponseBuilder: () => new ApiError(429, 'RATE_LIMIT_EXCEEDED', 'Too many requests.'),
   });
 
   // Arquitectura Técnica v1 §16: liveness/readiness. Unauthenticated,
@@ -158,8 +303,68 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
     return reply.code(ready ? 200 : 503).send({ status: ready ? 'ready' : 'not_ready', checks: { database: ready } });
   });
 
-  // Everything else lives in its own encapsulated context: the tenant
-  // transaction hooks below must never run for /health/*.
+  if (options.registerPublicRoutes) await options.registerPublicRoutes(app);
+
+  // Identity-only routes authenticate and rate-limit but deliberately do not
+  // resolve a membership, create TenantContext or reserve a DB connection.
+  // This is the narrow bootstrap surface: onboarding and GET /api/v1/me.
+  app.register(async (identityOnlyApp) => {
+    // Same pre-auth manual rate-limit reasoning as the tenant context below.
+    const checkRateLimitBeforeAuth = identityOnlyApp.createRateLimit();
+    identityOnlyApp.addHook('onRequest', async (request, reply) => {
+      const limit = await checkRateLimitBeforeAuth(request);
+      if (!limit.isAllowed && limit.isExceeded) {
+        reply.header('retry-after', limit.ttlInSeconds);
+        return reply.code(429).send({
+          error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests.', request_id: request.id },
+        });
+      }
+    });
+
+    identityOnlyApp.addHook('onRequest', async (request) => {
+      const identity = await authenticate(options.identityProvider, request);
+      setIdentityOnlyRequestContext(request, identity);
+
+      // Provider profile is opt-in per route (S1-01 onboarding/invitation);
+      // it is never fetched for /me or for tenant routes.
+      if (request.routeOptions.config.identityProfile === 'required') {
+        let profile: VerifiedIdentityProfile;
+        try {
+          profile = await options.identityProvider.getIdentityProfile(identity);
+        } catch (error) {
+          if (error instanceof IdentityProfileNotFoundError
+            || (error as { code?: string })?.code === 'IDENTITY_PROFILE_NOT_FOUND') {
+            throw authenticationRequired();
+          }
+          throw new ApiError(
+            503,
+            'IDENTITY_PROVIDER_UNAVAILABLE',
+            'The identity provider is temporarily unavailable.',
+            { 'retry-after': '5' },
+          );
+        }
+
+        if (profile.emailVerified !== true) {
+          throw new ApiError(403, 'IDENTITY_EMAIL_UNVERIFIED', 'A verified email address is required.');
+        }
+
+        setIdentityProfileRequestContext(request, identity, profile);
+      }
+    });
+
+    // A permission here would be silently ignored (no TenantContext): refuse it.
+    identityOnlyApp.addHook('onRoute', (routeOptions) => {
+      if (routeOptions.config?.permission !== undefined || routeOptions.config?.permissionScope !== undefined) {
+        throw new Error(`IDENTITY_ROUTE_CONFIGURATION_INVALID ${String(routeOptions.method)} ${routeOptions.url}: permission requires a tenant route`);
+      }
+    });
+
+    registerMeRoute(identityOnlyApp, { database: options.database });
+    if (options.registerIdentityOnlyRoutes) await options.registerIdentityOnlyRoutes(identityOnlyApp);
+  });
+
+  // Tenant routes live in their own encapsulated context: the tenant
+  // transaction hooks below must never run for /health/* or identity-only.
   app.register(async (protectedApp) => {
     // Fastify always runs a context's own instance-level `onRequest` hooks
     // before a route's per-route hook array -- and that per-route array is
@@ -184,73 +389,12 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
       }
     });
 
-    protectedApp.addHook('onRequest', async (request) => {
-      let identity;
-      try {
-        identity = await options.identityProvider.verifyRequest(request);
-      } catch {
-        throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
-      }
-
-      if (!identity) {
-        throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication is required.');
-      }
-
-      const memberships = await options.database<ActiveMembershipRow[]>`
-        SELECT user_id, membership_id, tenant_id
-        FROM app.bootstrap_list_active_memberships(
-          ${identity.identityProvider},
-          ${identity.externalSubject}
-        )
-      `;
-
-      if (memberships.length === 0) {
-        throw new ApiError(403, 'ACTIVE_MEMBERSHIP_REQUIRED', 'An active membership is required.');
-      }
-      if (memberships.length !== 1) {
-        throw new ApiError(409, 'TENANT_SELECTION_REQUIRED', 'A workshop must be selected.');
-      }
-
-      const membership = memberships[0];
-      const sql = await options.database.reserve();
-      try {
-        await sql.unsafe('BEGIN');
-        await sql`
-          SELECT
-            set_config('app.tenant_id', ${membership.tenant_id}, true),
-            set_config('app.user_id', ${membership.user_id}, true),
-            set_config('app.membership_id', ${membership.membership_id}, true),
-            set_config('app.request_id', ${request.id}, true)
-        `;
-      } catch (error) {
-        await sql.unsafe('ROLLBACK').catch(() => undefined);
-        sql.release();
-        throw error;
-      }
-
-      requestStates.set(request, {
-        sql,
-        transactionOpen: true,
-        tenant: {
-          tenantId: membership.tenant_id,
-          userId: membership.user_id,
-          membershipId: membership.membership_id,
-          requestId: request.id,
-        },
-      });
-    });
-
-    protectedApp.addHook('onSend', async (request, _reply, payload) => {
-      await finishTransaction(request, 'COMMIT');
-      return payload;
-    });
-
-    protectedApp.addHook('onError', async (request) => {
-      await finishTransaction(request, 'ROLLBACK');
-    });
-
-    protectedApp.addHook('onResponse', async (request) => {
-      await finishTransaction(request, 'ROLLBACK');
+    // S1-02: identity → memberships → X-Tenant-Id → one transaction →
+    // revalidation → GUCs → RBAC rows → TenantContext → permission guard →
+    // handler → resource tripwire → COMMIT/ROLLBACK (see ./tenant-request.ts).
+    registerTenantRequestLifecycle(protectedApp, {
+      database: options.database,
+      authenticate: (request) => authenticate(options.identityProvider, request),
     });
 
     if (options.registerRoutes) await options.registerRoutes(protectedApp);

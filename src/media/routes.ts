@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { getTenantRequestContext } from '../api/app.js';
+import { getTenantRequestContext, markDurableTenantOutcome } from '../api/app.js';
 import type { R2Config } from './r2.js';
 import {
   MediaError,
@@ -21,7 +21,13 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
     {
       // Security Baseline §10: uploads get a stricter per-route limit than
       // the global default (@fastify/rate-limit route-level override).
-      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+      // RBAC: tenant scope. Technician's `media.upload = assigned` stays
+      // denied until an order-assignment resource check exists (Sprint 2+).
+      config: {
+        permission: 'media.upload',
+        durableErrorCodes: ['UPLOAD_SESSION_EXPIRED'],
+        rateLimit: { max: 30, timeWindow: '1 minute' },
+      },
       schema: {
         body: {
           type: 'object',
@@ -52,7 +58,12 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
         const result = await createUploadSession(context.sql, r2, context.tenant.tenantId, context.tenant.membershipId, body);
         return reply.code(201).send(result);
       } catch (error) {
-        if (error instanceof MediaError) return sendMediaError(request, reply, error);
+        if (error instanceof MediaError) {
+          if (error.code === 'UPLOAD_SESSION_EXPIRED' && error.statusCode === 409) {
+            markDurableTenantOutcome(request, 'UPLOAD_SESSION_EXPIRED');
+          }
+          return sendMediaError(request, reply, error);
+        }
         throw error;
       }
     },
@@ -61,6 +72,7 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
   app.post(
     '/api/v1/media/upload-sessions/:id/complete',
     {
+      config: { permission: 'media.upload', durableErrorCodes: ['UPLOAD_SESSION_EXPIRED', 'MEDIA_SIZE_INVALID'] },
       schema: {
         body: {
           type: 'object',
@@ -77,13 +89,20 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
         const result = await completeUploadSession(context.sql, r2, context.tenant.tenantId, id, checksumSha256 ?? null);
         return reply.send(result);
       } catch (error) {
-        if (error instanceof MediaError) return sendMediaError(request, reply, error);
+        if (error instanceof MediaError) {
+          if (error.code === 'UPLOAD_SESSION_EXPIRED' && error.statusCode === 409) {
+            markDurableTenantOutcome(request, 'UPLOAD_SESSION_EXPIRED');
+          } else if (error.code === 'MEDIA_SIZE_INVALID' && error.statusCode === 422) {
+            markDurableTenantOutcome(request, 'MEDIA_SIZE_INVALID');
+          }
+          return sendMediaError(request, reply, error);
+        }
         throw error;
       }
     },
   );
 
-  app.get('/api/v1/media/:id/download-url', async (request, reply) => {
+  app.get('/api/v1/media/:id/download-url', { config: { permission: 'media.read' } }, async (request, reply) => {
     const context = getTenantRequestContext(request);
     const { id } = request.params as { id: string };
     try {

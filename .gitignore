@@ -70,6 +70,11 @@ web_modules/
 .env.*
 !.env.example
 
+# local "staging" drill secrets (docker-compose.staging.yml) -- generated
+# per-run by scripts/staging-deploy-drill.cjs, deleted when it finishes
+staging.env
+!staging.env.example
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
