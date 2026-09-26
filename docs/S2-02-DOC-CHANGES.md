@@ -85,6 +85,8 @@ Motivo: el historial por vehículo es naturalmente pequeño; 200 es un límite d
 
 ## 5. Delta exacto pendiente sobre S2-03 (`a277cd1`, no implementado en S2-02)
 
+> **Estado posterior:** este delta quedó implementado en S2-03 (`d4aa5caf`, `drizzle/0018_s2_03_crm_hardening.sql`). Ver `docs/S2-03-DOC-CHANGES.md`. La lista se conserva como registro histórico.
+
 - **D-12:** confirma sin cambios `vehicle_owners_history_guard_trg` y los grants de columna.
 - **D-01b** exige, antes del merge de S2-03, estos cambios en `0018` (sin merge ni ledger aplicado fuera de BDs desechables) o en una `0019`:
   1. **Constraint:** `ALTER TABLE public.vehicles ADD CONSTRAINT vehicles_plate_format_check CHECK (plate COLLATE "C" ~ '^[A-Z0-9]{1,16}$')`. Verificar la semántica del rango bajo `"C"`.
@@ -163,7 +165,7 @@ Motivo: el historial por vehículo es naturalmente pequeño; 200 es un límite d
 - **Ampliación sobre el inventario:** los bloques de Diccionario 01 §3/§4/§5/§9, ADR-009 §2/§3/§6.1/§7/§9/§11/§14, Arquitectura §5 y los del ERD fuera de las tres tablas inventariadas cumplen las cuatro condiciones (presentes en `docs/`, Sprint 1 cerrado, ausentes en Notion, sin contradicción con Sprint 2). En Diccionario 01 §4 la frase de constraints de Notion era una versión anterior e incompleta de la misma regla (subconjunto, no contradicción) y se reemplazó por la de `docs/`. En ADR-009 §10 la línea introductoria provisional de S2-02 se sustituyó por la de `docs/`, según la colocación prevista arriba; el bullet S2-03 queda dentro de la lista, sin cambios.
 - **Sprint 2 preservado:** verificado tras cada edición. Intactos: Arquitectura §9 (CRM S2-02) y §13.4; RBAC §5 Sprint 2, §17 `vehicles.read` A y §20 CRM; ADR-009 bullet S2-03 (incluida la frase de EXECUTE de N-4); Operación catálogo CRM de §5.2 y §6.3; ERD CRM (§5, D-01a/D-01b, Frozen-on-close, §17 S2-02, §18 S2-02); Diccionario 01 §10–§12 (DOC_GAP-02, D-01a/D-01b, Frozen-on-close).
 - **Conflictos:** 0. Diferencias residuales solo de formato (tablas/menciones de Notion, auto-link de «localhost»), sin cambio de contenido.
-- **Fuera de alcance:** el estado «pendiente de incorporar a S2-03» de `vehicles_plate_format_check` (Notion y `docs/`) no forma parte de DOC_CONFLICT-02 y no se modificó.
+- **Fuera de alcance:** el estado «pendiente de incorporar a S2-03» de `vehicles_plate_format_check` (Notion y `docs/`) no forma parte de DOC_CONFLICT-02 y no se modificó en ese cierre; se alineó después en la limpieza documental post-merge de S2-03.
 - **Commit de cierre:** el commit que introduce este registro en la rama `task/docs-back-sync-s1-notion`.
 - Este registro es bitácora, no fuente normativa.
 

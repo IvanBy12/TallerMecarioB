@@ -284,7 +284,7 @@ La placa es única por tenant, no global.
 **Forma canónica de `plate` (S2-02; D-01a + D-01b):** `plate` cumple `^[A-Z0-9]{1,16}$`. La API normaliza la entrada así: trim → eliminar espacios, `-` y `.` → mayúsculas ASCII → validar. PostgreSQL la protege con dos CHECK:
 
 - `vehicles_plate_normalized_check`: `plate = btrim(plate) AND plate = upper(plate COLLATE "C")` (migración 0018).
-- `vehicles_plate_format_check`: backstop de formato `plate COLLATE "C" ~ '^[A-Z0-9]{1,16}$'`, pendiente de incorporarse a S2-03 antes de su merge.
+- `vehicles_plate_format_check`: backstop de formato `plate COLLATE "C" ~ '^[A-Z0-9]{1,16}$'`, implementado en `drizzle/0018_s2_03_crm_hardening.sql` como parte de S2-03.
 
 Los formatos por `vehicle_type` están diferidos (D-01c: se reabren con datos del piloto o con placas legítimas rechazadas en Sprint 3). `current_mileage_km` es solo lectura para el cliente en Sprint 2; lo escribe el servidor y Sprint 3 define la regla desde recepción.
 

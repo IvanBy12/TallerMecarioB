@@ -308,7 +308,7 @@ Privilegios finales de `audit_logs`: API `SELECT` bajo RLS + INSERT por columnas
   - **CHECK:** `vehicles_plate_normalized_check`.
   - **Preflight de placa:** como `schema_owner` es NOBYPASSRLS, desactiva `FORCE` en `vehicles` temporalmente bajo `ACCESS EXCLUSIVE` y lo restaura antes de la CHECK.
   - **Autoverificación:** la migración falla si queda UPDATE de tabla, UPDATE fuera de la allowlist o cualquier privilegio de worker/PUBLIC, o si RLS, policies, función, trigger o constraints no coinciden.
-  - **Delta aprobado en S2-02, pendiente de incorporar a S2-03 antes de su merge:** CHECK `vehicles_plate_format_check` (`plate COLLATE "C" ~ '^[A-Z0-9]{1,16}$'`) con su preflight, `schema.ts` y tests.
+  - **Delta D-01b aprobado en S2-02, IMPLEMENTADO en S2-03** (`drizzle/0018_s2_03_crm_hardening.sql`): CHECK `vehicles_plate_format_check` (`plate COLLATE "C" ~ '^[A-Z0-9]{1,16}$'`) con su preflight, `schema.ts` y tests.
 
 ## 10.1 Lock de owner-set e invariante de owner activo (S1-05, 0011–0014)
 

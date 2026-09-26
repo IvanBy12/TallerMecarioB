@@ -434,7 +434,7 @@ Dependencias de migración: `0011` (grants/policies de `membership_roles` + trig
 
 Constraint: `UNIQUE(tenant_id, plate)`.
 
-CHECKs de forma canónica (S2-02): `vehicles_plate_normalized_check` (0018) y `vehicles_plate_format_check` (`^[A-Z0-9]{1,16}$`, pendiente de incorporarse a S2-03). Ver Diccionario 01 §11.
+CHECKs de forma canónica (S2-02): `vehicles_plate_normalized_check` (0018) y `vehicles_plate_format_check` (`plate COLLATE "C" ~ '^[A-Z0-9]{1,16}$'`), implementado en `drizzle/0018_s2_03_crm_hardening.sql` como parte de S2-03. Ver Diccionario 01 §11.
 
 <aside>
 💡
