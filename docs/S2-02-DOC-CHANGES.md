@@ -117,7 +117,7 @@ Motivo: el historial por vehículo es naturalmente pequeño; 200 es un límite d
   - Operación (`3e06ab0a330d819ea376f6f7628679f6`) §5.2, §6.3.
 - **Sincronización de `docs/`:** se aplicaron exactamente los mismos bloques de texto. **No** se re-exportó la página completa desde Notion (ver DOC_CONFLICT-02).
 
-### DOC_CONFLICT-02 — OPEN: deuda de sincronización de Sprint 1
+### DOC_CONFLICT-02 — CLOSED: deuda de sincronización de Sprint 1 (cierre en «Registro de cierre», al final de esta sección)
 
 **Inventario confirmado por el review final** (fetch de Notion posterior a las ediciones S2-02). Contenido de Sprint 1 presente en el export `docs/` y **ausente** en Notion:
 
@@ -144,6 +144,29 @@ Motivo: el historial por vehículo es naturalmente pequeño; 200 es un límite d
   - ADR-009: el bullet S2-03 está antes de §11 con una línea introductoria; al restaurar §10/§10.1 debe quedar dentro de la lista de reducciones.
   - RBAC §20: el párrafo CRM va tras "Nunca registrar tokens o secretos en el audit log." (mismo ancla en `docs/`).
 
+#### Registro de cierre — DOC_CONFLICT-02: CLOSED (2026-09-26 UTC)
+
+- **Causa:** los cierres de Sprint 1 (S1-03…S1-08) se aplicaron al export `docs/` pero no a las páginas de Notion; S2-02 lo detectó al editar Notion.
+- **Fuente usada:** los archivos actuales de `docs/` en `main` `e0ea533` (S2-01, S2-02 y S2-03 integrados). Dirección única `docs/` → Notion. Sin re-export ni reescritura de páginas completas: solo reemplazos anclados (`update_content`) de los bloques ausentes, con el mismo texto que `docs/`.
+- **Método:** por página, fetch de Notion → comparación bloque a bloque con `docs/` (normalización línea a línea + búsqueda de marcadores S1-0x / migraciones 0007–0017) → edición solo de los bloques MISSING → nuevo fetch y verificación del resultado y de los marcadores S2.
+- **Contenido restaurado en Notion:**
+
+| Página | Bloques añadidos |
+|---|---|
+| Arquitectura Técnica | §5 verificación S1-08; §13.1, §13.2, §13.3 (antes de §13.4); §15 notas S1-07 y S1-08 |
+| RBAC | §16 párrafo S1-06 (tras la regla 9, para no romper la lista numerada); §18 nota S1-08; §20 nota del catálogo Sprint 1 |
+| ADR-009 | §2 fila `tallermecario_identity_sync` y reglas; §3 nota S1-08; §6.1 línea Tenancy (0009/0011); §7 casos 7–8; §9 S1-08, regla transacción/red S1-03 y lease S1-04; §10 reducciones S1-04…S1-07 (0009–0017) y privilegios finales de `audit_logs`; §10.1 completo; §11 guard de actor, frontera GUC y alcance S1-08; §14 DEPLOYMENT_SECURITY_DELTA |
+| Operación | §5.1 reglas S1-04/S1-07/S1-08 y frontera de confianza; §5.2 catálogo de 18 acciones (idéntico al de `docs/`), actores, política de denegados, D1–D6, deuda CI/LOW, S1-08; §8.1 runbook de Resend |
+| ERD | dominio Tenancy e identidad; relación `IDENTITY_SYNC_STATES`; `identity_sync_states`; columnas y máquina de estados 0016 de `memberships`; restricciones S1-04 de `membership_invitations`; `membership_invitation_deliveries`; «Invariante de owner activo»; Clerk en `webhook_events`; S1-08 en `outbox_events`; S1-07/S1-08 en `audit_logs`; índices obligatorios; nota 0002/0017 de append-only; nota 0019 documental |
+| Diccionario 01 | §3 tombstone `user.deleted`; §3.1; §4 constraints 0016 e invariante S1-05/S1-06; §5 contrato del token y CHECKs 0008–0010; §5.1; §9 nota S1-05 y `app.owner_mutation_gate` |
+
+- **Ampliación sobre el inventario:** los bloques de Diccionario 01 §3/§4/§5/§9, ADR-009 §2/§3/§6.1/§7/§9/§11/§14, Arquitectura §5 y los del ERD fuera de las tres tablas inventariadas cumplen las cuatro condiciones (presentes en `docs/`, Sprint 1 cerrado, ausentes en Notion, sin contradicción con Sprint 2). En Diccionario 01 §4 la frase de constraints de Notion era una versión anterior e incompleta de la misma regla (subconjunto, no contradicción) y se reemplazó por la de `docs/`. En ADR-009 §10 la línea introductoria provisional de S2-02 se sustituyó por la de `docs/`, según la colocación prevista arriba; el bullet S2-03 queda dentro de la lista, sin cambios.
+- **Sprint 2 preservado:** verificado tras cada edición. Intactos: Arquitectura §9 (CRM S2-02) y §13.4; RBAC §5 Sprint 2, §17 `vehicles.read` A y §20 CRM; ADR-009 bullet S2-03 (incluida la frase de EXECUTE de N-4); Operación catálogo CRM de §5.2 y §6.3; ERD CRM (§5, D-01a/D-01b, Frozen-on-close, §17 S2-02, §18 S2-02); Diccionario 01 §10–§12 (DOC_GAP-02, D-01a/D-01b, Frozen-on-close).
+- **Conflictos:** 0. Diferencias residuales solo de formato (tablas/menciones de Notion, auto-link de «localhost»), sin cambio de contenido.
+- **Fuera de alcance:** el estado «pendiente de incorporar a S2-03» de `vehicles_plate_format_check` (Notion y `docs/`) no forma parte de DOC_CONFLICT-02 y no se modificó.
+- **Commit de cierre:** el commit que introduce este registro en la rama `task/docs-back-sync-s1-notion`.
+- Este registro es bitácora, no fuente normativa.
+
 ## 8. Archivos del export tocados
 
 - `Arquitectura Técnica v1 — TallerMecario …md`
@@ -161,9 +184,9 @@ Motivo: el historial por vehículo es naturalmente pequeño; 200 es un límite d
 | ID | Estado | Resolución |
 |---|---|---|
 | R-1 | CLOSED | DOC_GAP-02 ahora registra motivo, interino, trigger e impacto futuro en Diccionario 01 §10 (Notion y `docs/`) y en §4 (fila D-02) |
-| R-2 | CLOSED | Inventario confirmado de DOC_CONFLICT-02 en §7, con plan BACK-SYNC; el conflicto sigue OPEN como deuda de Sprint 1 |
+| R-2 | CLOSED | Inventario confirmado de DOC_CONFLICT-02 en §7, con plan BACK-SYNC; el conflicto se cerró con el back-sync del 2026-09-26 (ver registro de cierre en §7) |
 | N-1 | APPROVED | Límite 200 + `ownershipId DESC` registrados en §1.1; Arq §13.4 ya lo describía |
-| N-2 | Parte de DOC_CONFLICT-02 | Las referencias colgantes de Notion se resuelven con el back-sync; sin arreglo parcial |
+| N-2 | CLOSED (DOC_CONFLICT-02) | Referencias colgantes resueltas por el back-sync: §13.2 `role_code`, guard 0017 y §10.1 ya existen en Notion |
 | N-3 | INFO (sin cambio) | Arq §13 es la lista genérica con `:id`; §13.4 define los nombres `:customerId`/`:vehicleId` |
 | N-4 | CLOSED | ADR-009 §10 (Notion y `docs/`): "`EXECUTE` revocado de PUBLIC y no concedido a ningún rol runtime; el owner conserva su privilegio implícito de PostgreSQL". Verificado: 0000 solo hace `ALTER DEFAULT PRIVILEGES … REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` en `app`, y 0018 no concede EXECUTE. La frase del ERD ("sin EXECUTE a PUBLIC") ya era exacta |
 | N-5 | INFO (sin cambio) | La referencia de Notion a este registro es informativa (bitácora), no una dependencia contractual |
