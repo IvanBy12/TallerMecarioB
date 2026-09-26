@@ -148,4 +148,8 @@ vite.config.ts.timestamp-*
 .vite/
 
 
+.claude/worktrees/
+.audit-*/
+
+
 docs/ 
