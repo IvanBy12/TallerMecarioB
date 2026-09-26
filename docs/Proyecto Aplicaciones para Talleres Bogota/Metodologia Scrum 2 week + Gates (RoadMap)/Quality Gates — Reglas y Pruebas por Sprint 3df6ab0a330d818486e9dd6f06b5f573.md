@@ -188,8 +188,8 @@ Un FAILED se corrige y se vuelve a ejecutar; no se cambia manualmente a PASSED.
 
 # 5. Sprint 2 — Clientes + vehículos
 
-- [ ]  CRUD cliente.
-- [ ]  CRUD vehículo.
+- [ ]  Cliente: crear, leer, actualizar y listar/buscar. En Sprint 2, “CRUD” significa CREATE / READ / UPDATE / LIST-SEARCH; no incluye DELETE ni archivo.
+- [ ]  Vehículo: crear (con propietario inicial en la misma transacción), leer, actualizar y listar/buscar por placa canónica; no incluye DELETE.
 - [ ]  Buscar por placa.
 - [ ]  Misma placa permitida en dos talleres distintos.
 - [ ]  Duplicado de placa en mismo tenant rechazado.
@@ -199,6 +199,10 @@ Un FAILED se corrige y se vuelve a ejecutar; no se cambia manualmente a PASSED.
 - [ ]  Validaciones negativas.
 - [ ]  Paginación/búsqueda.
 - [ ]  E2E cliente → vehículo.
+
+**Alcance cerrado en S2-02 (2026-09-25; DOC_CONFLICT-01 CLOSED):** el “CRUD completo” del roadmap se interpreta como crear/leer/actualizar/listar-buscar. No hay borrado físico (ERD §18) ni archivo de clientes: `customers.archive` sigue sembrado sin endpoint, diferido hasta una necesidad de negocio explícita o el flujo DSR/anonimización y antes del piloto (Sprint 15). Contrato de API: Arquitectura §13.4.
+
+**Staging de Sprint 2 (S2-02, D-23):** el drill remoto de CI (`staging:deploy-drill:ci`) cuenta como staging de Sprint 2 solo si S2-08 lo amplía con la migración 0018, el ledger esperado, health/smoke, el E2E CRM customer → vehicle → búsqueda → cambio de propietario → historial con 2 tenants, rollback y la evidencia del run remoto. No se aprovisiona staging cloud solo para Sprint 2; el staging cloud real se resuelve antes del piloto según roadmap/ADR-007. Los criterios transversales de lint y observabilidad se cierran explícitamente en S2-08 con las convenciones/herramientas aprobadas del repositorio; S2-02 no introduce herramientas.
 
 # 6. Sprint 3 — Recepción
 
