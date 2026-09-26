@@ -249,6 +249,18 @@ updated_at | timestamptz | NOT NULL DEFAULT now() | - |
 - **Sin archivo ni borrado en Sprint 2:** no existe `archived_at` ni estado de archivo; `customers.archive` queda sin endpoint hasta una necesidad de negocio explícita o el flujo DSR/anonimización (antes del piloto).
 - Diferido (D-09): catálogo de `document_type`, canonicalización de documento y email, E.164 (reabrir en Sprint 9 o DSR/facturación).
 
+**DOC_GAP-02 — archivo de clientes: DEFERRED (S2-02, D-02).**
+
+- **Motivo:** todavía no existe una necesidad de negocio explícita. Arquitectura §6 y ERD §1/§18 limitan el soft delete a necesidades explícitas. No existe contrato ni permiso de unarchive. Implementarlo ahora obligaría a definir efectos sobre búsqueda, recepción y nuevas relaciones. Archivar no es supresión/anonimización DSR (Protección de Datos §6–§7).
+- **Comportamiento interino:** todo customer permanece activo; no existe endpoint de archive ni de delete; `customers.archive` sigue sembrado sin endpoint; en Sprint 2, CRUD = CREATE / READ / UPDATE / LIST-SEARCH.
+- **Trigger de reapertura:** necesidad de negocio explícita, flujo DSR/anonimización o necesidad de ocultar clientes operativamente; como máximo antes del piloto (Sprint 15).
+- **Impacto futuro esperado:**
+  - posible columna `archived_at` o `status`, con migración estructural y actualización de Diccionario + ERD;
+  - ampliar la allowlist de `GRANT UPDATE` por columnas de `customers` establecida en 0018;
+  - decidir el permiso/comando de unarchive;
+  - decidir el comportamiento de listado/búsqueda y si un customer archivado puede participar en nuevas receptions u ownership;
+  - tests y Quality Gate correspondientes.
+
 # 11. vehicles
 
 ```

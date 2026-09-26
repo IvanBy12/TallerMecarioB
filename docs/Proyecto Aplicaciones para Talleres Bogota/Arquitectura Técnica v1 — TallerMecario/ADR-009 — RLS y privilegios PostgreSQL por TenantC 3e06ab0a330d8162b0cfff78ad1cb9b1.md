@@ -304,7 +304,7 @@ Privilegios finales de `audit_logs`: API `SELECT` bajo RLS + INSERT por columnas
   - **Worker:** `tallermecario_worker` no tiene privilegio de tabla ni de columna en las tres tablas (REVOKE ALL). Ningún caso de uso del worker toca CRM en Sprint 2; un sprint futuro (p. ej. WhatsApp/recordatorios) otorgará solo lo que su contrato documente.
   - **PUBLIC:** sin privilegios. Sin DELETE/TRUNCATE/REFERENCES/TRIGGER para ningún runtime.
   - **RLS y policies:** `tenant_select/insert/update` para {api, worker} y RLS ENABLE/FORCE, sin cambio (una policy no concede nada sin privilegio).
-  - **Trigger Frozen-on-close:** `vehicle_owners_history_guard_trg` → `app.enforce_vehicle_owner_history()` (SECURITY INVOKER, owner `tallermecario_schema_owner`, `search_path = pg_catalog`, sin EXECUTE a nadie).
+  - **Trigger Frozen-on-close:** `vehicle_owners_history_guard_trg` → `app.enforce_vehicle_owner_history()` (SECURITY INVOKER, owner `tallermecario_schema_owner`, `search_path = pg_catalog`; `EXECUTE` revocado de PUBLIC y no concedido a ningún rol runtime; el owner conserva su privilegio implícito de PostgreSQL).
   - **CHECK:** `vehicles_plate_normalized_check`.
   - **Preflight de placa:** como `schema_owner` es NOBYPASSRLS, desactiva `FORCE` en `vehicles` temporalmente bajo `ACCESS EXCLUSIVE` y lo restaura antes de la CHECK.
   - **Autoverificación:** la migración falla si queda UPDATE de tabla, UPDATE fuera de la allowlist o cualquier privilegio de worker/PUBLIC, o si RLS, policies, función, trigger o constraints no coinciden.
