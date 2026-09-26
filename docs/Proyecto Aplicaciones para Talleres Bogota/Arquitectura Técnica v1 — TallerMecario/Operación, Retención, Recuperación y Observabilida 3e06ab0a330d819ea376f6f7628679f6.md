@@ -375,13 +375,14 @@ Cinco acciones. Todas con actor `user` (TenantContext), `outcome = success`, `re
 - **Nombres en `fields`/`changed_fields` de customer (S2-04, DOC_GAP-05 CLOSED):** nombres de columna persistida en snake_case, solo del conjunto `first_name`, `last_name`, `phone`, `email`, `document_type`, `document_number`, `notes`; sin duplicados y siempre en ese orden (determinista, nunca el orden accidental del body). Nunca `expected_updated_at`/`expectedUpdatedAt` (control OCC, no dato del customer), `tenant_id`, `created_at` ni `updated_at`, y nunca valores.
 - `vehicle.created`: entidad `vehicle` / id; before/after NULL; metadata `{ownership_id, customer_id}`.
 - `vehicle.updated`: entidad `vehicle` / id; before/after NULL; metadata `{changed_fields}` (un cambio de placa aparece solo como el nombre `plate`).
+- **Nombres en `changed_fields` de vehicle (S2-05, DOC_GAP-03 CLOSED):** mismo criterio que customer: nombres de columna persistida en snake_case, solo del conjunto `plate`, `vehicle_type`, `brand`, `model`, `model_year`, `color`, `vin`, `engine_number`; sin duplicados y siempre en ese orden. Nunca `expected_updated_at`/`expectedUpdatedAt`, `customer_id`, `tenant_id`, `current_mileage_km`, `created_at` ni `updated_at`, y nunca valores.
 - `vehicle.owner_changed`: entidad `vehicle` / id; before `{ownership_id, customer_id}` o NULL (creación); after `{ownership_id, customer_id}`; metadata `{command: create | transfer}`.
 
 Reglas:
 
 - Crear un vehículo deja `vehicle.created` + `vehicle.owner_changed` (`command = create`).
 - Prohibidos en JSON: nombre, teléfono, email, documento, notas, placa, VIN y número de motor.
-- No se auditan lecturas, 404, 409, `PERMISSION_DENIED`, el PATCH no-op de customer (S2-04: `changed_fields` vacío) ni el cambio de propietario no-op. No hay denegados durables CRM en Sprint 2.
+- No se auditan lecturas, 404, 409, `PERMISSION_DENIED`, el PATCH no-op de customer (S2-04: `changed_fields` vacío), el PATCH no-op de vehicle (S2-05: `changed_fields` vacío tras superar el OCC; sin UPDATE, sin avance de `updated_at` ni `xmin`) ni el cambio de propietario no-op. No hay denegados durables CRM en Sprint 2.
 - Auditar lecturas de PII queda diferido al hardening de privacidad (Sprint 14).
 - El guard 0017 no restringe `action`, así que no hace falta migración.
 
