@@ -434,6 +434,8 @@ Dependencias de migración: `0011` (grants/policies de `membership_roles` + trig
 
 Constraint: `UNIQUE(tenant_id, plate)`.
 
+CHECKs de forma canónica (S2-02): `vehicles_plate_normalized_check` (0018) y `vehicles_plate_format_check` (`^[A-Z0-9]{1,16}$`, pendiente de incorporarse a S2-03). Ver Diccionario 01 §11.
+
 <aside>
 💡
 
@@ -453,6 +455,14 @@ La placa **no será única globalmente**. Dos talleres distintos pueden atender 
 - created_at.
 
 Permite cambios de propietario sin destruir historia.
+
+**Semántica (S2-02):**
+
+- Propietario actual = `is_primary AND valid_to IS NULL` (partial unique).
+- **Frozen-on-close**, protegido por `app.enforce_vehicle_owner_history()` / `vehicle_owners_history_guard_trg` (`BEFORE UPDATE FOR EACH ROW`, SECURITY INVOKER, owner `tallermecario_schema_owner`, `search_path = pg_catalog`, sin EXECUTE a PUBLIC; error `23514 vehicle_owners_history_guard`).
+- Algoritmo de cambio: lock `vehicles FOR NO KEY UPDATE` → releer la vigente → `clock_timestamp()` → cerrar → insertar con el mismo instante. Orden de locks: padre (`vehicles`) antes que hijo.
+- Crear un vehículo inserta el propietario inicial en la misma transacción.
+- Ver Arquitectura §13.4.
 
 # 6. Agenda
 
@@ -1451,6 +1461,8 @@ quote_authorization_items (tenant_id, authorization_id)
 
 No crear índices “por si acaso”; ampliar con consultas reales y `EXPLAIN ANALYZE`.
 
+CRM Sprint 2 (S2-02): los listados y búsquedas usan `(tenant_id, id)` (keyset), `(tenant_id, phone)`, `(tenant_id, document_number)` y `(tenant_id, plate)`. La búsqueda por prefijo de nombre no tiene índice en Sprint 2; solo se indexará con evidencia `EXPLAIN ANALYZE`.
+
 # 18. Inmutabilidad y política de borrado
 
 ## Append-only protegido por PostgreSQL
@@ -1479,8 +1491,8 @@ En `audit_logs` esto **ya está implementado**: REVOKE UPDATE/DELETE/TRUNCATE, R
 | Entidad | Estrategia |
 | --- | --- |
 | workshops | No borrar físicamente; cambiar estado |
-| customers | Anonimización/baja lógica según política futura |
-| vehicles | No borrar si existe historial operativo |
+| customers | Sin borrado ni archivo en Sprint 2 (S2-02, D-02); anonimización/baja lógica según política futura |
+| vehicles | No borrar si existe historial operativo; sin endpoint de borrado en Sprint 2 |
 | service_orders | Nunca borrar una orden cerrada |
 | quote_versions | Inmutable cuando fue enviada |
 | quote_authorizations | Append-only |
@@ -1489,6 +1501,8 @@ En `audit_logs` esto **ya está implementado**: REVOKE UPDATE/DELETE/TRUNCATE, R
 | audit_logs | Append-only |
 | inventory_movements | Append-only |
 | inventory_balances | Derivado del ledger; no se borra, se corrige con movimiento compensatorio |
+
+`vehicle_owners`: Frozen-on-close. Se cierra `valid_to`; nunca se borra ni se reescribe (S2-02, D-12).
 
 # 19. Secuencia prevista de migraciones — solo documental
 

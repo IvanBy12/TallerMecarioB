@@ -303,6 +303,8 @@ PWA
 - El usuario debe ver: **pendiente**, **sincronizando**, **sincronizado**, **error**.
 - Video/fotos pueden quedar pendientes hasta recuperar conectividad sin impedir guardar la recepción local.
 
+- **CRM Sprint 2 (S2-02):** `customers`, `vehicles` y `vehicle_owners` se crean online con UUIDv7 generado por el servidor; no hay `Idempotency-Key` ni IDs de cliente en CRM (D-22, diferido: Sprint 3 si el E2E móvil demuestra la necesidad; si no, Sprint 13 con `sync_operations.operation_id`). Los PATCH CRM exigen `expectedUpdatedAt` (§13.4), reutilizable como `base_version`.
+
 # 10. Integraciones y procesamiento asíncrono
 
 ## Patrón Outbox
@@ -412,7 +414,14 @@ POST   /api/v1/membership-invitations
 POST   /api/v1/membership-invitations/accept
 POST   /api/v1/customers
 GET    /api/v1/customers/:id
+GET    /api/v1/customers
+PATCH  /api/v1/customers/:id
 POST   /api/v1/vehicles
+GET    /api/v1/vehicles
+GET    /api/v1/vehicles/:id
+PATCH  /api/v1/vehicles/:id
+GET    /api/v1/vehicles/:id/owners
+POST   /api/v1/vehicles/:id/owners
 POST   /api/v1/receptions
 POST   /api/v1/orders/:id/diagnostics
 POST   /api/v1/orders/:id/quotes
@@ -432,7 +441,7 @@ POST   /api/v1/webhooks/whatsapp
 - Validación estricta de payload.
 - Errores con código de aplicación estable, `request_id` y mensaje seguro.
 - `Idempotency-Key` en operaciones sensibles.
-- Paginación cursor-based donde el volumen lo justifique.
+- Paginación cursor-based donde el volumen lo justifique. Formato (S2-02): cursor opaco base64url versionado; `limit` 20 por defecto y 100 máximo; respuesta `{ <items>, nextCursor }` con `nextCursor = null` al final; cursor o `limit` inválidos → 400 `REQUEST_VALIDATION_FAILED`. Cada listado define su orden estable en su contrato.
 - Versionamiento de API antes de comercialización.
 
 ## 13.1 Invitaciones internas (S1-04) — contrato backend ↔ PWA
@@ -518,6 +527,85 @@ POST /api/v1/memberships/:membershipId/revoke         tenant route: memberships.
   datos de usuario (nombre/email) en la lista; paginación por cursor.
 
 **DECISION_REQUIRED:** siguen abiertas reactivación, autogestión/salida, nombre/email en lista, motivo, `Idempotency-Key`, efectos colaterales, paginación y privilegio `suspended_at` del worker; ver `docs/S1-06-DOC-CHANGES.md`.
+
+## 13.4 Clientes, vehículos y propietarios (Sprint 2, S2-02) — contrato backend ↔ PWA
+
+```
+POST  /api/v1/customers                        tenant route: customers.create
+GET   /api/v1/customers                        tenant route: customers.read
+GET   /api/v1/customers/:customerId            tenant route: customers.read
+PATCH /api/v1/customers/:customerId            tenant route: customers.update
+POST  /api/v1/vehicles                         tenant route: vehicles.create (+ vehicle_owners.manage en el servicio)
+GET   /api/v1/vehicles                         tenant route: vehicles.read, scope tenant (?plate=)
+GET   /api/v1/vehicles/:vehicleId              resource route: vehicles.read (tenant | assigned)
+PATCH /api/v1/vehicles/:vehicleId              tenant route: vehicles.update
+GET   /api/v1/vehicles/:vehicleId/owners       tenant route: customers.read (+ vehicles.read scope tenant en el servicio)
+POST  /api/v1/vehicles/:vehicleId/owners       tenant route: vehicle_owners.manage
+```
+
+- **Convenciones:** JSON camelCase en request y response; ids `customerId`, `vehicleId`, `ownershipId`. Bodies estrictos: cualquier propiedad no listada → 400. Tenant, actor, `id`, `createdAt`, `updatedAt`, `validFrom`, `validTo`, `relationshipType` e `isPrimary` nunca vienen del cliente. `:customerId`/`:vehicleId` malformado, inexistente o de otro tenant → el mismo 404 (código y cuerpo). `cache-control: no-store`. El body `role_code` de §13.2 queda como excepción histórica.
+- **DTOs** (timestamps ISO-8601 UTC):
+  - `CustomerDto = { customerId, firstName, lastName, phone, email|null, documentType|null, documentNumber|null, notes|null, createdAt, updatedAt }`.
+  - `VehicleDto = { vehicleId, plate, vehicleType, brand, model, modelYear|null, color|null, vin|null, engineNumber|null, currentMileageKm|null, createdAt, updatedAt }`.
+  - `VehicleTechDto = { vehicleId, plate, vehicleType, brand, model, modelYear|null, color|null }`: sin VIN, número de motor, kilometraje, timestamps ni datos de cliente/propietario.
+  - `OwnershipDto = { ownershipId, vehicleId, customerId, relationshipType, isPrimary, validFrom, validTo|null }`.
+  - `OwnerHistoryItemDto = { ownershipId, customerId, customer: { firstName, lastName }, relationshipType, isPrimary, validFrom, validTo|null }`: sin email, phone, documentType, documentNumber ni notes.
+- **Respuestas:** POST customer 201 `{ customer }`; GET y PATCH customer 200 `{ customer }`; listado 200 `{ customers, nextCursor }`; POST vehicle 201 `{ vehicle, ownership }`; GET vehicle 200 `{ vehicle }` (`VehicleDto` o `VehicleTechDto` según el scope); listado 200 `{ vehicles, nextCursor }`; PATCH vehicle 200 `{ vehicle }`; GET owners 200 `{ owners }`; POST owners 201 `{ ownership }` si cambia el propietario, 200 `{ ownership }` si es no-op.
+- **Requests:**
+  - POST customer: `{ firstName, lastName, phone, email?, documentType?, documentNumber?, notes? }`.
+  - PATCH customer: `{ expectedUpdatedAt, …subconjunto no vacío de los campos del POST }`; `email`, `documentType`, `documentNumber` y `notes` aceptan `null`; `firstName`, `lastName` y `phone` no.
+  - POST vehicle: `{ customerId, plate, vehicleType, brand, model, modelYear?, color?, vin?, engineNumber? }`.
+  - PATCH vehicle: `{ expectedUpdatedAt, …subconjunto no vacío de plate, vehicleType, brand, model, modelYear, color, vin, engineNumber }`; los opcionales aceptan `null`. `customerId` no se cambia por PATCH (ver propietarios).
+  - `currentMileageKm` es solo lectura en Sprint 2: snapshot de conveniencia server-owned; Sprint 3 define su actualización desde recepción.
+  - POST owners: `{ customerId, expectedCurrentOwnershipId }`, ambos obligatorios; `expectedCurrentOwnershipId` es un UUID o `null` (= “el vehículo no tiene propietario vigente”).
+- **Validación y normalización** (Diccionario 01 §10–§11):
+  - Texto (nombres, notas, brand, model, color, documentType, documentNumber, vin, engineNumber): regla de texto del proyecto — NFC, trim, rechazo de caracteres de control/bidi, no vacío cuando la columna es NOT NULL y longitudes del Diccionario. `modelYear` 1886–2200; `vehicleType` `car | motorcycle | other`.
+  - `plate`: trim → eliminar espacios, `-` y `.` → mayúsculas ASCII → validar `^[A-Z0-9]{1,16}$`. Se guarda y se devuelve la forma canónica (`abc-123`, `ABC 123`, `ABC.123` y `ABC123` → `ABC123`). Cualquier otro carácter, incluidos los no ASCII, → 400.
+  - `phone`: eliminar espacios, `-`, `.`, `(` y `)` → validar `^\+?[0-9]{7,15}$`. Se guarda normalizado; no se asume indicativo de país; sin unicidad.
+  - `email`: trim + validación de formato existente; sin lowercase canónico; sin unicidad.
+  - `documentType` y `documentNumber`: ambos presentes o ambos ausentes (también tras aplicar un PATCH). `documentType`: texto 1–24 sin catálogo. `documentNumber`: trim + NFC, sin otra canonicalización; sin unicidad.
+- **Paginación y búsqueda:** keyset por `id DESC` (UUIDv7 ≈ orden de creación; `id` único es el desempate); cursor opaco base64url versionado; `limit` 20 por defecto, 100 máximo.
+  - `GET /customers`: filtros opcionales combinables con AND. `phone`: misma normalización, igualdad exacta. `documentNumber`: trim/NFC, igualdad exacta. `name`: prefijo sin distinguir mayúsculas sobre `first_name` o `last_name` (distingue acentos). Sin filtros → listado paginado.
+  - `GET /vehicles`: `plate` opcional, con el mismo normalizador e igualdad exacta (placa inválida → 400); sin filtro → listado paginado.
+  - Se usan los índices existentes (ERD §17); no hay índices nuevos. Diferidos: `q` libre, email, VIN, prefijo/contains de placa, `unaccent` y trigram.
+  - Las query strings de búsqueda CRM contienen PII: los logs registran la plantilla de ruta, nunca la query (Operación §6.3).
+- **Propietario inicial:** `POST /vehicles` exige `customerId` y, en una sola transacción, inserta el vehículo y su `vehicle_owners` inicial (`relationship_type = owner`, `is_primary = true`, `valid_from` = hora del servidor). Requiere además `vehicle_owners.manage`. Cliente inexistente o de otro tenant → 404 `CUSTOMER_NOT_FOUND`. Ningún fallo deja un vehículo sin propietario. La invariante “todo vehículo tiene propietario” es de aplicación en Sprint 2 (sin constraint trigger).
+- **Propietario actual:** la fila `is_primary = true AND valid_to IS NULL` (máximo una, Diccionario 01 §12). La API de Sprint 2 solo crea relaciones `owner` primarias; las relaciones secundarias no se exponen (diferido).
+- **Cambio de propietario** (`POST /vehicles/:vehicleId/owners`), en una transacción única:
+  1. `SELECT … FROM vehicles WHERE id = $v FOR NO KEY UPDATE` bajo RLS; 0 filas → 404 `VEHICLE_NOT_FOUND`.
+  2. Verificar el cliente (404 `CUSTOMER_NOT_FOUND`) y releer el propietario vigente.
+  3. Si `customerId` ya es el propietario vigente → 200 no-op con la fila vigente: sin fila nueva ni auditoría.
+  4. Si `expectedCurrentOwnershipId` no coincide con la fila vigente (o no es `null` cuando no hay ninguna) → 409 `VEHICLE_OWNERSHIP_CONFLICT`.
+  5. `t := clock_timestamp()` después del lock.
+  6. Cerrar la fila vigente, si existe, con `valid_to = t`.
+  7. Insertar la nueva fila `owner` primaria con `valid_from = t`.
+  8. Auditar `vehicle.owner_changed`.
+  9. COMMIT. No hay last-write-wins silencioso.
+- **Historial** (`GET /vehicles/:vehicleId/owners`): requiere `customers.read` (ruta) y `vehicles.read` con scope tenant (servicio); orden `validFrom DESC, ownershipId DESC`; tope de 200 sin paginación. Technician → 403.
+- **Historia inmutable:** `vehicle_owners` es Frozen-on-close (Diccionario §2 y 01 §12); las correcciones y promociones cierran e insertan, nunca editan.
+- **Concurrencia optimista:** todo PATCH exige `expectedUpdatedAt`, que es el valor `updatedAt` exacto emitido por el backend, tratado como token opaco extremo a extremo: nunca se convierte a `Date` de JavaScript ni se re-formatea, y conserva la precisión de microsegundos de PostgreSQL. El UPDATE compara `updated_at` con ese valor exacto y fija un nuevo `updated_at`. Sin coincidencia → 409 `RESOURCE_VERSION_CONFLICT`; recurso inexistente o ajeno → 404. No existe columna `version`.
+- **Technician** (RBAC §5/§17): `GET /vehicles/:vehicleId` solo con una asignación activa (`released_at IS NULL`) de tipo `lead_technician` o `support_technician` en una `service_order` de ese vehículo; recibe `VehicleTechDto`. Sin asignación → 404 `VEHICLE_NOT_FOUND` (sin oráculo ni auditoría). `quality_control` no cuenta como A en Sprint 2 (se reabre en Sprint 5). Listados/búsqueda, clientes, historial y cambio de propietario → 403 `PERMISSION_DENIED`.
+- **Errores estables** `{ error: { code, message, request_id } }`:
+  - `CUSTOMER_NOT_FOUND` 404: path o `customerId` del body inexistente, malformado o de otro tenant.
+  - `VEHICLE_NOT_FOUND` 404: ídem; también technician sin asignación.
+  - `VEHICLE_PLATE_ALREADY_EXISTS` 409: 23505 `vehicles_tenant_plate_key`, en POST y PATCH.
+  - `VEHICLE_OWNERSHIP_CONFLICT` 409: premisa obsoleta; backstop 23505 `vehicle_owners_one_primary_uq`.
+  - `RESOURCE_VERSION_CONFLICT` 409.
+  - `PERMISSION_DENIED` 403.
+  - `REQUEST_VALIDATION_FAILED` 400: incluye cursor/limit/query inválidos y el backstop 23514 `vehicles_plate_normalized_check` / `vehicles_plate_format_check`.
+  - `REQUEST_BODY_MALFORMED` 400.
+  - `UNSUPPORTED_MEDIA_TYPE` 415.
+  - Backstops: 23503 de las FKs CRM → el 404 de la entidad según la constraint; 23514 `vehicle_owners_validity_check` / `vehicle_owners_history_guard` y 42501 → 500 `INTERNAL_ERROR` (defecto).
+  - Sin `DOMAIN_*`: CRM no tiene máquina de estados.
+- **Auditoría** (Operación §5.2): `customer.created`, `customer.updated`, `vehicle.created`, `vehicle.updated` y `vehicle.owner_changed`, en la misma transacción y con actor del TenantContext. No se auditan lecturas, 404, 409, `PERMISSION_DENIED` ni el no-op de propietario.
+- **Idempotencia:** UUIDv7 del servidor; sin `Idempotency-Key` CRM en Sprint 2 (§9). Un POST customer reintentado puede duplicar. Un POST vehicle reintentado → 409 de placa, recuperable con `GET /vehicles?plate=`. Un cambio de propietario reintentado → 200 no-op.
+- **No incluido (S2-02, diferido):**
+  - DELETE de clientes, vehículos o propietarios; archivo/desarchivo de clientes (`customers.archive` sembrado sin endpoint).
+  - Relaciones no-owner, primario no-owner, varias relaciones vigentes no primarias y solapes, cerrar sin sucesor, fecha efectiva enviada por el cliente y `valid_to` futuro.
+  - Formatos de placa por `vehicle_type`.
+  - Canonicalización de email, documento, VIN y número de motor; catálogo de `document_type`; E.164.
+  - `Idempotency-Key`; búsqueda por email, VIN y prefijo de placa.
+  - Detalle de decisiones y triggers de reapertura en `docs/S2-02-DOC-CHANGES.md`.
 
 # 14. Seguridad
 

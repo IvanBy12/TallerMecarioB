@@ -366,6 +366,24 @@ Metadata permitida: ids internos, códigos de rol/permiso/estado/comando, nombre
 - Locks y pool: A no toma lock de fila de workshop B mediante funciones/comandos soportados; operaciones concurrentes de roles, estado, invitación y auditoría de B progresan mientras A usa `ACCESS SHARE` en `owner_mutation_gate`. `SET LOCAL` se libera al COMMIT/ROLLBACK y la misma conexión no hereda tenant, usuario, membership, request_id ni permisos tras error, retorno temprano o denegación.
 - Threat model: los GUC son contexto fijado por la aplicación, no prueba criptográfica. SQL raw con credencial runtime comprometida puede establecer GUC arbitrarios o tomar advisory keys deterministas; queda fuera de esta garantía (INFO). No se añadió `lock_timeout`. Al cerrar S1-08, el Quality Gate final de Sprint 1 y la deuda CI seguían abiertos; su estado posterior se registra en la actualización del Quality Gate de esta sección.
 
+### Catálogo CRM de Sprint 2 (S2-02)
+
+Cinco acciones. Todas con actor `user` (TenantContext), `outcome = success`, `reason_code` NULL, en la misma transacción que el cambio y con `user_agent` NULL:
+
+- `customer.created`: entidad `customer` / id; before/after NULL; metadata `{fields}` (nombres de los campos informados).
+- `customer.updated`: entidad `customer` / id; before/after NULL; metadata `{changed_fields}` (nombres, nunca valores).
+- `vehicle.created`: entidad `vehicle` / id; before/after NULL; metadata `{ownership_id, customer_id}`.
+- `vehicle.updated`: entidad `vehicle` / id; before/after NULL; metadata `{changed_fields}` (un cambio de placa aparece solo como el nombre `plate`).
+- `vehicle.owner_changed`: entidad `vehicle` / id; before `{ownership_id, customer_id}` o NULL (creación); after `{ownership_id, customer_id}`; metadata `{command: create | transfer}`.
+
+Reglas:
+
+- Crear un vehículo deja `vehicle.created` + `vehicle.owner_changed` (`command = create`).
+- Prohibidos en JSON: nombre, teléfono, email, documento, notas, placa, VIN y número de motor.
+- No se auditan lecturas, 404, 409, `PERMISSION_DENIED` ni el cambio de propietario no-op. No hay denegados durables CRM en Sprint 2.
+- Auditar lecturas de PII queda diferido al hardening de privacidad (Sprint 14).
+- El guard 0017 no restringe `action`, así que no hace falta migración.
+
 ## 5.3 Retención audit/compliance
 
 - `audit_logs`: **24 meses** baseline de producto, luego purge controlado si no existe hold/obligación superior;
@@ -429,6 +447,8 @@ outbox_event_id / webhook_event_id
 - metrics usan labels acotados: route template, method, status class, error_code, provider, operation.
 - bodies HTTP completos no se loguean por defecto.
 - logs aplican redaction central de claves sensibles (`authorization`, `cookie`, `token`, `otp`, `secret`, payment instrument data).
+
+- las rutas de búsqueda CRM (`GET /api/v1/customers`, `GET /api/v1/vehicles`) llevan PII en la query (`phone`, `documentNumber`, `name`, `plate`): logs y traces registran la plantilla de ruta, nunca la query string ni sus valores (S2-02).
 
 ## 6.4 SLO/SLI baseline
 

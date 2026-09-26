@@ -98,6 +98,13 @@ Un técnico no obtiene `customers.read`. Cuando una orden asignada necesite most
 
 </aside>
 
+**Sprint 2 (S2-02):**
+
+- `customers.archive` permanece sembrado sin endpoint (como `audit.read`) hasta que se apruebe un modelo de archivo.
+- `vehicle_owners.manage` autoriza el cambio de propietario y, junto con `vehicles.create`, la creación del propietario inicial.
+- Leer el historial de propietarios exige `customers.read` + `vehicles.read` (scope tenant), no `vehicle_owners.manage`.
+- Ver Arquitectura §13.4.
+
 # 6. Recepción, firmas y media
 
 | Permission code | Owner | Admin | Advisor | Technician |
@@ -293,6 +300,14 @@ La API no debe aceptar `assigned=true` desde el cliente. La asignación se resue
 
 El DTO técnico debe minimizar PII y datos financieros: el técnico puede recibir placa, vehículo, trabajo autorizado, diagnóstico/evidencia necesaria y garantía relacionada, sin obtener acceso general a CRM, billing o pagos.
 
+**`vehicles.read` A (Sprint 2, S2-02):**
+
+- Cadena: `TenantContext.membershipId → assignments` activas (`released_at IS NULL`) de tipo `lead_technician` o `support_technician` → `service_orders.vehicle_id` = vehículo, resuelta en PostgreSQL bajo RLS.
+- `quality_control` no cuenta como A en Sprint 2. Es un interino estricto; se reabre en Sprint 5, considerando que `quality_checks.read` es A y `quality_checks.perform` es Q.
+- Con asignación: `VehicleTechDto` (`vehicleId, plate, vehicleType, brand, model, modelYear, color`), sin VIN, número de motor, kilometraje, timestamps ni datos de cliente/propietario.
+- Sin asignación: 404 `VEHICLE_NOT_FOUND`, igual que un vehículo inexistente.
+- Listados/búsqueda de vehículos exigen scope tenant → technician 403.
+
 # 18. Evaluación server-side
 
 Flujo obligatorio:
@@ -357,6 +372,8 @@ El catálogo completo implementado de Sprint 1 (18 acciones, incluidos `workshop
 `inventory.adjustment_out_recorded` es sensible al nivel de un reverso de pago: exige `reason` no vacío y debe permitir correlacionar actor, `catalog_item_id`, `location_id`, cantidad, `balance_before`, `balance_after`, `inventory_movement.id` y `request_id`. Transferencias auditan un evento lógico con `transfer_group_id` y referencias a ambos movimientos.
 
 Nunca registrar tokens o secretos en el audit log.
+
+**Sprint 2 CRM (S2-02):** `customer.created`, `customer.updated`, `vehicle.created`, `vehicle.updated` y `vehicle.owner_changed`, con el contenido minimizado de Operación §5.2.
 
 # 21. Quality Gate RBAC
 
