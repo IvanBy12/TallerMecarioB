@@ -242,9 +242,10 @@ updated_at | timestamptz | NOT NULL DEFAULT now() | - |
 **Contrato S2-02 (reglas de API; sin CHECK en DB en Sprint 2):**
 
 - Texto: NFC + trim + rechazo de caracteres de control/bidi; no vacío en columnas NOT NULL.
+- **S2-04 (DOC_GAP-02/03/04 CLOSED):** en las columnas anulables (`email`, `document_type`, `document_number`, `notes`) un valor que queda vacío tras normalizar se guarda como NULL; nunca string vacío. `notes` es la única excepción a la regla de texto: admite LF internos (CRLF y CR → LF; sin colapsar espacios ni líneas), rechaza TAB y demás controles C0/C1/bidi, y admite como máximo 2000 code points tras normalizar; la columna sigue siendo `text` (sin migración). Detalle en Arquitectura §13.4 «Clientes — cierre S2-04».
 - `phone`: se guarda normalizado (sin espacios, `-`, `.`, `(` ni `)`) y cumple `^\+?[0-9]{7,15}$`; no se asume indicativo de país.
 - `email`: trim + validación de formato; sin lowercase canónico.
-- `document_type` y `document_number`: ambos o ninguno. `document_type` es texto 1–24 sin catálogo; `document_number` lleva trim + NFC sin canonicalización.
+- `document_type` y `document_number`: ambos NULL o ambos con valor, nunca solo uno (en PATCH, sobre el estado resultante; S2-04). `document_type` es texto 1–24 sin catálogo; `document_number` lleva trim + NFC sin canonicalización.
 - Sin unicidad en phone, email ni documento.
 - **Sin archivo ni borrado en Sprint 2:** no existe `archived_at` ni estado de archivo; `customers.archive` queda sin endpoint hasta una necesidad de negocio explícita o el flujo DSR/anonimización (antes del piloto).
 - Diferido (D-09): catálogo de `document_type`, canonicalización de documento y email, E.164 (reabrir en Sprint 9 o DSR/facturación).

@@ -372,6 +372,7 @@ Cinco acciones. Todas con actor `user` (TenantContext), `outcome = success`, `re
 
 - `customer.created`: entidad `customer` / id; before/after NULL; metadata `{fields}` (nombres de los campos informados).
 - `customer.updated`: entidad `customer` / id; before/after NULL; metadata `{changed_fields}` (nombres, nunca valores).
+- **Nombres en `fields`/`changed_fields` de customer (S2-04, DOC_GAP-05 CLOSED):** nombres de columna persistida en snake_case, solo del conjunto `first_name`, `last_name`, `phone`, `email`, `document_type`, `document_number`, `notes`; sin duplicados y siempre en ese orden (determinista, nunca el orden accidental del body). Nunca `expected_updated_at`/`expectedUpdatedAt` (control OCC, no dato del customer), `tenant_id`, `created_at` ni `updated_at`, y nunca valores.
 - `vehicle.created`: entidad `vehicle` / id; before/after NULL; metadata `{ownership_id, customer_id}`.
 - `vehicle.updated`: entidad `vehicle` / id; before/after NULL; metadata `{changed_fields}` (un cambio de placa aparece solo como el nombre `plate`).
 - `vehicle.owner_changed`: entidad `vehicle` / id; before `{ownership_id, customer_id}` o NULL (creación); after `{ownership_id, customer_id}`; metadata `{command: create | transfer}`.
@@ -380,7 +381,7 @@ Reglas:
 
 - Crear un vehículo deja `vehicle.created` + `vehicle.owner_changed` (`command = create`).
 - Prohibidos en JSON: nombre, teléfono, email, documento, notas, placa, VIN y número de motor.
-- No se auditan lecturas, 404, 409, `PERMISSION_DENIED` ni el cambio de propietario no-op. No hay denegados durables CRM en Sprint 2.
+- No se auditan lecturas, 404, 409, `PERMISSION_DENIED`, el PATCH no-op de customer (S2-04: `changed_fields` vacío) ni el cambio de propietario no-op. No hay denegados durables CRM en Sprint 2.
 - Auditar lecturas de PII queda diferido al hardening de privacidad (Sprint 14).
 - El guard 0017 no restringe `action`, así que no hace falta migración.
 

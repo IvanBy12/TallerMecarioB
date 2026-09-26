@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   BIDI_CONTROL_CHARACTERS,
   codePointLength,
+  EMAIL_ADDRESS_PATTERN,
   hasValidUnicode,
   PROHIBITED_CONTROL_CHARACTERS,
   WHITESPACE_RUN,
@@ -51,7 +52,7 @@ export const canonicalEmailSchema = z.string()
   .refine((value) => value.length > 0, 'must not be empty')
   .refine((value) => codePointLength(value) <= 320, 'must contain at most 320 characters')
   .transform((value) => value.toLowerCase())
-  .refine((value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value), 'must be an email address');
+  .refine((value) => EMAIL_ADDRESS_PATTERN.test(value), 'must be an email address');
 
 /** Verified provider profile accepted for local identity reconciliation. */
 export const verifiedProfileSchema = z.object({
