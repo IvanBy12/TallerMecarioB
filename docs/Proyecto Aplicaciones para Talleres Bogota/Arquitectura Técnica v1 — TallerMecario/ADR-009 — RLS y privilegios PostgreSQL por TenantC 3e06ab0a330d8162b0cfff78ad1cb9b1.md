@@ -295,6 +295,21 @@ Reducciones aplicadas sobre el baseline genérico de 0000 (que concede SELECT/IN
 
 Privilegios finales de `audit_logs`: API `SELECT` bajo RLS + INSERT por columnas sin `user_agent`/`created_at`; worker `SELECT` bajo RLS + las columnas API salvo `ip_address`; ambos sin UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER. `tallermecario_bootstrap_resolver` conserva únicamente INSERT por columnas `id, tenant_id, actor_type, actor_user_id, action, outcome, entity_type, entity_id, metadata_json, request_id` para sus funciones allowlisted; sin SELECT/UPDATE/DELETE/TRUNCATE. `tallermecario_identity_sync` no tiene INSERT directo y llama `app.bootstrap_append_identity_audit` por EXECUTE. `PUBLIC` no tiene privilegios ni EXECUTE de las funciones escritoras. `tallermecario_schema_owner` es owner de migraciones, sin uso runtime. `app.bootstrap_provision_user` (EXECUTE API) y `app.bootstrap_append_identity_audit` (EXECUTE identity_sync) son las funciones escritoras directas; `app.ingest_verified_clerk_webhook` y `app.identity_sync_apply` escriben indirectamente bajo sus contratos de identidad.
 
+- **S2-03 (0018) `customers`, `vehicles`, `vehicle_owners`** (reducciones aprobadas en S2-02):
+  - **API:** `tallermecario_api` conserva SELECT e INSERT y recibe UPDATE solo por columnas:
+    - `customers`: `document_type, document_number, first_name, last_name, phone, email, notes, updated_at`;
+    - `vehicles`: `plate, vin, vehicle_type, brand, model, model_year, color, engine_number, current_mileage_km, updated_at`;
+    - `vehicle_owners`: solo `valid_to`.
+  - **Inmutable para runtime (42501):** `id`, `tenant_id` y `created_at`; en `vehicle_owners`, todo salvo `valid_to`.
+  - **Worker:** `tallermecario_worker` no tiene privilegio de tabla ni de columna en las tres tablas (REVOKE ALL). Ningún caso de uso del worker toca CRM en Sprint 2; un sprint futuro (p. ej. WhatsApp/recordatorios) otorgará solo lo que su contrato documente.
+  - **PUBLIC:** sin privilegios. Sin DELETE/TRUNCATE/REFERENCES/TRIGGER para ningún runtime.
+  - **RLS y policies:** `tenant_select/insert/update` para {api, worker} y RLS ENABLE/FORCE, sin cambio (una policy no concede nada sin privilegio).
+  - **Trigger Frozen-on-close:** `vehicle_owners_history_guard_trg` → `app.enforce_vehicle_owner_history()` (SECURITY INVOKER, owner `tallermecario_schema_owner`, `search_path = pg_catalog`; `EXECUTE` revocado de PUBLIC y no concedido a ningún rol runtime; el owner conserva su privilegio implícito de PostgreSQL).
+  - **CHECK:** `vehicles_plate_normalized_check`.
+  - **Preflight de placa:** como `schema_owner` es NOBYPASSRLS, desactiva `FORCE` en `vehicles` temporalmente bajo `ACCESS EXCLUSIVE` y lo restaura antes de la CHECK.
+  - **Autoverificación:** la migración falla si queda UPDATE de tabla, UPDATE fuera de la allowlist o cualquier privilegio de worker/PUBLIC, o si RLS, policies, función, trigger o constraints no coinciden.
+  - **Delta aprobado en S2-02, pendiente de incorporar a S2-03 antes de su merge:** CHECK `vehicles_plate_format_check` (`plate COLLATE "C" ~ '^[A-Z0-9]{1,16}$'`) con su preflight, `schema.ts` y tests.
+
 ## 10.1 Lock de owner-set e invariante de owner activo (S1-05, 0011–0014)
 
 "Owner activo" = fila `membership_roles` con rol `owner` sobre una membership con `status = 'active'` (el `users.status` **no** interviene). Toda escritura que reduzca ese conjunto — remoción del rol owner, `memberships.status` `active → suspended/revoked`, cambio de id/tenant o DELETE de una membership owner activa — la valida PostgreSQL con los triggers `membership_roles_invariants_trg` (`mr_last_active_owner`, `mr_membership_not_active`) y `memberships_owner_invariant_trg` (`m_last_active_owner`), SQLSTATE `23514`.
