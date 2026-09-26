@@ -289,6 +289,8 @@ La placa es única por tenant, no global.
 
 Los formatos por `vehicle_type` están diferidos (D-01c: se reabren con datos del piloto o con placas legítimas rechazadas en Sprint 3). `current_mileage_km` es solo lectura para el cliente en Sprint 2; lo escribe el servidor y Sprint 3 define la regla desde recepción.
 
+**Contrato S2-05 (reglas de API; S2-05 DOC_GAP-02 CLOSED; sin migración):** `plate`, `vehicle_type`, `brand` y `model` nunca se guardan NULL ni vacíos. En las columnas anulables `color`, `vin` y `engine_number` un valor que queda vacío tras la regla de texto del proyecto se guarda como NULL; nunca string vacío. `model_year` es NULL o un entero 1886–2200. En PATCH, `null` explícito limpia `model_year`, `color`, `vin` o `engine_number`. `vin` y `engine_number` no tienen canonicalización adicional a la regla de texto (NFC, trim, rechazo de controles/bidi). Detalle en Arquitectura §13.4 «Vehículos — cierre S2-05».
+
 # 12. vehicle_owners
 
 ```
