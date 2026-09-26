@@ -18,6 +18,8 @@ const mutations = {
   M8: ['ALTER TABLE public.vehicles NO FORCE ROW LEVEL SECURITY;', 'SELECT 1;'],
   M9: ['RESET ROLE;', 'ALTER POLICY tenant_update ON public.customers WITH CHECK (true);\n--> statement-breakpoint\nRESET ROLE;'],
   M10: ['DO $crm_hardening_checks$', 'GRANT MAINTAIN ON TABLE public.customers TO tallermecario_api;\n--> statement-breakpoint\nDO $crm_hardening_checks$'],
+  M11: ['ALTER TABLE public.vehicles ADD CONSTRAINT vehicles_plate_format_check\n\tCHECK (plate COLLATE "C" ~ \'^[A-Z0-9]{1,16}$\');',
+    'ALTER TABLE public.vehicles ADD CONSTRAINT vehicles_plate_format_check\n\tCHECK (TRUE);'],
 };
 
 let failed = false;
@@ -28,9 +30,9 @@ for (const [name,[anchor,replacement]] of selected) {
   try {
     cpSync('drizzle',folder,{recursive:true});
     const file = join(folder,'0018_s2_03_crm_hardening.sql');
-    const original = readFileSync(file,'utf8');
+    const original = readFileSync(file,'utf8').replace(/\r\n/gu,'\n');
     if (original.split(anchor).length !== 2) throw new Error(`MUTATION_ANCHOR_INVALID ${name}`);
-    writeFileSync(file,original.replace(anchor,replacement));
+    writeFileSync(file,original.replace(anchor,() => replacement));
     const script = ['M8','M9'].includes(name) ? 'scripts/test-crm-migration-upgrade.cjs' : 'scripts/test-crm-db.cjs';
     const r = spawnSync(process.execPath,[script],{
       cwd:process.cwd(),
@@ -40,7 +42,7 @@ for (const [name,[anchor,replacement]] of selected) {
     const output = `${r.stdout || ''}${r.stderr || ''}`;
     const migrationRejected = output.includes('Migration failed.') &&
       ['M1','M2','M3','M6','M7','M10'].includes(name);
-    const testRejected = /CRM_TEST_COUNTS PASS=\d+ FAIL=[1-9]/u.test(output) && ['M4','M5'].includes(name);
+    const testRejected = /CRM_TEST_COUNTS PASS=\d+ FAIL=[1-9]/u.test(output) && ['M4','M5','M11'].includes(name);
     const preflightRejected = name==='M8' && output.includes('preflight must see legacy rows before ADD CONSTRAINT');
     const withCheckRejected = name==='M9' && output.includes('CRM_WITH_CHECK_PROBE_ACCEPTED_MOVE');
     const teardownClean = output.includes('CRM_TEARDOWN dbs=0 logins=0') || output.includes('CRM_UPGRADE_TEARDOWN dbs=0 logins=0');
@@ -57,8 +59,7 @@ for (const [name,[anchor,replacement]] of selected) {
 if (failed) process.exitCode=1;
 else {
   if (!process.env.CRM_MUTATION) {
-    process.stdout.write('CRM_MUTATIONS_M1_M9_PASS 9/9 killed\n');
-    process.stdout.write('CRM_MUTATIONS_M10_MAINTAIN_PASS 1/1 killed\n');
+    process.stdout.write('CRM_MUTATIONS_M1_M11_PASS 11/11 killed\n');
   }
   process.stdout.write(`CRM_MUTATIONS_PASS ${selected.length}/${selected.length} killed\n`);
 }

@@ -13594,6 +13594,10 @@
           "name": "vehicles_plate_normalized_check",
           "value": "\"plate\" = btrim(\"plate\") AND \"plate\" = upper(\"plate\" COLLATE \"C\")"
         },
+        "vehicles_plate_format_check": {
+          "name": "vehicles_plate_format_check",
+          "value": "\"plate\" COLLATE \"C\" ~ '^[A-Z0-9]{1,16}$'"
+        },
         "vehicles_type_check": {
           "name": "vehicles_type_check",
           "value": "\"vehicle_type\" IN ('car', 'motorcycle', 'other')"

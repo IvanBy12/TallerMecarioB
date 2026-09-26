@@ -53,7 +53,7 @@ async function rows(sql) {
   }
   return result;
 }
-async function seed(sql, plates) {
+async function seed(sql, plates, otherPlate) {
   const tenant = randomUUID(), otherTenant = randomUUID();
   const customer = randomUUID(), probeCustomer = randomUUID();
   const vehicles = plates.map(() => randomUUID());
@@ -71,6 +71,8 @@ async function seed(sql, plates) {
       await tx`INSERT INTO vehicles (id,tenant_id,plate,vehicle_type,brand,model)
         VALUES (${vehicles[i]},${tenant},${plates[i]},'car','B','M')`;
     }
+    if (otherPlate) await tx`INSERT INTO vehicles (id,tenant_id,plate,vehicle_type,brand,model)
+      VALUES (${randomUUID()},${otherTenant},${otherPlate},'car','B','M')`;
     await tx`INSERT INTO vehicle_owners (id,tenant_id,vehicle_id,customer_id)
       VALUES (${randomUUID()},${tenant},${vehicles[0]},${customer})`;
   });
@@ -136,9 +138,13 @@ async function verifyUpdateWithCheck(sql, target, fixture, maintenance, createdL
 async function verify(sql) {
   const [flags] = await sql`SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='public.vehicles'::regclass`;
   assert.ok(flags.relrowsecurity && flags.relforcerowsecurity);
-  const [check] = await sql`SELECT convalidated FROM pg_constraint
-    WHERE conrelid='public.vehicles'::regclass AND conname='vehicles_plate_normalized_check'`;
-  assert.equal(check?.convalidated, true);
+  const checks = await sql`SELECT conname,contype,convalidated FROM pg_constraint
+    WHERE conrelid='public.vehicles'::regclass
+      AND conname IN ('vehicles_plate_normalized_check','vehicles_plate_format_check')`;
+  assert.deepEqual(checks.map(({conname,contype,convalidated}) => [conname,contype,convalidated]).sort(), [
+    ['vehicles_plate_format_check','c',true],
+    ['vehicles_plate_normalized_check','c',true],
+  ]);
   const [trigger] = await sql`SELECT tgenabled FROM pg_trigger
     WHERE tgrelid='public.vehicle_owners'::regclass AND tgname='vehicle_owners_history_guard_trg'`;
   assert.equal(trigger?.tgenabled, 'O');
@@ -153,7 +159,8 @@ async function verifyRollback(sql, before) {
   const [flags] = await sql`SELECT relforcerowsecurity FROM pg_class WHERE oid='public.vehicles'::regclass`;
   assert.equal(flags.relforcerowsecurity, true);
   const [objects] = await sql`SELECT
-    (SELECT count(*)::int FROM pg_constraint WHERE conrelid='public.vehicles'::regclass AND conname='vehicles_plate_normalized_check') AS checks,
+    (SELECT count(*)::int FROM pg_constraint WHERE conrelid='public.vehicles'::regclass
+      AND conname IN ('vehicles_plate_normalized_check','vehicles_plate_format_check')) AS checks,
     (SELECT count(*)::int FROM pg_trigger WHERE tgrelid='public.vehicle_owners'::regclass AND tgname='vehicle_owners_history_guard_trg') AS triggers,
     (SELECT count(*)::int FROM pg_proc WHERE oid=to_regprocedure('app.enforce_vehicle_owner_history()')) AS functions`;
   assert.deepEqual(objects, { checks: 0, triggers: 0, functions: 0 });
@@ -161,6 +168,7 @@ async function verifyRollback(sql, before) {
   const [api] = await sql`SELECT has_table_privilege('tallermecario_api','public.vehicle_owners','UPDATE') AS yes`;
   assert.equal(worker.yes, true);
   assert.equal(api.yes, true);
+  await sql.begin(async (tx) => { await tx.unsafe('LOCK TABLE public.vehicles IN ACCESS EXCLUSIVE MODE NOWAIT'); });
 }
 async function main() {
   const source = sourceUrl();
@@ -172,14 +180,23 @@ async function main() {
   const headFolder = process.env.CRM_HEAD_FOLDER || 'drizzle';
   const temp = mkdtempSync(join(tmpdir(),'tm-crm-upgrade-'));
   const suffix = randomUUID().replaceAll('-','').slice(0,12);
-  const dbs = ['u0','u1','u2','u3'].map((x) => `tm_test_crm_${x}_${suffix}`);
+  const cases = [
+    { name: 'U0' },
+    { name: 'U1', plates: ['ABC123'], otherPlate: 'ABC123' },
+    { name: 'U2', plates: ['abc123'] },
+    { name: 'U3', plates: ['ABC123','abc123'] },
+    { name: 'U4', plates: ['ABC-123'] },
+    { name: 'U5', plates: ['ABC123','ABC-123'] },
+    { name: 'U6', plates: ['ABC123','ABC 123'] },
+  ];
+  const dbs = cases.map(({name}) => `tm_test_crm_${name.toLowerCase()}_${suffix}`);
   const created = [];
   const createdLogins = [];
   let failure;
   try {
     cpSync('drizzle',temp,{recursive:true});
     writeFileSync(join(temp,'meta','_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0,18) }));
-    for (let i=0;i<4;i++) {
+    for (let i=0;i<cases.length;i++) {
       const name = dbs[i];
       await maintenance.unsafe(`CREATE DATABASE ${name}`); created.push(name);
       const target = new URL(source); target.pathname = `/${name}`;
@@ -192,7 +209,7 @@ async function main() {
         } else {
           assert.ok(migrate(target.toString(),temp));
           assert.equal(await ledger(sql),18);
-          const fixture = await seed(sql, i===1 ? ['ABC123'] : i===2 ? ['abc123'] : ['ABC123','abc123']);
+          const fixture = await seed(sql, cases[i].plates, cases[i].otherPlate);
           const before = await rows(sql);
           if (i===1) {
             assert.ok(migrate(target.toString(),headFolder));
@@ -208,7 +225,7 @@ async function main() {
             await verifyPreflight(sql,headFolder);
             assert.equal(migrate(target.toString(),headFolder),false);
             await verifyRollback(sql,before);
-            process.stdout.write(`${i===2?'U2':'U3'} PASS fail-closed, ledger=18, rollback complete\n`);
+            process.stdout.write(`${cases[i].name} PASS fail-closed, ledger=18, rollback complete\n`);
           }
         }
       } finally { await sql.end({timeout:5}); }

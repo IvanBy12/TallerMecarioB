@@ -103,6 +103,7 @@ test('DB-01 catalog: CRM tables, tenant identities, composite FKs, CHECKs and in
     ['vehicles_model_year_check', 'c', /model_year/u],
     ['vehicles_mileage_check', 'c', /current_mileage_km/u],
     ['vehicles_plate_normalized_check', 'c', /btrim/u],
+    ['vehicles_plate_format_check', 'c', /\^\[A-Z0-9\]\{1,16\}\$/u],
     ['vehicle_owners_relationship_check', 'c', /relationship_type/u],
     ['vehicle_owners_validity_check', 'c', /valid_to/u],
     ['vehicle_owners_vehicle_fk', 'f', /FOREIGN KEY \(tenant_id, vehicle_id\) REFERENCES vehicles\(tenant_id, id\)/u],
@@ -231,7 +232,7 @@ test('DB-06 concurrent plate INSERT blocks then loses on UNIQUE after winner COM
 test('CH-04 SECURITY INVARIANT: lowercase and edge spaces rejected', async () => {
   for (const plate of ['abc123', 'AbC123', ' ABC123', 'ABC123 ']) {
     await assert.rejects(scoped(api, a.tenant, (c) => vehicle(c, a.tenant, plate)),
-      error('23514', 'vehicles_plate_normalized_check'));
+      error('23514', 'vehicles_plate_format_check'));
   }
 });
 

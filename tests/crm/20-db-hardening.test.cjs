@@ -152,7 +152,7 @@ test('HD-10/11 API immutable identities, allowed updates and plate checks', asyn
   assert.ok(duplicate);
   for (const plate of ['abc123',' AbC123','ABC123 ','AbC123']) {
     await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE vehicles SET plate=${plate} WHERE id=${a.vehicle}`),
-      denied('23514','vehicles_plate_normalized_check'));
+      denied('23514','vehicles_plate_format_check'));
   }
 });
 test('HD-12/13/15/40/41/42 ownership history guards privileged and runtime writes', async () => {
@@ -192,18 +192,32 @@ test('HD-14/16/20 row locks remain available; forbidden DML fails for both roles
     }
   });
 });
-test('HD-30/31/32 normalized uniqueness, tenant scope, and DOC_GAP-01 characterization', async () => {
+test('HD-30/31/32 canonical plate format and tenant-scoped uniqueness', async () => {
   await scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,'QWE123'));
   await assert.rejects(scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,'QWE123')),
     denied('23505','vehicles_tenant_plate_key'));
   await scoped(api,b.tenant,(c) => insertVehicle(c,b.tenant,'QWE123'));
   for (const plate of ['abc123',' ABC123','ABC123 ','AbC123']) {
     await assert.rejects(scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,plate)),
-      denied('23514','vehicles_plate_normalized_check'));
+      denied('23514','vehicles_plate_format_check'));
   }
-  await scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,'ABC-123'));
-  await scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,'ABC 123'));
-  await scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,''));
+  for (const plate of ['', 'ABC-123','ABC 123','ABC.123','ABC_123','ABC/123',
+    'Ñ123','É123','áBC123','ＡＢＣ123','😀123']) {
+    await assert.rejects(scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,plate)),
+      denied('23514','vehicles_plate_format_check'));
+    await assert.rejects(scoped(api,a.tenant,(c) => c`UPDATE vehicles SET plate=${plate} WHERE id=${a.vehicle}`),
+      denied('23514','vehicles_plate_format_check'));
+  }
+  // varchar(16) rejects 17 characters before either CHECK can run.
+  await assert.rejects(scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,'ABCDEFGHIJKLMNOPQ')),
+    denied('22001'));
+  await assert.rejects(scoped(api,a.tenant,(c) => c`UPDATE vehicles SET plate='ABCDEFGHIJKLMNOPQ' WHERE id=${a.vehicle}`),
+    denied('22001'));
+  assert.equal((await scoped(api,a.tenant,(c) => c`SELECT plate FROM vehicles WHERE id=${a.vehicle}`))[0].plate, 'ABC123');
+  for (const plate of ['A1','123456','ABCDEFGHIJKLMNOP']) {
+    const vehicleId = await scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,plate));
+    await scoped(api,a.tenant,(c) => c`UPDATE vehicles SET plate=${plate} WHERE id=${vehicleId}`);
+  }
 });
 test('HD-50 cross-tenant UPDATE on permitted column affects zero rows', async () => {
   assert.equal((await scoped(api,a.tenant,(c) => c`UPDATE customers SET notes='leak' WHERE id=${b.customer}`)).count,0);

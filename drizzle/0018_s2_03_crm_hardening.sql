@@ -12,9 +12,10 @@ ALTER TABLE public.vehicles NO FORCE ROW LEVEL SECURITY;
 DO $crm_plate_preflight$
 BEGIN
 	IF EXISTS (SELECT 1 FROM public.vehicles
-		WHERE plate <> pg_catalog.btrim(plate) OR plate <> pg_catalog.upper(plate COLLATE "C"))
+		WHERE plate <> pg_catalog.btrim(plate) OR plate <> pg_catalog.upper(plate COLLATE "C")
+			OR NOT (plate COLLATE "C" ~ '^[A-Z0-9]{1,16}$'))
 		OR EXISTS (SELECT 1 FROM public.vehicles
-			GROUP BY tenant_id, pg_catalog.upper(pg_catalog.btrim(plate) COLLATE "C")
+			GROUP BY tenant_id, pg_catalog.upper(pg_catalog.regexp_replace(pg_catalog.btrim(plate), '[ .-]', '', 'g') COLLATE "C")
 			HAVING count(*) > 1) THEN
 		RAISE EXCEPTION 'vehicles: legacy plate requires explicit remediation'
 			USING ERRCODE = 'check_violation', CONSTRAINT = 'vehicles_plate_normalized_check';
@@ -26,6 +27,9 @@ ALTER TABLE public.vehicles FORCE ROW LEVEL SECURITY;
 --> statement-breakpoint
 ALTER TABLE public.vehicles ADD CONSTRAINT vehicles_plate_normalized_check
 	CHECK (plate = pg_catalog.btrim(plate) AND plate = pg_catalog.upper(plate COLLATE "C"));
+--> statement-breakpoint
+ALTER TABLE public.vehicles ADD CONSTRAINT vehicles_plate_format_check
+	CHECK (plate COLLATE "C" ~ '^[A-Z0-9]{1,16}$');
 --> statement-breakpoint
 REVOKE UPDATE ON TABLE public.customers, public.vehicles, public.vehicle_owners FROM tallermecario_api;
 --> statement-breakpoint
@@ -150,6 +154,9 @@ BEGIN
 	END IF;
 	IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c
 		WHERE c.conrelid = 'public.vehicles'::regclass AND c.conname = 'vehicles_plate_normalized_check'
+		AND c.contype = 'c' AND c.convalidated)
+		OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c
+		WHERE c.conrelid = 'public.vehicles'::regclass AND c.conname = 'vehicles_plate_format_check'
 		AND c.contype = 'c' AND c.convalidated)
 		OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c
 		WHERE c.conrelid = 'public.vehicles'::regclass AND c.conname = 'vehicles_tenant_plate_key' AND c.contype = 'u')
