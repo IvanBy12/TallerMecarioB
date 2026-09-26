@@ -104,10 +104,12 @@ async function main() {
     }
     const files = readdirSync('tests/crm').filter((f) => f.endsWith('.test.cjs')).sort().map((f) => `tests/crm/${f}`);
     if (!files.length) throw new Error('CRM_TEST_FILES_MISSING');
-    const { output, code } = await testChild(['--test', '--test-concurrency=1', '--test-timeout=90000', ...files], {
-      ...process.env, TEST_DATABASE_URL_ADMIN: testUrl.toString(),
+    const testEnv = {
+      ...process.env, NO_COLOR: '1', TEST_DATABASE_URL_ADMIN: testUrl.toString(),
       TEST_API_LOGIN: apiLogin, TEST_WORKER_LOGIN: workerLogin,
-    });
+    };
+    delete testEnv.FORCE_COLOR;
+    const { output, code } = await testChild(['--test', '--test-concurrency=1', '--test-timeout=90000', ...files], testEnv);
     const count = (name) => Number(output.match(new RegExp(`^(?:#|ℹ) ${name} (\\d+)$`, 'mu'))?.[1] ?? -1);
     const pass = count('pass'), fail = count('fail'), skip = count('skipped'), todo = count('todo');
     process.stdout.write(`CRM_TEST_COUNTS PASS=${pass} FAIL=${fail} SKIP=${skip} TODO=${todo}\n`);

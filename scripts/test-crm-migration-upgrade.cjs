@@ -54,14 +54,19 @@ async function rows(sql) {
   return result;
 }
 async function seed(sql, plates) {
-  const tenant = randomUUID(), customer = randomUUID();
+  const tenant = randomUUID(), otherTenant = randomUUID();
+  const customer = randomUUID(), probeCustomer = randomUUID();
   const vehicles = plates.map(() => randomUUID());
   await sql.begin(async (tx) => {
     await tx`SET LOCAL session_replication_role = replica`;
     await tx`INSERT INTO workshops (id,slug,legal_name,display_name)
       VALUES (${tenant},${`crm-up-${tenant}`},'CRM','CRM')`;
+    await tx`INSERT INTO workshops (id,slug,legal_name,display_name)
+      VALUES (${otherTenant},${`crm-up-${otherTenant}`},'CRM','CRM')`;
     await tx`INSERT INTO customers (id,tenant_id,first_name,last_name,phone)
       VALUES (${customer},${tenant},'A','B','3000000000')`;
+    await tx`INSERT INTO customers (id,tenant_id,first_name,last_name,phone)
+      VALUES (${probeCustomer},${tenant},'Probe','Only','3000000001')`;
     for (let i = 0; i < plates.length; i++) {
       await tx`INSERT INTO vehicles (id,tenant_id,plate,vehicle_type,brand,model)
         VALUES (${vehicles[i]},${tenant},${plates[i]},'car','B','M')`;
@@ -69,6 +74,64 @@ async function seed(sql, plates) {
     await tx`INSERT INTO vehicle_owners (id,tenant_id,vehicle_id,customer_id)
       VALUES (${randomUUID()},${tenant},${vehicles[0]},${customer})`;
   });
+  return { tenant, otherTenant, probeCustomer };
+}
+async function verifyUpdateWithCheck(sql, target, fixture, maintenance, createdLogins) {
+  const login = `tm_test_crm_rls_${randomUUID().replaceAll('-','').slice(0,12)}`;
+  const password = `rt_${randomUUID()}`;
+  await maintenance.unsafe(`CREATE ROLE ${login} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '${password}'`);
+  createdLogins.push(login);
+  await maintenance.unsafe(`GRANT tallermecario_api TO ${login}`);
+  const runtimeUrl = new URL(target);
+  runtimeUrl.username = login;
+  runtimeUrl.password = password;
+  let runtime;
+  try {
+    // This disposable fixture exposes the source row; only tenant_update WITH CHECK can reject A -> B.
+    await sql`GRANT UPDATE (tenant_id) ON public.customers TO tallermecario_api`;
+    await sql`ALTER POLICY tenant_select ON public.customers USING (true)`;
+    const [grant] = await sql`SELECT has_column_privilege('tallermecario_api','public.customers','tenant_id','UPDATE') AS allowed`;
+    assert.equal(grant.allowed, true);
+    const [flags] = await sql`SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='public.customers'::regclass`;
+    assert.equal(flags.relrowsecurity, true);
+    assert.equal(flags.relforcerowsecurity, true);
+    const [policy] = await sql`SELECT qual FROM pg_policies WHERE schemaname='public' AND tablename='customers' AND policyname='tenant_select'`;
+    assert.equal(policy.qual, 'true');
+    runtime = postgres(runtimeUrl.toString(), { max: 1, prepare: false, onnotice: () => {}, connection: { role: 'tallermecario_api' } });
+    let rejected = false;
+    try {
+      await runtime.begin(async (tx) => {
+        const [identity] = await tx`SELECT current_user::text AS role, session_user::text AS login,
+          (SELECT rolsuper FROM pg_roles WHERE rolname=session_user) AS superuser,
+          (SELECT rolbypassrls FROM pg_roles WHERE rolname=session_user) AS bypassrls`;
+        assert.equal(identity.role, 'tallermecario_api');
+        assert.equal(identity.login, login);
+        assert.equal(identity.superuser, false);
+        assert.equal(identity.bypassrls, false);
+        await tx`SELECT set_config('app.tenant_id', ${fixture.tenant}, true)`;
+        const visible = await tx`SELECT id FROM public.customers WHERE id=${fixture.probeCustomer}`;
+        assert.equal(visible.length, 1, 'isolated SELECT policy exposes the source row');
+        const sameTenant = await tx`UPDATE public.customers SET tenant_id=${fixture.tenant}
+          WHERE id=${fixture.probeCustomer}`;
+        assert.equal(sameTenant.count, 1, 'runtime can reach tenant_update with the controlled grant');
+        const moved = await tx`UPDATE public.customers SET tenant_id=${fixture.otherTenant}
+          WHERE id=${fixture.probeCustomer}`;
+        assert.equal(moved.count, 1, 'mutant must move the visible row');
+        throw new Error('CRM_WITH_CHECK_PROBE_ACCEPTED_MOVE');
+      });
+    } catch (error) {
+      if (error.code !== '42501') throw error;
+      rejected = true;
+    }
+    assert.equal(rejected, true, 'tenant_update WITH CHECK must reject A -> B');
+    const [unchanged] = await sql`SELECT tenant_id FROM public.customers WHERE id=${fixture.probeCustomer}`;
+    assert.equal(unchanged.tenant_id, fixture.tenant);
+    process.stdout.write('CRM_WITH_CHECK_BASELINE_PASS 42501\n');
+  } finally {
+    if (runtime) await runtime.end({timeout:5});
+    await sql`ALTER POLICY tenant_select ON public.customers USING (tenant_id = app.current_tenant_id())`;
+    await sql`REVOKE UPDATE (tenant_id) ON public.customers FROM tallermecario_api`;
+  }
 }
 async function verify(sql) {
   const [flags] = await sql`SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='public.vehicles'::regclass`;
@@ -111,6 +174,7 @@ async function main() {
   const suffix = randomUUID().replaceAll('-','').slice(0,12);
   const dbs = ['u0','u1','u2','u3'].map((x) => `tm_test_crm_${x}_${suffix}`);
   const created = [];
+  const createdLogins = [];
   let failure;
   try {
     cpSync('drizzle',temp,{recursive:true});
@@ -128,13 +192,15 @@ async function main() {
         } else {
           assert.ok(migrate(target.toString(),temp));
           assert.equal(await ledger(sql),18);
-          await seed(sql, i===1 ? ['ABC123'] : i===2 ? ['abc123'] : ['ABC123','abc123']);
+          const fixture = await seed(sql, i===1 ? ['ABC123'] : i===2 ? ['abc123'] : ['ABC123','abc123']);
           const before = await rows(sql);
           if (i===1) {
             assert.ok(migrate(target.toString(),headFolder));
             assert.equal(await ledger(sql),19);
             assert.deepEqual(await rows(sql),before);
             await verify(sql);
+            await verifyUpdateWithCheck(sql,target,fixture,maintenance,createdLogins);
+            assert.deepEqual(await rows(sql),before);
             assert.ok(migrate(target.toString(),headFolder));
             assert.equal(await ledger(sql),19);
             process.stdout.write('U1 PASS valid history unchanged, privileges/RLS/guards, rerun no-op\n');
@@ -154,14 +220,19 @@ async function main() {
       await maintenance`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=${name} AND pid<>pg_backend_pid()`;
       await maintenance.unsafe(`DROP DATABASE IF EXISTS ${name}`).catch((e) => { cleanupError ||= e; });
     }
+    for (const login of createdLogins.reverse()) {
+      await maintenance.unsafe(`DROP ROLE IF EXISTS ${login}`).catch((e) => { cleanupError ||= e; });
+    }
     for (const role of [...ROLES].reverse()) if (!original.has(role)) {
       await maintenance.unsafe(`DROP ROLE IF EXISTS ${role}`).catch((e) => { cleanupError ||= e; });
     }
-    const [left] = await maintenance`SELECT count(*)::int AS n FROM pg_database WHERE datname=ANY(${dbs})`;
+    const [left] = await maintenance`SELECT
+      (SELECT count(*)::int FROM pg_database WHERE datname=ANY(${dbs})) AS dbs,
+      (SELECT count(*)::int FROM pg_roles WHERE rolname=ANY(${createdLogins})) AS logins`;
     rmSync(temp,{recursive:true,force:true});
-    process.stdout.write(`CRM_UPGRADE_TEARDOWN dbs=${left.n}\n`);
+    process.stdout.write(`CRM_UPGRADE_TEARDOWN dbs=${left.dbs} logins=${left.logins}\n`);
     await maintenance.end({timeout:5});
-    if (cleanupError || left.n!==0) failure ||= new Error('CRM_UPGRADE_TEARDOWN_FAILED');
+    if (cleanupError || left.dbs!==0 || left.logins!==0) failure ||= new Error('CRM_UPGRADE_TEARDOWN_FAILED');
   }
   if (failure) throw failure;
 }

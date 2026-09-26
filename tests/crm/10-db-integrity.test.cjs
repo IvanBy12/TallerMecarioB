@@ -140,16 +140,23 @@ test('DB-02 RLS catalog: ENABLE + FORCE and exactly SELECT/INSERT/UPDATE policie
     assert.equal(row.relforcerowsecurity, true);
     assert.equal(row.owner, 'tallermecario_schema_owner');
   }
-  const policies = await admin`SELECT tablename, policyname, cmd, roles, qual, with_check FROM pg_policies WHERE schemaname='public' AND tablename IN ('customers','vehicles','vehicle_owners')`;
+  const policies = await admin`SELECT tablename, policyname, cmd, roles, permissive, qual, with_check FROM pg_policies WHERE schemaname='public' AND tablename IN ('customers','vehicles','vehicle_owners')`;
   assert.equal(policies.length, 9);
   for (const table of ['customers', 'vehicles', 'vehicle_owners']) {
     const p = policies.filter((row) => row.tablename === table);
     assert.deepEqual(p.map((x) => x.policyname).sort(), ['tenant_insert', 'tenant_select', 'tenant_update']);
     for (const x of p) {
-      assert.deepEqual([...x.roles].sort(), ['tallermecario_api', 'tallermecario_worker']);
-      assert.equal(x.cmd, { tenant_select: 'SELECT', tenant_insert: 'INSERT', tenant_update: 'UPDATE' }[x.policyname]);
-      assert.match(x.qual || x.with_check, /tenant_id = app\.current_tenant_id\(\)/u);
-      if (x.cmd === 'UPDATE') assert.match(x.with_check, /tenant_id = app\.current_tenant_id\(\)/u);
+      assert.deepEqual([...x.roles], ['tallermecario_api', 'tallermecario_worker']);
+      assert.equal(x.permissive, 'PERMISSIVE');
+      const expr = '(tenant_id = app.current_tenant_id())';
+      const expected = {
+        tenant_select: { cmd: 'SELECT', qual: expr, with_check: null },
+        tenant_insert: { cmd: 'INSERT', qual: null, with_check: expr },
+        tenant_update: { cmd: 'UPDATE', qual: expr, with_check: expr },
+      }[x.policyname];
+      assert.equal(x.cmd, expected.cmd);
+      assert.equal(x.qual, expected.qual);
+      assert.equal(x.with_check, expected.with_check);
     }
   }
 });

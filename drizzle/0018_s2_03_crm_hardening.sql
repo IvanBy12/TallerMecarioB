@@ -87,7 +87,7 @@ BEGIN
 			OR pg_catalog.has_table_privilege('tallermecario_api', 'public.' || v_table, 'UPDATE') THEN
 			RAISE EXCEPTION 'CRM API table privileges invalid: %', v_table;
 		END IF;
-		FOREACH v_privilege IN ARRAY ARRAY['DELETE','TRUNCATE','REFERENCES','TRIGGER'] LOOP
+		FOREACH v_privilege IN ARRAY ARRAY['DELETE','TRUNCATE','REFERENCES','TRIGGER','MAINTAIN'] LOOP
 			IF pg_catalog.has_table_privilege('tallermecario_api', 'public.' || v_table, v_privilege) THEN
 				RAISE EXCEPTION 'CRM API excess privilege: %', v_table;
 			END IF;
@@ -105,7 +105,7 @@ BEGIN
 				END IF;
 			END LOOP;
 		END LOOP;
-		FOREACH v_privilege IN ARRAY ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'] LOOP
+		FOREACH v_privilege IN ARRAY ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER','MAINTAIN'] LOOP
 			IF pg_catalog.has_table_privilege('tallermecario_worker', 'public.' || v_table, v_privilege)
 				OR pg_catalog.has_table_privilege('public', 'public.' || v_table, v_privilege) THEN
 				RAISE EXCEPTION 'CRM worker/PUBLIC table privilege invalid: %', v_table;

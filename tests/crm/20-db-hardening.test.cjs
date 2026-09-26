@@ -71,7 +71,7 @@ test('HD-01 exact API table and column privileges', async () => {
     vehicle_owners: ['valid_to'],
   };
   for (const [table, columns] of Object.entries(allowed)) {
-    for (const privilege of ['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) {
+    for (const privilege of ['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER','MAINTAIN']) {
       const [row] = await admin`SELECT has_table_privilege('tallermecario_api', ${`public.${table}`}, ${privilege}) AS yes`;
       assert.equal(row.yes, ['SELECT','INSERT'].includes(privilege), `${table}.${privilege}`);
     }
@@ -84,7 +84,7 @@ test('HD-01 exact API table and column privileges', async () => {
 });
 test('HD-02/03 worker and PUBLIC have no CRM privileges or trigger EXECUTE', async () => {
   for (const role of ['tallermecario_worker', 'public']) for (const table of ['customers','vehicles','vehicle_owners']) {
-    for (const privilege of ['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) {
+    for (const privilege of ['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER','MAINTAIN']) {
       const [row] = await admin`SELECT has_table_privilege(${role}, ${`public.${table}`}, ${privilege}) AS yes`;
       assert.equal(row.yes, false, `${role}.${table}.${privilege}`);
     }
@@ -101,14 +101,25 @@ test('HD-04 RLS flags, exact policies, NOBYPASSRLS, function and trigger', async
     WHERE relname IN ('customers','vehicles','vehicle_owners') AND relnamespace='public'::regnamespace`;
   assert.equal(tables.length, 3);
   assert.ok(tables.every((r) => r.relrowsecurity && r.relforcerowsecurity));
-  const policies = await admin`SELECT tablename,policyname,cmd,roles FROM pg_policies
+  const policies = await admin`SELECT tablename,policyname,cmd,roles,permissive,qual,with_check FROM pg_policies
     WHERE schemaname='public' AND tablename IN ('customers','vehicles','vehicle_owners')`;
   assert.equal(policies.length, 9);
   for (const table of ['customers','vehicles','vehicle_owners']) {
     assert.deepEqual(policies.filter((p) => p.tablename === table).map((p) => p.policyname).sort(),
       ['tenant_insert','tenant_select','tenant_update']);
-    assert.ok(policies.filter((p) => p.tablename === table).every((p) =>
-      p.roles.includes('tallermecario_api') && p.roles.includes('tallermecario_worker')));
+    for (const p of policies.filter((row) => row.tablename === table)) {
+      assert.deepEqual([...p.roles], ['tallermecario_api','tallermecario_worker']);
+      assert.equal(p.permissive, 'PERMISSIVE');
+      const expr = '(tenant_id = app.current_tenant_id())';
+      const expected = {
+        tenant_select: { cmd: 'SELECT', qual: expr, with_check: null },
+        tenant_insert: { cmd: 'INSERT', qual: null, with_check: expr },
+        tenant_update: { cmd: 'UPDATE', qual: expr, with_check: expr },
+      }[p.policyname];
+      assert.equal(p.cmd, expected.cmd);
+      assert.equal(p.qual, expected.qual);
+      assert.equal(p.with_check, expected.with_check);
+    }
   }
   const roles = await admin`SELECT rolname,rolbypassrls FROM pg_roles WHERE rolname IN ('tallermecario_api','tallermecario_worker')`;
   assert.equal(roles.length, 2);
