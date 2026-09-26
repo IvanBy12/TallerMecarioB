@@ -231,7 +231,7 @@ test.describe('3. processClaimedJob: success path', () => {
     const eventId = id();
     await inTx(api, t.tenant, (c) => publishOutboxEvent(c, {
       id: eventId, tenantId: t.tenant, aggregateType: 'customer', aggregateId: t.customer,
-      eventType: 'test.record_note', payload: { customerId: t.customer, note: 'dispatched by worker' },
+      eventType: 'test.record_note', payload: { locationId: t.location, note: 'dispatched by worker' },
     }));
     const job = await claimMine(eventId);
     assert.equal(job.tenantId, t.tenant);
@@ -240,7 +240,7 @@ test.describe('3. processClaimedJob: success path', () => {
       database: worker,
       handlers: {
         'test.record_note': async (event, tx) => {
-          await tx`UPDATE customers SET notes = ${event.payload.note} WHERE id = ${event.payload.customerId}`;
+          await tx`UPDATE workshop_locations SET name = ${event.payload.note} WHERE id = ${event.payload.locationId}`;
         },
       },
     }, job);
@@ -249,8 +249,8 @@ test.describe('3. processClaimedJob: success path', () => {
     const row = await publishedRow(eventId);
     assert.equal(row.status, 'processed');
     assert.ok(row.processed_at);
-    const [customer] = await admin`SELECT notes FROM customers WHERE id = ${t.customer}`;
-    assert.equal(customer.notes, 'dispatched by worker');
+    const [location] = await admin`SELECT name FROM workshop_locations WHERE id = ${t.location}`;
+    assert.equal(location.name, 'dispatched by worker');
   });
 
   test('a job with no registered handler fails permanently (unknown event_type is not retried)', async () => {
@@ -411,7 +411,7 @@ test.describe('6. cross-tenant isolation during worker processing', () => {
     const eventId = id();
     await inTx(api, a.tenant, (c) => publishOutboxEvent(c, {
       id: eventId, tenantId: a.tenant, aggregateType: 'customer', aggregateId: a.customer,
-      eventType: 'test.cross_tenant_probe', payload: { otherCustomerId: b.customer },
+      eventType: 'test.cross_tenant_probe', payload: { otherLocationId: b.location },
     }));
     const job = await claimMine(eventId);
     assert.equal(job.tenantId, a.tenant);
@@ -422,10 +422,10 @@ test.describe('6. cross-tenant isolation during worker processing', () => {
       database: worker,
       handlers: {
         'test.cross_tenant_probe': async (event, tx) => {
-          const rows = await tx`SELECT 1 FROM customers WHERE id = ${event.payload.otherCustomerId}`;
+          const rows = await tx`SELECT 1 FROM workshop_locations WHERE id = ${event.payload.otherLocationId}`;
           sawOtherTenantRow = rows.length > 0;
           try {
-            await tx`UPDATE customers SET notes = 'leaked' WHERE id = ${event.payload.otherCustomerId}`;
+            await tx`UPDATE workshop_locations SET name = 'leaked' WHERE id = ${event.payload.otherLocationId}`;
           } catch (e) {
             blockedWrite = e;
           }
@@ -437,8 +437,8 @@ test.describe('6. cross-tenant isolation during worker processing', () => {
     assert.equal(sawOtherTenantRow, false, 'RLS must hide tenant B rows while processing tenant A job');
     // No error is expected: the UPDATE matches zero rows under RLS rather than raising.
     assert.equal(blockedWrite, null);
-    const [customerB] = await admin`SELECT notes FROM customers WHERE id = ${b.customer}`;
-    assert.notEqual(customerB.notes, 'leaked');
+    const [locationB] = await admin`SELECT name FROM workshop_locations WHERE id = ${b.location}`;
+    assert.notEqual(locationB.name, 'leaked');
   });
 
   test('a global-scope job (tenant_id NULL) never receives a TenantContext', async () => {

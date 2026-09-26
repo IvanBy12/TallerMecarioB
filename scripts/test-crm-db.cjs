@@ -90,8 +90,8 @@ async function main() {
     admin = postgres(testUrl.toString(), { max: 1, prepare: false, onnotice: () => {} });
     child(['scripts/migrate.cjs'], { ...process.env, DATABASE_URL: testUrl.toString() });
     const [ledger] = await admin`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    if (expectedMigrationCount() !== 18 || ledger.count !== 18) throw new Error('CRM_MIGRATION_LEDGER_INVALID');
-    process.stdout.write('CRM_MIGRATION_LEDGER_PASS 18 (0000..0017)\n');
+    if (expectedMigrationCount() !== 19 || ledger.count !== 19) throw new Error('CRM_MIGRATION_LEDGER_INVALID');
+    process.stdout.write('CRM_MIGRATION_LEDGER_PASS 19 (0000..0018)\n');
     for (const [login, password, role] of [
       [apiLogin, `rt_${randomUUID()}`, 'tallermecario_api'],
       [workerLogin, `rt_${randomUUID()}`, 'tallermecario_worker'],
@@ -104,10 +104,12 @@ async function main() {
     }
     const files = readdirSync('tests/crm').filter((f) => f.endsWith('.test.cjs')).sort().map((f) => `tests/crm/${f}`);
     if (!files.length) throw new Error('CRM_TEST_FILES_MISSING');
-    const { output, code } = await testChild(['--test', '--test-concurrency=1', '--test-timeout=90000', ...files], {
-      ...process.env, TEST_DATABASE_URL_ADMIN: testUrl.toString(),
+    const testEnv = {
+      ...process.env, NO_COLOR: '1', TEST_DATABASE_URL_ADMIN: testUrl.toString(),
       TEST_API_LOGIN: apiLogin, TEST_WORKER_LOGIN: workerLogin,
-    });
+    };
+    delete testEnv.FORCE_COLOR;
+    const { output, code } = await testChild(['--test', '--test-concurrency=1', '--test-timeout=90000', ...files], testEnv);
     const count = (name) => Number(output.match(new RegExp(`^(?:#|ℹ) ${name} (\\d+)$`, 'mu'))?.[1] ?? -1);
     const pass = count('pass'), fail = count('fail'), skip = count('skipped'), todo = count('todo');
     process.stdout.write(`CRM_TEST_COUNTS PASS=${pass} FAIL=${fail} SKIP=${skip} TODO=${todo}\n`);
