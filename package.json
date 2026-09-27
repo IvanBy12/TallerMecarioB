@@ -77,6 +77,8 @@
     "test:crm:ownership:mutations:ci": "node scripts/test-ownership-api-mutations.cjs",
     "test:crm:vehicle:mutations": "node --env-file=.env scripts/test-vehicle-api-mutations.cjs",
     "test:crm:vehicle:mutations:ci": "node scripts/test-vehicle-api-mutations.cjs",
+    "test:request-logging:mutation": "node --env-file=.env scripts/test-request-logging-mutation.cjs",
+    "test:request-logging:mutation:ci": "node scripts/test-request-logging-mutation.cjs",
     "test:crm:db:ci": "node scripts/test-crm-db.cjs",
     "test:crm:upgrade:ci": "node scripts/test-crm-migration-upgrade.cjs",
     "test:crm:mutations:ci": "node scripts/test-crm-mutations.cjs",

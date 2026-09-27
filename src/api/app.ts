@@ -1,4 +1,5 @@
 import fastify, {
+  LogController,
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
@@ -7,6 +8,7 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import type postgres from 'postgres';
+import type { Writable } from 'node:stream';
 import type {
   IdentityProvider,
   VerifiedIdentity,
@@ -22,7 +24,7 @@ import {
   setIdentityOnlyRequestContext,
   setIdentityProfileRequestContext,
 } from './request-context.js';
-import { registerTenantRequestLifecycle, rollbackTenantRequest } from './tenant-request.js';
+import { registerTenantRequestLifecycle, rollbackTenantRequest, verifiedTenantLogIds } from './tenant-request.js';
 
 export { ApiError } from './errors.js';
 export {
@@ -68,12 +70,44 @@ export interface BuildApiOptions {
   /** Security Baseline §10 global baseline. Routes needing stricter limits (login, OTP, uploads, webhooks) set their own `config.rateLimit` per-route. */
   rateLimit?: RateLimitOptions;
   readinessTimeoutMs?: number;
+  /** Test-only in-process sink; production writes JSON to stdout. */
+  logStream?: Writable;
 }
 
 const DEFAULT_RATE_LIMIT: RateLimitOptions = { max: 300, timeWindow: '1 minute' };
 const DEFAULT_READINESS_TIMEOUT_MS = 2000;
 
 const rawRequestBodies = new WeakMap<FastifyRequest, Buffer>();
+const requestStart = new WeakMap<FastifyRequest, number>();
+const requestErrorCodes = new WeakMap<FastifyRequest, string>();
+
+// Defense in depth for incidental Pino calls. The request completion hook
+// below constructs its own closed allowlist and never passes a raw request.
+const LOG_REDACTIONS = [
+  'req', 'res', 'err', 'request', 'raw', 'url', 'query', 'body', 'payload', 'params', 'headers',
+  'customer', 'vehicle', 'input', 'authorization', 'cookie', 'token', 'password', 'secret',
+  'firstName', 'lastName', 'first_name', 'last_name', 'name', 'email', 'phone',
+  'documentNumber', 'document_number', 'plate', 'vin', 'engineNumber', 'engine_number',
+  '*.req', '*.res', '*.err', '*.request', '*.raw', '*.url', '*.query', '*.body', '*.payload', '*.params', '*.headers',
+  '*.customer', '*.vehicle', '*.input', '*.firstName', '*.lastName', '*.first_name', '*.last_name', '*.name',
+  '*.authorization', '*.cookie', '*.token', '*.password', '*.secret',
+  '*.email', '*.phone', '*.documentNumber', '*.document_number',
+  '*.plate', '*.vin', '*.engineNumber', '*.engine_number',
+];
+
+function responseErrorCode(payload: unknown): string | undefined {
+  if (typeof payload !== 'string' || payload.length > 4096) return undefined;
+  try {
+    const body: unknown = JSON.parse(payload);
+    if (body === null || typeof body !== 'object' || !('error' in body)) return undefined;
+    const error = body.error;
+    if (error === null || typeof error !== 'object' || !('code' in error)) return undefined;
+    return typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code)
+      ? error.code : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function getRawRequestBody(request: FastifyRequest): Buffer {
   const body = rawRequestBodies.get(request);
@@ -177,7 +211,21 @@ function sendTenantErrorWithoutOnSend(
 
 export async function buildApi(options: BuildApiOptions): Promise<FastifyInstance> {
   const app = fastify({
-    logger: false,
+    logger: {
+      level: 'info',
+      stream: options.logStream ?? process.stdout,
+      base: null,
+      redact: { paths: LOG_REDACTIONS, censor: '[REDACTED]' },
+      // No raw request/error object may be serialized, including from a
+      // framework or plugin log outside our completion hook.
+      serializers: {
+        req: () => ({}),
+        res: () => ({}),
+        err: () => ({ type: 'redacted', message: 'redacted', stack: 'redacted' }),
+      },
+    },
+    logController: new LogController({ disableRequestLogging: true }),
+    requestIdHeader: false,
     genReqId: () => uuidV7(),
     ajv: {
       customOptions: {
@@ -185,6 +233,34 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
         removeAdditional: false,
       },
     },
+  });
+
+  app.addHook('onRequest', async (request) => {
+    requestStart.set(request, performance.now());
+  });
+  // Direct 4xx replies (including plugin replies) do not reach the error
+  // handler. Read only the stable code from their own response, never log it.
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (reply.statusCode >= 400) {
+      const code = responseErrorCode(payload);
+      if (code) requestErrorCodes.set(request, code);
+    }
+    return payload;
+  });
+  app.addHook('onResponse', async (request, reply) => {
+    const start = requestStart.get(request);
+    const errorCode = requestErrorCodes.get(request)
+      ?? (reply.statusCode === 404 && request.routeOptions.url === undefined ? 'NOT_FOUND' : undefined);
+    const completion = {
+      request_id: request.id,
+      method: request.method,
+      route: request.routeOptions.url ?? 'unmatched',
+      status_code: reply.statusCode,
+      ...(errorCode ? { error_code: errorCode } : {}),
+      duration_ms: Math.max(0, Math.round(performance.now() - (start ?? performance.now()))),
+      ...verifiedTenantLogIds(request),
+    };
+    app.log.info(completion);
   });
 
   app.removeContentTypeParser('application/json');
@@ -213,6 +289,13 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
       ? 'INTERNAL_ERROR' : mapped?.code ?? 'INTERNAL_ERROR';
     const message = tenantRoute && statusCode === 500 ? 'The request could not be completed.'
       : mapped?.message ?? 'The request could not be completed.';
+    requestErrorCodes.set(request, code);
+
+    if (statusCode >= 500) {
+      // Fixed diagnostic vocabulary; error.message/stack/request can contain
+      // CRM data or secrets and are intentionally never serialized.
+      app.log.error({ request_id: request.id, diagnostic: 'request_internal_error' });
+    }
 
     for (const [name, value] of Object.entries(mapped?.headers ?? {})) {
       reply.header(name, value);

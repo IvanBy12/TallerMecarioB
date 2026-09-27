@@ -205,6 +205,9 @@ jobs:
       - name: CRM ownership API mutations
         run: npm run test:crm:ownership:mutations:ci
 
+      - name: Request logging privacy mutation
+        run: npm run test:request-logging:mutation:ci
+
   staging:
     needs: validate
     runs-on: ubuntu-latest
