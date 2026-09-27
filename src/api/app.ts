@@ -215,6 +215,7 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
       level: 'info',
       stream: options.logStream ?? process.stdout,
       base: null,
+      timestamp: false,
       redact: { paths: LOG_REDACTIONS, censor: '[REDACTED]' },
       // No raw request/error object may be serialized, including from a
       // framework or plugin log outside our completion hook.

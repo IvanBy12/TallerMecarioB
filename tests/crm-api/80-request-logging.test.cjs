@@ -71,7 +71,7 @@ async function loggedRequest(invoke, { method, route, status, errorCode, actor, 
     for (const key of ['tenant_id', 'user_id', 'membership_id']) assert.equal(key in completion, false);
   }
   const allowed = new Set([
-    'level', 'time', 'request_id', 'method', 'route', 'status_code', 'error_code',
+    'level', 'request_id', 'method', 'route', 'status_code', 'error_code',
     'duration_ms', 'tenant_id', 'user_id', 'membership_id',
   ]);
   for (const key of Object.keys(completion)) assert.ok(allowed.has(key), `unexpected completion field: ${key}`);
@@ -131,7 +131,7 @@ test('S2-08 request logging: CRM reads, search, mutations and 400/404/409/500 ke
   assert.equal(failed.response.json.error.message, 'The request could not be completed.');
   const diagnostics = failed.lines.filter((line) => line.diagnostic === 'request_internal_error');
   assert.equal(diagnostics.length, 1, 'one safe server diagnostic for the 500');
-  assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['diagnostic', 'level', 'request_id', 'time']);
+  assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['diagnostic', 'level', 'request_id']);
   assert.equal(diagnostics[0].request_id, failed.response.json.error.request_id);
 });
 
