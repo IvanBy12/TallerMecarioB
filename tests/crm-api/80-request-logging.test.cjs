@@ -16,8 +16,10 @@ const stream = new Writable({ write(chunk, _encoding, done) { chunks.push(chunk.
 const secret = {
   name: 'PrivateCustomerName', phone: '3009876543', email: 'private.customer@example.test',
   document: 'PRIVATE123456', plate: 'PRIVATEPLATE123', vin: 'VINPRIVATESENTINEL',
-  engine: 'ENGINEPRIVATESENTINEL', query: 'SensitiveSearchValue', cookie: 'session=PrivateCookieValue',
+  engine: 'ENGINEPRIVATESENTINEL', query: 'SensitiveSearchValue',
+  cookieValue: 'PrivateCookieValue+S208/Probe',
 };
+secret.cookie = `session=${secret.cookieValue}`;
 let app;
 
 before(async () => {
@@ -39,7 +41,7 @@ after(async () => {
 });
 
 function assertPrivateLogs(raw, forbidden) {
-  for (const value of forbidden) assert.equal(raw.includes(value), false, `private value reached logger: ${value}`);
+  for (const value of forbidden) assert.equal(raw.includes(value), false, 'private value reached logger');
   assert.doesNotMatch(raw, /Bearer\s|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/u);
   assert.doesNotMatch(raw, /\/api\/v1\/[^"\s]*\?/u, 'raw URL with query reached logger');
 }
@@ -53,6 +55,11 @@ async function loggedRequest(invoke, { method, route, status, errorCode, actor, 
   const completions = lines.filter((line) => line.status_code !== undefined);
   assert.equal(completions.length, 1, 'exactly one completion event per request');
   const completion = completions[0];
+  assertPrivateLogs(raw, [
+    ...Object.values(secret), encodeURIComponent(secret.cookieValue),
+    encodeURIComponent(secret.cookie), ...forbidden,
+  ]);
+  assert.equal(completion.level, 30, 'Pino severity envelope is present');
   assert.match(completion.request_id, /^[0-9a-f]{8}-[0-9a-f]{4}-7/u);
   assert.equal(completion.method, method);
   assert.equal(completion.route, route);
@@ -70,13 +77,12 @@ async function loggedRequest(invoke, { method, route, status, errorCode, actor, 
   } else {
     for (const key of ['tenant_id', 'user_id', 'membership_id']) assert.equal(key in completion, false);
   }
-  const allowed = new Set([
-    'level', 'request_id', 'method', 'route', 'status_code', 'error_code',
-    'duration_ms', 'tenant_id', 'user_id', 'membership_id',
-  ]);
-  for (const key of Object.keys(completion)) assert.ok(allowed.has(key), `unexpected completion field: ${key}`);
-  assertPrivateLogs(raw, [...Object.values(secret), ...forbidden]);
-  return { response, lines };
+  const functionalFields = ['request_id', 'method', 'route', 'status_code', 'duration_ms'];
+  if (errorCode) functionalFields.push('error_code');
+  if (actor) functionalFields.push('tenant_id', 'user_id', 'membership_id');
+  assert.deepEqual(Object.keys(completion).filter((key) => key !== 'level').sort(),
+    functionalFields.sort(), 'closed functional payload; level is envelope metadata');
+  return { response, lines, completion, raw };
 }
 
 test('S2-08 request logging: CRM reads, search, mutations and 400/404/409/500 keep the closed privacy contract', async () => {
@@ -93,12 +99,14 @@ test('S2-08 request logging: CRM reads, search, mutations and 400/404/409/500 ke
     forbidden: [token, 'PrivateLastName', JSON.stringify(customerBody)] });
   const customer = created.response.json.customer;
 
-  await loggedRequest(() => h.getCustomer(app, a.owner, a.tenantId, customer.customerId), {
-    method: 'GET', route: '/api/v1/customers/:customerId', status: 200, actor: a.owner, tenantId: a.tenantId,
-  });
+  // Keep this privacy-bearing query before the dynamic URL read. The
+  // request.url mutation must fail on leaked query data, not route mismatch.
   await loggedRequest(() => h.listCustomers(app, a.owner, a.tenantId,
     `name=${encodeURIComponent(secret.query)}`), {
     method: 'GET', route: '/api/v1/customers', status: 200, actor: a.owner, tenantId: a.tenantId,
+  });
+  await loggedRequest(() => h.getCustomer(app, a.owner, a.tenantId, customer.customerId), {
+    method: 'GET', route: '/api/v1/customers/:customerId', status: 200, actor: a.owner, tenantId: a.tenantId,
   });
   await loggedRequest(() => h.call(app, {
     method: 'POST', url: '/api/v1/vehicles', tenantId: a.tenantId, headers,
@@ -133,6 +141,32 @@ test('S2-08 request logging: CRM reads, search, mutations and 400/404/409/500 ke
   assert.equal(diagnostics.length, 1, 'one safe server diagnostic for the 500');
   assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['diagnostic', 'level', 'request_id']);
   assert.equal(diagnostics[0].request_id, failed.response.json.error.request_id);
+});
+
+test('S2-08 cookie header and raw or URL-encoded cookie value never reach the logger', async () => {
+  await loggedRequest(() => h.call(app, {
+    url: '/unmatched', headers: { cookie: secret.cookie },
+  }), { method: 'GET', route: 'unmatched', status: 404, errorCode: 'NOT_FOUND' });
+});
+
+test('S2-08 unverified X-Tenant-Id is not logged as tenant_id', async () => {
+  const unverifiedTenantId = randomUUID();
+  const { completion, raw } = await loggedRequest(() => h.call(app, {
+    url: '/api/v1/customers', tenantId: unverifiedTenantId,
+  }), { method: 'GET', route: '/api/v1/customers', status: 401,
+    errorCode: 'AUTHENTICATION_REQUIRED', forbidden: [unverifiedTenantId] });
+  assert.equal('tenant_id' in completion, false);
+  assert.equal(raw.includes(unverifiedTenantId), false);
+});
+
+test('S2-08 client-controlled request-id headers cannot replace the server request_id', async () => {
+  const clientRequestId = `ClientSuppliedRequestId-${randomUUID()}`;
+  const { completion, raw } = await loggedRequest(() => h.call(app, {
+    url: '/unmatched', headers: { 'request-id': clientRequestId, 'x-request-id': clientRequestId },
+  }), { method: 'GET', route: 'unmatched', status: 404,
+    errorCode: 'NOT_FOUND', forbidden: [clientRequestId] });
+  assert.notEqual(completion.request_id, clientRequestId);
+  assert.equal(raw.includes(clientRequestId), false);
 });
 
 test('S2-08 privacy assertion rejects a raw query serialization probe', () => {

@@ -11,7 +11,7 @@ const result = spawnSync(process.execPath, ['scripts/test-crm-api.cjs'], {
 });
 const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.replace(/\u001b\[[0-9;]*m/gu, '');
 const applied = output.includes('S208_LOG_MUTATION_APPLIED request-url');
-const privacyFailed = /(?:✖|not ok) S2-08 request logging:/u.test(output);
+const privacyFailed = /(?:✖|not ok) S2-08 request logging:[\s\S]*?private value reached logger/u.test(output);
 const invalid = output.includes('MUTATION_ANCHOR_NOT_FOUND') || output.includes('UNKNOWN_MUTATION');
 const verdict = applied && privacyFailed && !invalid && result.status !== 0 ? 'KILLED' : 'INVALID';
 process.stdout.write(`MUTANT request-url: ${verdict}\n`);

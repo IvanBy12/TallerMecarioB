@@ -671,6 +671,10 @@ Retención baseline de audit: 24 meses, con purge privilegiado/auditable solo al
 
 Tres señales: logs JSON estructurados, metrics y traces. Correlación mínima: `request_id`, `trace_id`, tenant/user/membership cuando aplique, route/operation, result/error_code, duration y referencias outbox/webhook/provider.
 
+**Mínimo exigible en Sprint 2 (S2-08, DOC_GAP-02 CLOSED):** la API usa el logger integrado de Fastify/Pino con `disableRequestLogging: true` y sin serialización automática del request crudo. Emite exactamente un log estructurado de finalización por request manejado. Ese log contiene solo `request_id`, `method`, `route` (plantilla, nunca URL cruda), `status_code`, `error_code` cuando aplique, `duration_ms` y, si existen en contexto verificado por el servidor, `tenant_id`, `user_id`, `membership_id`. Operación §6 fija las exclusiones de PII/secretos, redacción central y pruebas. Metrics, traces, dashboards SLO, alertas y `trace_id` se difieren después de Sprint 2; su baseline de esta sección no se interpreta como entrega de S2.
+
+**Aclaración de la envoltura Pino para S2-08:** `level` es metadato de severidad de Pino, permitido además de la allowlist cerrada del payload funcional del evento de finalización; no forma parte de ese payload. Ningún otro metadato automático de Pino está permitido: `time` permanece deshabilitado y no se emiten `pid`, `hostname`, `req`, `res`, URL cruda, query, headers ni body.
+
 SLO MVP/piloto: disponibilidad API 99.0% mensual; p95 lectura ≤500 ms; p95 escritura ≤1 s; webhook ACK p95 ≤1 s tras verificación + persistencia; outbox normal p95 ≤2 min con proveedor disponible.
 
 Retención telemetría: request logs 30 días, traces 14 días, métricas de detalle 90 días. IDs tenant/user no se usan como labels métricos de alta cardinalidad.
@@ -719,6 +723,8 @@ build
   ↓
 security/dependency checks
 ```
+
+**Lint de Sprint 2 (S2-08, DOC_GAP-01 CLOSED):** Biome como dependencia solo de desarrollo; `npm run lint` es el comando canónico y CI debe fallar ante infracciones. Typecheck permanece como paso/script separado; `tsc` no se redefine como lint. No se usa ESLint ni `typescript-eslint`. El alcance/configuración cubre razonablemente `src/`, `tests/` y `scripts/` (TypeScript y JavaScript/CJS aplicables) sin imponer formateo masivo ajeno al ticket; los cambios de formato son una decisión aparte.
 
 Merge a rama principal:
 

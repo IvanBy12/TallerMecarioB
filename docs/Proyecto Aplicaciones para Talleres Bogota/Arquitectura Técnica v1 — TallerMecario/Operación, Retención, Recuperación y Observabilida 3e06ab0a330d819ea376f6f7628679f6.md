@@ -422,6 +422,8 @@ decisión PASS/FAIL
 
 No crear una tabla PostgreSQL para application logs. `audit_logs` tiene una finalidad distinta.
 
+**Entrega mínima S2-08:** solo el logging de requests definido en §6.2–§6.3. Metrics, traces, dashboards SLO, alertas y `trace_id` quedan diferidos después de Sprint 2; §6.4–§6.6 conservan el baseline de etapas posteriores.
+
 ## 6.2 Correlación obligatoria
 
 Cuando aplique:
@@ -443,6 +445,10 @@ outbox_event_id / webhook_event_id
 
 `request_id` siempre existe. Si llega uno externo no confiable, se valida formato/longitud o se genera uno nuevo. `trace_id` sigue formato del sistema de tracing.
 
+**Log de finalización de request (S2-08, DOC_GAP-02 CLOSED):** usar el logger integrado de Fastify/Pino con `disableRequestLogging: true`, sin serializador automático del request crudo. Emitir exactamente un evento estructurado de finalización por request manejado, con allowlist cerrada: `request_id`, `method`, `route` (plantilla registrada; si no hay match, identificador fijo sin datos del URL), `status_code`, `error_code` cuando aplique, `duration_ms` y los opcionales `tenant_id`, `user_id`, `membership_id` solo desde contexto verificado por el servidor. En S2-08, `request_id` lo genera el servidor y no se reemplaza por un valor enviado por el cliente. No inferir esos IDs de headers, query, body ni claims sin verificar. No incorporar campos adicionales a ese evento. `trace_id` no forma parte del mínimo S2.
+
+**Envoltura Pino permitida en S2-08:** `level` es exclusivamente metadato de severidad del logger y se permite además del payload funcional cerrado anterior; no es un campo de ese payload. Ningún otro metadato automático está permitido. `time` queda deshabilitado; tampoco se emiten `pid`, `hostname`, `req`, `res`, URL cruda, query, headers ni body. Las pruebas distinguen la envoltura `level` de los campos funcionales y rechazan cualquier otra clave.
+
 ## 6.3 Cardinalidad y privacidad
 
 - `tenant_id`, user/customer/order IDs pueden existir en logs/traces protegidos, pero **no** como labels de métricas de alta cardinalidad.
@@ -451,6 +457,10 @@ outbox_event_id / webhook_event_id
 - logs aplican redaction central de claves sensibles (`authorization`, `cookie`, `token`, `otp`, `secret`, payment instrument data).
 
 - las rutas de búsqueda CRM (`GET /api/v1/customers`, `GET /api/v1/vehicles`) llevan PII en la query (`phone`, `documentNumber`, `name`, `plate`): logs y traces registran la plantilla de ruta, nunca la query string ni sus valores (S2-02).
+
+**Límite S2-08 para logs de request y diagnóstico:** nunca registrar body, query string ni valores de query, URL cruda, Authorization/Cookie, JWT/tokens/secretos, ni PII CRM (nombres de clientes, teléfono, email, valores de documento, placa, VIN o número de motor). Mantener redacción central como defensa en profundidad, incluso con la allowlist. La respuesta 500 `INTERNAL_ERROR` sigue genérica. Un diagnóstico interno adicional puede conservar información técnica segura, correlacionada por `request_id`, tras minimizar y redactar los detalles; no serializar el objeto request ni el error completo si contienen secretos/PII. Ese diagnóstico no sustituye ni duplica el único evento de finalización.
+
+**Pruebas de aceptación S2-08:** verificar `request_id` y plantilla `route`; búsqueda, creación y error CRM con valores centinela de query, PII, token y cookie ausentes de toda la salida del logger; `error_code` cuando aplique; respuesta 500 sin detalle interno y diagnóstico seguro presente en logs del servidor. La verificación debe incluir la ruta de error y no limitarse a respuestas exitosas.
 
 ## 6.4 SLO/SLI baseline
 
@@ -504,7 +514,7 @@ Errores de aplicación usan código estable:
 }
 ```
 
-Stack trace/SQL/provider secrets solo en telemetría protegida; nunca en respuesta production.
+Stack trace y detalles SQL solo en telemetría protegida tras minimizar/redactar; nunca en respuesta production. JWT, tokens y secretos (incluidos los del proveedor) nunca se registran, tampoco en diagnósticos internos.
 
 # 7. Estrategia de migraciones y rollback
 
