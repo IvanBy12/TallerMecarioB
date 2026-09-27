@@ -1,0 +1,46 @@
+'use strict';
+
+/** Mutate throwaway compiled JS or the ephemeral test DB only. */
+const { readFileSync, writeFileSync } = require('node:fs');
+const { join } = require('node:path');
+const SERVICE = 'vehicles/service.js';
+const ROUTES = 'vehicles/routes.js';
+const VALIDATION = 'vehicles/validation.js';
+const MUTATIONS = {
+  'owner-manage-permission': { js: [[SERVICE,
+    "(0, authorize_js_1.requireTenantPermission)(context.tenant, 'vehicle_owners.manage');",
+    '/* owner permission deliberately removed */']] },
+  'initial-owner-primary': { js: [[SERVICE, "'owner', true, pg_catalog.clock_timestamp()", "'owner', false, pg_catalog.clock_timestamp()"]] },
+  'initial-owner-audit': { js: [[SERVICE,
+    "await audit(sql, context, meta, 'vehicle.owner_changed', vehicle.id, { command: 'create' }, { ownership_id: owner.id, customer_id: input.customerId });",
+    '/* audit deliberately removed */']] },
+  'plate-normalization': { js: [[VALIDATION, "replace(/[ .-]/gu, '')", "replace(/[ ]/gu, '')"]] },
+  'technician-route-scope': { js: [[ROUTES, "permissionScope: 'resource'", "permissionScope: 'tenant'"]] },
+  'technician-released': { js: [[SERVICE, 'a.released_at IS NULL', 'a.released_at IS NOT NULL']] },
+  'technician-full-dto': { js: [[SERVICE, 'return assigned ? toTechDto(row) : toDto(row);', 'return toDto(row);']] },
+  'vehicle-update-permission': { js: [[ROUTES, "config: { permission: 'vehicles.update' }", "config: { permission: 'workshop.read' }"]] },
+  'cursor-inclusive': { js: [[SERVICE, 'AND v.id < ${query.afterId}::uuid', 'AND v.id <= ${query.afterId}::uuid']] },
+  'occ-check': { js: [[SERVICE, 'if (!current.version_matches)', 'if (false)']] },
+  'noop-writes': { js: [[SERVICE, 'if (changed.length === 0)', 'if (false)']] },
+  'audit-values': { js: [[SERVICE, '{ changed_fields: changed }', '{ changed_fields: changed, plate: row.plate }']] },
+  'tenant-rls': { sql: ['ALTER POLICY tenant_select ON public.vehicles USING (true)'] },
+};
+async function applyVehicleMutation(phase, { admin, compiledRoot } = {}) {
+  const name = process.env.S205_MUTATION;
+  if (!name) return;
+  const mutation = MUTATIONS[name];
+  if (!mutation) throw new Error(`UNKNOWN_MUTATION ${name}`);
+  if (phase === 'sql') {
+    for (const statement of mutation.sql ?? []) await admin.unsafe(statement);
+  } else {
+    for (const [file, from, to] of mutation.js ?? []) {
+      const path = join(compiledRoot, file);
+      const source = readFileSync(path, 'utf8').replace(/\r\n?/gu, '\n');
+      const occurrences = source.split(from).length - 1;
+      if (occurrences !== 1) throw new Error(`MUTATION_ANCHOR_NOT_FOUND ${name} ${file} (${occurrences})`);
+      writeFileSync(path, source.replace(from, () => to));
+    }
+  }
+  process.stdout.write(`S205_MUTATION_APPLIED ${name} ${phase}\n`);
+}
+module.exports = { MUTATIONS, applyVehicleMutation };

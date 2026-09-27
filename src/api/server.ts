@@ -21,6 +21,7 @@ import { registerInvitationAcceptRoute, registerInvitationRoutes } from '../invi
 import { registerMemberLifecycleRoutes } from '../memberships/lifecycle-routes.js';
 import { registerMemberRoleRoutes } from '../memberships/roles-routes.js';
 import { registerCustomerRoutes } from '../customers/routes.js';
+import { registerVehicleRoutes } from '../vehicles/routes.js';
 
 /**
  * Used ONLY when no Clerk variable is configured at all (e.g. the local
@@ -109,6 +110,7 @@ async function main(): Promise<void> {
       registerMemberRoleRoutes(server);
       registerMemberLifecycleRoutes(server);
       registerCustomerRoutes(server);
+      registerVehicleRoutes(server);
       // Deploy-smoke-test only: proves the full protected-route pipeline
       // (rate limit -> auth -> TenantContext transaction -> RBAC) is wired
       // end to end in the deployed artifact. Not a product endpoint.
