@@ -1,10 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ApiError, getTenantRequestContext } from '../api/app.js';
 import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
-import { createVehicle, getVehicle, listVehicles, mapVehicleDbError, updateVehicle,
+import { createVehicle, getVehicle, listOwnerHistory, listVehicles, mapVehicleDbError, transferOwner, updateVehicle,
   type RequestMeta } from './service.js';
 import { createVehicleBodySchema, parseCreateVehicle, parseListVehiclesQuery,
-  parsePatchVehicle, patchVehicleBodySchema } from './validation.js';
+  parsePatchVehicle, parseTransferOwner, patchVehicleBodySchema, transferOwnerBodySchema } from './validation.js';
 
 const meta = (request: FastifyRequest): RequestMeta => ({ requestId: request.id, ipAddress: request.ip });
 const vehicleIdParam = (request: FastifyRequest): string => {
@@ -44,5 +44,19 @@ export function registerVehicleRoutes(app: FastifyInstance): void {
     const input = parsePatchVehicle(request.body);
     const vehicle = await mapped(() => updateVehicle(getTenantRequestContext(request), vehicleIdParam(request), input, meta(request)));
     return reply.send({ vehicle });
+  });
+  app.get('/api/v1/vehicles/:vehicleId/owners', {
+    config: { permission: 'customers.read' }, onRequest: noStore,
+  }, async (request, reply) => reply.send({
+    owners: await listOwnerHistory(getTenantRequestContext(request), vehicleIdParam(request)),
+  }));
+  app.post('/api/v1/vehicles/:vehicleId/owners', {
+    config: { permission: 'vehicle_owners.manage' },
+    schema: { body: transferOwnerBodySchema }, onRequest: [noStore, requireJson],
+  }, async (request, reply) => {
+    const vehicleId = vehicleIdParam(request);
+    const input = parseTransferOwner(request.body);
+    const result = await mapped(() => transferOwner(getTenantRequestContext(request), vehicleId, input, meta(request)));
+    return reply.code(result.changed ? 201 : 200).send({ ownership: result.ownership });
   });
 }

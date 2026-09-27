@@ -27,6 +27,7 @@ const postgres = require('postgres');
 const { expectedMigrationCount } = require('./migration-count.cjs');
 const { applyMutation } = require('./crm-api-mutations.cjs');
 const { applyVehicleMutation } = require('./vehicle-api-mutations.cjs');
+const { applyOwnershipMutation } = require('./ownership-api-mutations.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -122,6 +123,7 @@ async function main() {
     process.stdout.write('CLEAN_MIGRATION_PASS\n');
     await applyMutation('sql', { admin: testAdmin });
     await applyVehicleMutation('sql', { admin: testAdmin });
+    await applyOwnershipMutation('sql', { admin: testAdmin });
 
     for (const [login, password, role] of [
       [apiLogin, apiPassword, 'tallermecario_api'],
@@ -141,6 +143,7 @@ async function main() {
     ], process.env);
     await applyMutation('js', { compiledRoot });
     await applyVehicleMutation('js', { compiledRoot });
+    await applyOwnershipMutation('js', { compiledRoot });
 
     const files = readdirSync('tests/crm-api')
       .filter((name) => name.endsWith('.test.cjs'))

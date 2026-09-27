@@ -73,6 +73,7 @@
     "test:crm:api:ci": "node scripts/test-crm-api.cjs",
     "test:crm:api:mutations": "node --env-file=.env scripts/test-crm-api-mutations.cjs",
     "test:crm:api:mutations:ci": "node scripts/test-crm-api-mutations.cjs",
+    "test:crm:ownership:mutations": "node --env-file=.env scripts/test-ownership-api-mutations.cjs",
     "smoke:clerk:dev": "npm run build && node --env-file=.env scripts/smoke-clerk-dev.cjs",
     "rbac:generate-seed-sql": "node scripts/generate-rbac-seed-sql.cjs",
     "rbac:check-doc-parity": "node scripts/check-rbac-matrix-doc.cjs",
