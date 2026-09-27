@@ -87,7 +87,7 @@
     "rbac:check-doc-parity": "node scripts/check-rbac-matrix-doc.cjs",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "biome lint src tests scripts drizzle.config.ts tsconfig.json tsconfig.build.json package.json",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run test:authz && npm run test:tenant-context-core && npm run test:wompi"
   },
   "repository": {
     "type": "git",
