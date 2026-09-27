@@ -27,7 +27,10 @@ const MUTATIONS = {
   'noop-check-removed': { js: [[SERVICE, noOp,
     `if (false)\n        return { ownership: ownershipDto(current), changed: false };`]] },
   'separate-timestamps': { js: [[SERVICE,
-    "'owner', true, ${time.t})", "'owner', true, pg_catalog.clock_timestamp())"]] },
+    "'owner', true, ${time.t}::text::timestamptz)", "'owner', true, pg_catalog.clock_timestamp())"]] },
+  'timestamp-js-date-roundtrip': { js: [[SERVICE,
+    "SELECT pg_catalog.to_char(\n    pg_catalog.clock_timestamp() AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS t",
+    'SELECT pg_catalog.clock_timestamp() AS t']] },
   'close-valid-to-guard-removed': { js: [[SERVICE,
     'AND id = ${current.id} AND valid_to IS NULL RETURNING id',
     'AND id = ${current.id} RETURNING id']] },
@@ -54,6 +57,9 @@ const MUTATIONS = {
   'post-route-permission-weakened': { js: [[ROUTES,
     "config: { permission: 'vehicle_owners.manage' },",
     "config: { permission: 'vehicles.update' },"]] },
+  'get-owners-route-permission-weakened': { js: [[ROUTES,
+    "config: { permission: 'customers.read' }, onRequest: noStore,",
+    "config: { permission: 'vehicles.read' }, onRequest: noStore,"]] },
 };
 async function applyOwnershipMutation(phase, { admin, compiledRoot } = {}) {
   const name = process.env.S206_MUTATION;

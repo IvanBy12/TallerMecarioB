@@ -214,10 +214,11 @@ test('HD-30/31/32 canonical plate format and tenant-scoped uniqueness', async ()
   await assert.rejects(scoped(api,a.tenant,(c) => c`UPDATE vehicles SET plate='ABCDEFGHIJKLMNOPQ' WHERE id=${a.vehicle}`),
     denied('22001'));
   assert.equal((await scoped(api,a.tenant,(c) => c`SELECT plate FROM vehicles WHERE id=${a.vehicle}`))[0].plate, 'ABC123');
-  for (const plate of ['A1','123456','ABCDEFGHIJKLMNOP']) {
+  for (const plate of ['A','A1','123456','ABCDEFGHIJKLMNOP']) {
     const vehicleId = await scoped(api,a.tenant,(c) => insertVehicle(c,a.tenant,plate));
     await scoped(api,a.tenant,(c) => c`UPDATE vehicles SET plate=${plate} WHERE id=${vehicleId}`);
   }
+  assert.equal((await scoped(api,b.tenant,(c) => c`UPDATE vehicles SET plate='A' WHERE id=${b.vehicle} RETURNING plate`))[0].plate, 'A');
 });
 test('HD-50 cross-tenant UPDATE on permitted column affects zero rows', async () => {
   assert.equal((await scoped(api,a.tenant,(c) => c`UPDATE customers SET notes='leak' WHERE id=${b.customer}`)).count,0);

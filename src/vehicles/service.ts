@@ -209,16 +209,17 @@ export async function transferOwner(context: TenantRequestContext, vehicleId: st
       AND o.is_primary = true AND o.valid_to IS NULL`;
   if (current?.customer_id === customerId) return { ownership: ownershipDto(current), changed: false };
   if ((current?.id ?? null) !== input.expectedCurrentOwnershipId) throw ownershipConflict();
-  const [time] = await sql<{ t: string }[]>`SELECT pg_catalog.clock_timestamp() AS t`;
+  const [time] = await sql<{ t: string }[]>`SELECT pg_catalog.to_char(
+    pg_catalog.clock_timestamp() AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS t`;
   if (!time) throw new Error('VEHICLE_OWNER_TIMESTAMP_FAILED');
   if (current) {
-    const closed = await sql`UPDATE public.vehicle_owners SET valid_to = ${time.t}
+    const closed = await sql`UPDATE public.vehicle_owners SET valid_to = ${time.t}::text::timestamptz
       WHERE tenant_id = ${tenant.tenantId} AND id = ${current.id} AND valid_to IS NULL RETURNING id`;
     if (closed.length !== 1) throw ownershipConflict();
   }
   const [owner] = await sql<OwnerRow[]>`INSERT INTO public.vehicle_owners AS o
     (id, tenant_id, vehicle_id, customer_id, relationship_type, is_primary, valid_from)
-    VALUES (${uuidV7()}, ${tenant.tenantId}, ${vehicleId}, ${customerId}, 'owner', true, ${time.t})
+    VALUES (${uuidV7()}, ${tenant.tenantId}, ${vehicleId}, ${customerId}, 'owner', true, ${time.t}::text::timestamptz)
     RETURNING ${ownerColumns(sql)}`;
   if (!owner) throw new Error('VEHICLE_OWNER_INSERT_FAILED');
   await audit(sql, context, meta, 'vehicle.owner_changed', vehicleId, { command: 'transfer' },
