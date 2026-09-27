@@ -1,7 +1,7 @@
 'use strict';
 
 // S2-08: HTTP business actions against the deployed container. Admin SQL is
-// confined to fixture setup and read-only evidence queries.
+// confined to fixture setup, read-only evidence, and an opt-in reviewer mutant.
 const assert = require('node:assert/strict');
 const { createSign, randomUUID } = require('node:crypto');
 const { readFileSync } = require('node:fs');
@@ -149,7 +149,37 @@ function assertLogPrivacy(raw, sentinels, minimumCompletions, expectedErrors = [
   return completions.length;
 }
 
-async function runCrmE2e(admin, baseUrl, identity, tenants, fetcher = fetch) {
+function completionEvents(raw) {
+  return raw.split(/\r?\n/u).filter((line) => line.trim().startsWith('{'))
+    .map((line) => JSON.parse(line)).filter((line) => line.status_code !== undefined);
+}
+
+async function vehicleRowVersion(admin, tenantId, vehicleId) {
+  const [row] = await admin`SELECT
+    pg_catalog.to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at,
+    xmin::text AS xmin FROM public.vehicles
+    WHERE tenant_id=${tenantId} AND id=${vehicleId}`;
+  must(row && stamp.test(row.updated_at) && typeof row.xmin === 'string', 'VEHICLE_ROW_VERSION');
+  return row;
+}
+
+async function injectUnexpectedAudit(admin, tenantId, vehicleId, mode) {
+  must(['unexpected', 'duplicate'].includes(mode), 'AUDIT_MUTANT_MODE');
+  const inserted = await admin`INSERT INTO public.audit_logs (
+    id, tenant_id, actor_type, actor_user_id, actor_membership_id,
+    action, outcome, entity_type, entity_id, reason_code,
+    before_json, after_json, metadata_json, request_id, ip_address
+  ) SELECT ${randomUUID()}, tenant_id, actor_type, actor_user_id, actor_membership_id,
+    ${mode === 'unexpected' ? 'reviewer.unexpected' : 'vehicle.owner_changed'},
+    outcome, entity_type, entity_id, reason_code, before_json, after_json,
+    metadata_json, ${randomUUID()}, ip_address FROM public.audit_logs
+    WHERE tenant_id=${tenantId} AND entity_id=${vehicleId}
+      AND action='vehicle.owner_changed' AND metadata_json->>'command'='create'
+    LIMIT 1 RETURNING id`;
+  must(inserted.length === 1, 'AUDIT_MUTANT_INSERT');
+}
+
+async function runCrmE2e(admin, baseUrl, identity, tenants, fetcher = fetch, options = {}) {
   const { a, b } = tenants;
   const tokens = new Map([a.advisor, a.technician, b.advisor]
     .map((actor) => [actor, sessionToken(actor, identity)]));
@@ -167,6 +197,7 @@ async function runCrmE2e(admin, baseUrl, identity, tenants, fetcher = fetch) {
     privatePem.split('\n')[1].slice(0, 32)];
   let requestCount = 0;
   const errors = [];
+  const successfulMutations = [];
   const request = async (actor, tenantId, method, route, body, selectedTenant = tenantId) => {
     const response = await fetcher(`${baseUrl}${route}`, {
       method, signal: AbortSignal.timeout(10000),
@@ -186,6 +217,10 @@ async function runCrmE2e(admin, baseUrl, identity, tenants, fetcher = fetch) {
       must(typeof result.json.error.request_id === 'string', 'ERROR_REQUEST_ID');
       errors.push({ requestId: result.json.error.request_id, status, code, method });
     }
+    if (status === 201) successfulMutations.push({ requestIndex: requestCount - 1,
+      tenantId, actor, method, route: route.replace(
+        /\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=\/|$)/giu,
+        '/:vehicleId'), status });
     return result.json;
   };
   const customerBody = (name, phone, email) => ({ firstName: name,
@@ -211,13 +246,20 @@ async function runCrmE2e(admin, baseUrl, identity, tenants, fetcher = fetch) {
     customerBody('StagePrivateBeta', '3009988777', 'stage-beta@example.test'), 201)).customer.customerId;
   const ownerRoute = `/api/v1/vehicles/${vehicleId}/owners`;
   const transferBody = { customerId: c2, expectedCurrentOwnershipId: initialId };
+  const vehicleBeforeTransfer = await vehicleRowVersion(admin, a.tenantId, vehicleId);
   const changed = await check(a.advisor, a.tenantId, 'POST', ownerRoute, transferBody, 201);
+  assert.deepEqual(await vehicleRowVersion(admin, a.tenantId, vehicleId), vehicleBeforeTransfer,
+    'transfer must not mutate vehicles.updated_at or xmin');
   const successor = changed.ownership;
   assert.deepEqual(Object.keys(successor).sort(), ownerFields);
   must(successor.customerId === c2 && successor.validTo === null
     && successor.ownershipId !== initialId, 'OWNER_TRANSFER');
   const retry = await check(a.advisor, a.tenantId, 'POST', ownerRoute, transferBody, 200);
   assert.deepEqual(retry, changed, 'transfer retry is a no-op');
+  assert.deepEqual(await vehicleRowVersion(admin, a.tenantId, vehicleId), vehicleBeforeTransfer,
+    'same-owner retry must not mutate vehicles.updated_at or xmin');
+  if (options.auditMutant) await injectUnexpectedAudit(admin, a.tenantId, vehicleId,
+    options.auditMutant);
   await check(a.advisor, a.tenantId, 'POST', ownerRoute,
     { customerId: c1, expectedCurrentOwnershipId: initialId },
     409, 'VEHICLE_OWNERSHIP_CONFLICT');
@@ -276,41 +318,99 @@ async function runCrmE2e(admin, baseUrl, identity, tenants, fetcher = fetch) {
     { customerId: c1, expectedCurrentOwnershipId: successor.ownershipId },
     403, 'PERMISSION_DENIED');
 
-  const audits = await admin`SELECT tenant_id,entity_id,action,actor_user_id,
-    actor_membership_id,before_json,after_json,metadata_json
-    FROM public.audit_logs WHERE tenant_id IN (${a.tenantId},${b.tenantId})
-    AND action IN ('customer.created','vehicle.created','vehicle.owner_changed')
-    ORDER BY tenant_id,entity_id,created_at,id`;
-  const actions = (tenantId, entityId) => audits.filter((row) =>
-    row.tenant_id === tenantId && row.entity_id === entityId).map((row) => row.action).sort();
-  assert.deepEqual(actions(a.tenantId, c1), ['customer.created']);
-  assert.deepEqual(actions(a.tenantId, c2), ['customer.created']);
-  assert.deepEqual(actions(b.tenantId, bc), ['customer.created']);
-  assert.deepEqual(actions(a.tenantId, vehicleId),
-    ['vehicle.created', 'vehicle.owner_changed', 'vehicle.owner_changed']);
-  assert.deepEqual(actions(a.tenantId, second.vehicle.vehicleId),
-    ['vehicle.created', 'vehicle.owner_changed']);
-  assert.deepEqual(actions(b.tenantId, bv.vehicle.vehicleId),
-    ['vehicle.created', 'vehicle.owner_changed']);
-  must(audits.length === 10, 'AUDIT_EXACT_COUNT');
-  const changes = audits.filter((row) => row.tenant_id === a.tenantId
-    && row.entity_id === vehicleId && row.action === 'vehicle.owner_changed');
-  assert.deepEqual(changes.map((row) => row.metadata_json?.command).sort(), ['create', 'transfer']);
-  const transferAudit = changes.find((row) => row.metadata_json?.command === 'transfer');
-  assert.deepEqual(transferAudit.before_json, { ownership_id: initialId, customer_id: c1 });
-  assert.deepEqual(transferAudit.after_json,
-    { ownership_id: successor.ownershipId, customer_id: c2 });
-  for (const row of audits) {
-    const actor = row.tenant_id === b.tenantId ? b.advisor : a.advisor;
-    must(row.actor_user_id === actor.userId && row.actor_membership_id === actor.membershipId,
-      'AUDIT_ACTOR');
-  }
-  must(!/StagePrivate|300998877|STAGEDOC|STAGEVIN|STAGEENGINE|ABC123/u
-    .test(JSON.stringify(audits)), 'AUDIT_PII');
+  must(successfulMutations.length === 7, 'MUTATION_REQUEST_COUNT');
+  const ownership = (ownershipId, customerId) => ({ ownership_id: ownershipId,
+    customer_id: customerId });
+  const customerFields = ['first_name', 'last_name', 'phone', 'email',
+    'document_type', 'document_number'];
+  const customerAudit = (mutation, tenantId, entityId) => ({ mutation, tenantId,
+    action: 'customer.created', entityType: 'customer', entityId,
+    before: null, after: null, metadata: { fields: customerFields } });
+  const vehicleAudits = (mutation, tenantId, entityId, ownershipId, customerId) => [
+    { mutation, tenantId, action: 'vehicle.created', entityType: 'vehicle', entityId,
+      before: null, after: null, metadata: ownership(ownershipId, customerId) },
+    { mutation, tenantId, action: 'vehicle.owner_changed', entityType: 'vehicle', entityId,
+      before: null, after: ownership(ownershipId, customerId), metadata: { command: 'create' } },
+  ];
+  const expectedAudit = [
+    customerAudit(0, a.tenantId, c1),
+    ...vehicleAudits(1, a.tenantId, vehicleId, initialId, c1),
+    customerAudit(2, a.tenantId, c2),
+    { mutation: 3, tenantId: a.tenantId, action: 'vehicle.owner_changed',
+      entityType: 'vehicle', entityId: vehicleId,
+      before: ownership(initialId, c1), after: ownership(successor.ownershipId, c2),
+      metadata: { command: 'transfer' } },
+    ...vehicleAudits(4, a.tenantId, second.vehicle.vehicleId,
+      second.ownership.ownershipId, c1),
+    customerAudit(5, b.tenantId, bc),
+    ...vehicleAudits(6, b.tenantId, bv.vehicle.vehicleId,
+      bv.ownership.ownershipId, bc),
+  ];
   const snapshot = await readDataSnapshot(admin, vehicleId, a.tenantId, b.tenantId);
   return { requestCount, sentinels, errors, ownerRoute, history, snapshot, vehicleId,
-    recoveryToken: tokens.get(a.advisor) };
+    recoveryToken: tokens.get(a.advisor), successfulMutations, expectedAudit,
+    vehicleBeforeTransfer };
+}
+
+async function assertExactCrmAudit(admin, tenants, e2e, completions) {
+  const { a, b } = tenants;
+  must(completions.length === e2e.requestCount, 'AUDIT_COMPLETION_COUNT');
+  const expected = e2e.expectedAudit.map((item) => {
+    const mutation = e2e.successfulMutations[item.mutation];
+    const completion = completions[mutation.requestIndex];
+    must(completion?.status_code === mutation.status && completion.method === mutation.method
+      && completion.route === mutation.route && completion.tenant_id === mutation.tenantId
+      && completion.user_id === mutation.actor.userId
+      && completion.membership_id === mutation.actor.membershipId,
+    'AUDIT_SUCCESSFUL_REQUEST_CORRELATION');
+    must(/^[0-9a-f-]{36}$/iu.test(completion.request_id), 'AUDIT_SERVER_REQUEST_ID');
+    return { ...item, actor: mutation.actor, requestId: completion.request_id };
+  });
+  must(new Set(e2e.successfulMutations.map((mutation) =>
+    completions[mutation.requestIndex].request_id)).size === 7,
+  'AUDIT_DISTINCT_MUTATING_REQUESTS');
+  const audits = await admin`SELECT tenant_id, action, entity_type, entity_id,
+    actor_type, actor_user_id, actor_membership_id, outcome, reason_code,
+    request_id, before_json, after_json, metadata_json, trace_id, user_agent
+    FROM public.audit_logs WHERE tenant_id IN (${a.tenantId},${b.tenantId})
+    ORDER BY tenant_id,created_at,id`;
+  must(audits.filter((row) => row.tenant_id === a.tenantId).length === 7
+    && audits.filter((row) => row.tenant_id === b.tenantId).length === 3
+    && audits.length === 10, 'AUDIT_TENANT_TOTALS');
+  const eventKey = (row) => `${row.tenant_id ?? row.tenantId}|${row.action}|${row.entity_id ?? row.entityId}|${row.request_id ?? row.requestId}`;
+  const actualByKey = new Map();
+  for (const row of audits) {
+    const key = eventKey(row);
+    must(!actualByKey.has(key), 'AUDIT_DUPLICATE_EVENT');
+    actualByKey.set(key, row);
+  }
+  for (const item of expected) {
+    const row = actualByKey.get(eventKey(item));
+    must(row, 'AUDIT_EVENT_MISSING_OR_UNEXPECTED');
+    actualByKey.delete(eventKey(item));
+    assert.equal(row.tenant_id, item.tenantId);
+    assert.equal(row.action, item.action);
+    assert.equal(row.entity_type, item.entityType);
+    assert.equal(row.entity_id, item.entityId);
+    assert.equal(row.actor_type, 'user');
+    assert.equal(row.actor_user_id, item.actor.userId);
+    assert.equal(row.actor_membership_id, item.actor.membershipId);
+    assert.equal(row.outcome, 'success');
+    assert.equal(row.reason_code, null);
+    assert.equal(row.request_id, item.requestId);
+    assert.deepEqual(row.before_json, item.before);
+    assert.deepEqual(row.after_json, item.after);
+    assert.deepEqual(row.metadata_json, item.metadata);
+    assert.equal(row.trace_id, null);
+    assert.equal(row.user_agent, null);
+  }
+  must(actualByKey.size === 0, 'AUDIT_UNEXPECTED_ROW');
+  must(!/StagePrivate|300998877|STAGEDOC|STAGEVIN|STAGEENGINE|ABC123|XYZ987/u
+    .test(JSON.stringify(audits.map((row) => [row.before_json, row.after_json,
+      row.metadata_json]))), 'AUDIT_PII');
+  return { tenantA: 7, tenantB: 3, total: 10 };
 }
 
 module.exports = { migrationState, seedTwoTenants, sessionToken,
-  readDataSnapshot, assertLogPrivacy, runCrmE2e, must };
+  readDataSnapshot, assertLogPrivacy, completionEvents, assertExactCrmAudit,
+  injectUnexpectedAudit, runCrmE2e, must };

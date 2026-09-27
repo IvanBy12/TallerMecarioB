@@ -17,7 +17,7 @@ const os = require('node:os');
 const path = require('node:path');
 const postgres = require('postgres');
 const { migrationState, seedTwoTenants, runCrmE2e, readDataSnapshot,
-  assertLogPrivacy } = require('./staging-crm-e2e.cjs');
+  assertLogPrivacy, completionEvents, assertExactCrmAudit } = require('./staging-crm-e2e.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const COMPOSE_FILE = path.join(REPO_ROOT, 'docker-compose.staging.yml');
@@ -234,16 +234,22 @@ async function main() {
     // Real Clerk verification uses the public key inside the API container.
     // The private key and signed sessions remain in this drill process.
     const tenants = await seedTwoTenants(admin);
-    const baselineLogs = compose(project, envFile,
-      ['logs', '--no-color', '--no-log-prefix', 'api'], { capture: true });
-    if (baselineLogs.status !== 0) throw new Error('STAGING_LOG_CAPTURE_FAILED');
+    // The HTTP response may arrive before Fastify flushes its onResponse log.
+    // Use the smoke request ID as a barrier before counting E2E completions.
+    const baselineLogs = await waitFor(async () => {
+      const logs = compose(project, envFile,
+        ['logs', '--no-color', '--no-log-prefix', 'api'], { capture: true });
+      if (logs.status !== 0) throw new Error('STAGING_LOG_CAPTURE_FAILED');
+      return completionEvents(logs.stdout).some((line) =>
+        line.request_id === whoami.body.error.request_id) ? logs : null;
+    }, { timeoutMs: 10000, intervalMs: 250, label: 'SMOKE_COMPLETION_LOG' });
     const baselineCompletions = assertLogPrivacy(baselineLogs.stdout, [], 0);
-    const e2e = await runCrmE2e(admin, baseUrl, identity, tenants);
+    const e2e = await runCrmE2e(admin, baseUrl, identity, tenants, fetch,
+      { auditMutant: process.env.S208_STAGING_AUDIT_MUTANT });
     report.crm_e2e = 'PASS';
     report.tenant_isolation = 'PASS';
     report.ownership_history = 'PASS';
-    report.audit = 'PASS';
-    process.stdout.write(`CRM_E2E_PASS ${e2e.requestCount} deployed HTTP requests; two tenants; ownership microseconds and audit verified\n`);
+    process.stdout.write(`CRM_E2E_PASS ${e2e.requestCount} deployed HTTP requests; two tenants; ownership microseconds and vehicle row unchanged\n`);
     const apiLogs = compose(project, envFile,
       ['logs', '--no-color', '--no-log-prefix', 'api'], { capture: true });
     if (apiLogs.status !== 0) throw new Error('STAGING_LOG_CAPTURE_FAILED');
@@ -251,6 +257,10 @@ async function main() {
       baselineCompletions + e2e.requestCount, e2e.errors);
     assert.equal(completionCount - baselineCompletions, e2e.requestCount,
       'exactly one completion per E2E HTTP request');
+    const auditTotals = await assertExactCrmAudit(admin, tenants, e2e,
+      completionEvents(apiLogs.stdout).slice(baselineCompletions));
+    report.audit = 'PASS';
+    process.stdout.write(`AUDIT_EXACT_PASS A=${auditTotals.tenantA} B=${auditTotals.tenantB} total=${auditTotals.total}\n`);
     report.log_privacy = 'PASS';
     process.stdout.write(`STAGING_LOG_PRIVACY_PASS ${e2e.requestCount} completion events; closed field contract\n`);
 
@@ -281,7 +291,8 @@ async function main() {
       await waitFor(
         async () => {
           const result = await fetchJson(`${baseUrl}/health/ready`).catch(() => ({ status: 0 }));
-          return result.status === 503 ? result : null;
+          return result.status === 503 && result.body?.checks?.database === false
+            && result.body?.status === 'not_ready' ? result : null;
         },
         { timeoutMs: 20000, intervalMs: 1000, label: 'BAD_DEPLOY_UNREADY' },
       );
@@ -290,7 +301,10 @@ async function main() {
       badDeployDetected = false;
     }
     if (!badDeployDetected) throw new Error('BAD_DEPLOY_WAS_NOT_DETECTED_AS_UNREADY');
-    process.stdout.write('BAD_DEPLOY_CORRECTLY_DETECTED_AS_NOT_READY\n');
+    const badLive = await fetchJson(`${baseUrl}/health/live`);
+    if (badLive.status !== 200 || badLive.body?.status !== 'live')
+      throw new Error('BAD_DEPLOY_LIVENESS_FAILED');
+    process.stdout.write('BAD_DEPLOY_CORRECTLY_DETECTED_AS_NOT_READY (database=false; live=200)\n');
     report.bad_config = 'PASS';
 
     const rollback = compose(project, envFile, ['up', '-d', 'api']);

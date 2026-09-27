@@ -58,7 +58,7 @@ const ALLOWLIST_MATCHES = new Set([
   // staging-deploy-drill.cjs: the literal string "wrong-password" used on
   // purpose to deploy a broken config and prove the rollback drill detects
   // and recovers from it -- not a real credential.
-  'scripts/staging-deploy-drill.cjs:264',
+  'scripts/staging-deploy-drill.cjs:274',
   // server.ts/run.ts: assembles a connection string from process.env at
   // runtime (encodeURIComponent(user)/(password)) -- no literal secret here.
   // (Line numbers moved when S1-03 wired Clerk into both entrypoints; the

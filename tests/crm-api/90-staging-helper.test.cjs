@@ -13,7 +13,8 @@ const { registerCustomerRoutes } = h.load('customers/routes.js');
 const { registerVehicleRoutes } = h.load('vehicles/routes.js');
 const { ClerkIdentityProvider } = h.load('identity/clerk/clerk-identity-provider.js');
 const { migrationState, seedTwoTenants, runCrmE2e,
-  assertLogPrivacy } = require('../../scripts/staging-crm-e2e.cjs');
+  assertLogPrivacy, completionEvents, assertExactCrmAudit,
+  injectUnexpectedAudit } = require('../../scripts/staging-crm-e2e.cjs');
 
 test('S2-08 staging helper: deployed-style HTTP CRM flow, isolation, audit and privacy', async () => {
   const chunks = [];
@@ -44,6 +45,13 @@ test('S2-08 staging helper: deployed-style HTTP CRM flow, isolation, audit and p
     const e2e = await runCrmE2e(h.admin, address, identity, tenants, localFetch);
     h.assert.equal(assertLogPrivacy(chunks.join(''), e2e.sentinels, e2e.requestCount, e2e.errors),
       e2e.requestCount);
+    const completions = completionEvents(chunks.join(''));
+    h.assert.deepEqual(await assertExactCrmAudit(h.admin, tenants, e2e, completions),
+      { tenantA: 7, tenantB: 3, total: 10 });
+    await injectUnexpectedAudit(h.admin, tenants.a.tenantId, e2e.vehicleId, 'unexpected');
+    await h.assert.rejects(assertExactCrmAudit(h.admin, tenants, e2e, completions),
+      /STAGING_AUDIT_TENANT_TOTALS_FAILED/u,
+      'unexpected audit action must fail the exact audit gate');
     h.assert.equal(await migrationState(h.admin), schemaBefore);
   } finally {
     await h.closeAll(app);
