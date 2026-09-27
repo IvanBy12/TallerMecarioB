@@ -3,8 +3,9 @@ import type postgres from 'postgres';
 import { ApiError, markResourceAuthorizationSatisfied, type TenantRequestContext } from '../api/app.js';
 import { requireTenantPermission } from '../authz/authorize.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
+import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
 import { VEHICLE_FIELDS, encodeCursor, type CreateVehicleInput, type ListVehiclesQuery,
-  type PatchVehicleInput, type VehicleColumn, type VehicleValues } from './validation.js';
+  type PatchVehicleInput, type TransferOwnerInput, type VehicleColumn, type VehicleValues } from './validation.js';
 
 const TIMESTAMP_FORMAT = 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"';
 export interface RequestMeta { requestId: string; ipAddress: string; }
@@ -17,6 +18,14 @@ export type VehicleTechDto = Pick<VehicleDto, 'vehicleId' | 'plate' | 'vehicleTy
 export interface OwnershipDto {
   ownershipId: string; vehicleId: string; customerId: string; relationshipType: 'owner';
   isPrimary: true; validFrom: string; validTo: null;
+}
+export interface OwnerHistoryItemDto {
+  ownershipId: string; customerId: string; customer: { firstName: string; lastName: string };
+  relationshipType: string; isPrimary: boolean; validFrom: string; validTo: string | null;
+}
+interface OwnerRow {
+  id: string; vehicle_id: string; customer_id: string; relationship_type: 'owner';
+  is_primary: true; valid_from: string; valid_to: string | null;
 }
 interface VehicleRow extends VehicleValues {
   id: string; current_mileage_km: number | null; created_at: string; updated_at: string;
@@ -42,14 +51,16 @@ function columns(sql: postgres.Sql) {
 }
 async function audit(sql: postgres.ReservedSql, context: TenantRequestContext, meta: RequestMeta,
   action: 'vehicle.created' | 'vehicle.owner_changed' | 'vehicle.updated', vehicleId: string,
-  metadata: postgres.JSONValue, after: postgres.JSONValue | null = null): Promise<void> {
+  metadata: postgres.JSONValue, after: postgres.JSONValue | null = null,
+  before: postgres.JSONValue | null = null): Promise<void> {
   const { tenant } = context;
   await sql`INSERT INTO public.audit_logs (
     id, tenant_id, actor_type, actor_user_id, actor_membership_id, action, outcome,
     entity_type, entity_id, reason_code, before_json, after_json, metadata_json,
     request_id, ip_address
   ) VALUES (${uuidV7()}, ${tenant.tenantId}, 'user', ${tenant.userId}, ${tenant.membershipId},
-    ${action}, 'success', 'vehicle', ${vehicleId}, NULL, NULL,
+    ${action}, 'success', 'vehicle', ${vehicleId}, NULL,
+    ${before === null ? sql`NULL` : sql`${sql.json(before)}`},
     ${after === null ? sql`NULL` : sql`${sql.json(after)}`}, ${sql.json(metadata)},
     ${meta.requestId}, ${meta.ipAddress}::inet)`;
 }
@@ -59,6 +70,8 @@ export function mapVehicleDbError(error: unknown): ApiError | null {
   const name = db.constraint_name ?? db.constraint;
   if (db.code === '23505' && name === 'vehicles_tenant_plate_key')
     return new ApiError(409, 'VEHICLE_PLATE_ALREADY_EXISTS', 'The plate is already registered.');
+  if (db.code === '23505' && name === 'vehicle_owners_one_primary_uq')
+    return new ApiError(409, 'VEHICLE_OWNERSHIP_CONFLICT', 'The vehicle ownership changed.');
   if (db.code === '23503' && name === 'vehicle_owners_customer_fk') return notFound('CUSTOMER');
   if (db.code === '23503' && name === 'vehicle_owners_vehicle_fk') return notFound('VEHICLE');
   if (db.code === '23514' && ['vehicles_plate_normalized_check', 'vehicles_plate_format_check'].includes(name ?? ''))
@@ -148,4 +161,68 @@ export async function updateVehicle(context: TenantRequestContext, vehicleId: st
   if (!row) throw versionConflict();
   await audit(sql, context, meta, 'vehicle.updated', row.id, { changed_fields: changed });
   return toDto(row);
+}
+
+const ownershipConflict = () => new ApiError(409, 'VEHICLE_OWNERSHIP_CONFLICT', 'The vehicle ownership changed.');
+const ownerColumns = (sql: postgres.Sql) => sql`o.id, o.vehicle_id, o.customer_id,
+  o.relationship_type, o.is_primary,
+  pg_catalog.to_char(o.valid_from AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS valid_from,
+  CASE WHEN o.valid_to IS NULL THEN NULL ELSE
+    pg_catalog.to_char(o.valid_to AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) END AS valid_to`;
+const ownershipDto = (row: OwnerRow): OwnershipDto => ({
+  ownershipId: row.id, vehicleId: row.vehicle_id, customerId: row.customer_id,
+  relationshipType: row.relationship_type, isPrimary: row.is_primary,
+  validFrom: row.valid_from, validTo: null,
+});
+
+export async function listOwnerHistory(context: TenantRequestContext, vehicleId: string): Promise<OwnerHistoryItemDto[]> {
+  requireTenantPermission(context.tenant, 'vehicles.read');
+  const { sql, tenant } = context;
+  const [vehicle] = await sql`SELECT id FROM public.vehicles
+    WHERE tenant_id = ${tenant.tenantId} AND id = ${vehicleId}`;
+  if (!vehicle) throw notFound('VEHICLE');
+  const rows = await sql<(OwnerRow & { first_name: string; last_name: string })[]>`
+    SELECT ${ownerColumns(sql)}, c.first_name, c.last_name
+    FROM public.vehicle_owners AS o
+    JOIN public.customers AS c ON c.tenant_id = o.tenant_id AND c.id = o.customer_id
+    WHERE o.tenant_id = ${tenant.tenantId} AND o.vehicle_id = ${vehicleId}
+    ORDER BY o.valid_from DESC, o.id DESC LIMIT 200`;
+  return rows.map((row) => ({ ownershipId: row.id, customerId: row.customer_id,
+    customer: { firstName: row.first_name, lastName: row.last_name },
+    relationshipType: row.relationship_type, isPrimary: row.is_primary,
+    validFrom: row.valid_from, validTo: row.valid_to }));
+}
+
+export async function transferOwner(context: TenantRequestContext, vehicleId: string,
+  input: TransferOwnerInput, meta: RequestMeta): Promise<{ ownership: OwnershipDto; changed: boolean }> {
+  const { sql, tenant } = context;
+  const [vehicle] = await sql`SELECT id FROM public.vehicles
+    WHERE tenant_id = ${tenant.tenantId} AND id = ${vehicleId} FOR NO KEY UPDATE`;
+  if (!vehicle) throw notFound('VEHICLE');
+  const customerId = parseCanonicalUuid(input.customerId);
+  if (!customerId) throw notFound('CUSTOMER');
+  const [customer] = await sql`SELECT id FROM public.customers
+    WHERE tenant_id = ${tenant.tenantId} AND id = ${customerId}`;
+  if (!customer) throw notFound('CUSTOMER');
+  const [current] = await sql<OwnerRow[]>`SELECT ${ownerColumns(sql)} FROM public.vehicle_owners AS o
+    WHERE o.tenant_id = ${tenant.tenantId} AND o.vehicle_id = ${vehicleId}
+      AND o.is_primary = true AND o.valid_to IS NULL`;
+  if (current?.customer_id === customerId) return { ownership: ownershipDto(current), changed: false };
+  if ((current?.id ?? null) !== input.expectedCurrentOwnershipId) throw ownershipConflict();
+  const [time] = await sql<{ t: string }[]>`SELECT pg_catalog.clock_timestamp() AS t`;
+  if (!time) throw new Error('VEHICLE_OWNER_TIMESTAMP_FAILED');
+  if (current) {
+    const closed = await sql`UPDATE public.vehicle_owners SET valid_to = ${time.t}
+      WHERE tenant_id = ${tenant.tenantId} AND id = ${current.id} AND valid_to IS NULL RETURNING id`;
+    if (closed.length !== 1) throw ownershipConflict();
+  }
+  const [owner] = await sql<OwnerRow[]>`INSERT INTO public.vehicle_owners AS o
+    (id, tenant_id, vehicle_id, customer_id, relationship_type, is_primary, valid_from)
+    VALUES (${uuidV7()}, ${tenant.tenantId}, ${vehicleId}, ${customerId}, 'owner', true, ${time.t})
+    RETURNING ${ownerColumns(sql)}`;
+  if (!owner) throw new Error('VEHICLE_OWNER_INSERT_FAILED');
+  await audit(sql, context, meta, 'vehicle.owner_changed', vehicleId, { command: 'transfer' },
+    { ownership_id: owner.id, customer_id: customerId },
+    current ? { ownership_id: current.id, customer_id: current.customer_id } : null);
+  return { ownership: ownershipDto(owner), changed: true };
 }

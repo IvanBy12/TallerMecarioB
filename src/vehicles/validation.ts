@@ -37,6 +37,22 @@ const patchSchema = z.object({
   engineNumber: nullableText(80).optional(),
 }).strict();
 export interface CreateVehicleInput { customerId: string; values: VehicleValues; }
+const transferOwnerSchema = z.object({
+  customerId: z.string(), expectedCurrentOwnershipId: z.string().nullable(),
+}).strict();
+export interface TransferOwnerInput { customerId: string; expectedCurrentOwnershipId: string | null; }
+export function parseTransferOwner(body: unknown): TransferOwnerInput {
+  const parsed = transferOwnerSchema.safeParse(body);
+  if (!parsed.success) throw invalid();
+  const expected = parsed.data.expectedCurrentOwnershipId;
+  const canonicalExpected = expected === null ? null : parseCanonicalUuid(expected);
+  if (canonicalExpected === undefined) throw invalid();
+  return { customerId: parsed.data.customerId, expectedCurrentOwnershipId: canonicalExpected };
+}
+export const transferOwnerBodySchema = { type: 'object', additionalProperties: false,
+  required: ['customerId', 'expectedCurrentOwnershipId'], properties: {
+    customerId: { type: 'string' }, expectedCurrentOwnershipId: { type: ['string', 'null'] },
+  } } as const;
 export function parseCreateVehicle(body: unknown): CreateVehicleInput {
   const parsed = createSchema.safeParse(body);
   if (!parsed.success) throw invalid();

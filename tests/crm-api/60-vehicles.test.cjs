@@ -279,7 +279,7 @@ test('S2-05 PATCH: exact microsecond OCC, stale before no-op, no-op xmin, change
   assert.deepEqual(concurrent.map((r) => r.status).sort(), [200, 409]);
 });
 
-test('S2-05 strict input, restricted runtime RLS/grants and no S2-06 routes', async () => {
+test('S2-05 strict input and restricted runtime RLS/grants; ownership history route is registered', async () => {
   const { a, b } = await h.twoTenants();
   const ca = await customer(a.owner, a.tenantId);
   const v = await vehicle(a.owner, a.tenantId, ca);
@@ -326,9 +326,10 @@ test('S2-05 strict input, restricted runtime RLS/grants and no S2-06 routes', as
   await assert.rejects(h.workerPool`SELECT id FROM public.vehicles`, (e) => e.code === '42501');
   assert.equal((await h.call(app, { subject: a.owner.subject, method: 'DELETE',
     url: `/api/v1/vehicles/${v.vehicleId}`, tenantId: a.tenantId })).status, 404);
-  for (const url of [`/api/v1/vehicles/${v.vehicleId}/owners`]) {
-    assert.equal((await h.call(app, { subject: a.owner.subject, url, tenantId: a.tenantId })).status, 404);
-  }
+  const history = await h.call(app, { subject: a.owner.subject,
+    url: `/api/v1/vehicles/${v.vehicleId}/owners`, tenantId: a.tenantId });
+  assert.equal(history.status, 200);
+  assert.equal(history.json.owners.length, 1);
 });
 
 test('S2-05 service requires vehicle_owners.manage in addition to route vehicles.create', async () => {
