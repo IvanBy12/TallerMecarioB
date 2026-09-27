@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -54,6 +55,9 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
 
       - name: Build
         run: npm run build
@@ -115,6 +119,17 @@ jobs:
       - name: Final cross-tenant isolation (S1-08)
         run: npm run test:cross-tenant:final:ci
 
+      # Each CRM suite creates and cleans up its own disposable database.
+      # Keep upgrade and API runs serial with the other PostgreSQL suites.
+      - name: CRM PostgreSQL integrity (S2-01 to S2-03)
+        run: npm run test:crm:db:ci
+
+      - name: CRM migration upgrade (S2-01 to S2-03)
+        run: npm run test:crm:upgrade:ci
+
+      - name: CRM customer, vehicle, and ownership API (S2-04 to S2-06)
+        run: npm run test:crm:api:ci
+
       - name: Outbox worker regression
         run: npm run test:outbox:ci
 
@@ -123,6 +138,72 @@ jobs:
 
       - name: Concurrent-migration lock protection
         run: npm run test:db:migration-lock:ci
+
+      - name: RBAC documentation parity
+        run: npm run rbac:check-doc-parity
+
+  # The expensive mutation gate runs on integration and explicit pre-release
+  # dispatch, after the regular validation job has passed.
+  mutations:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/sprint-2')
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: tallermecario_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tallermecario_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/tallermecario_ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Mutation runners create disposable databases and must run serially.
+      - name: Sprint 1 role mutations
+        run: npm run test:member-roles:mutations:ci
+
+      - name: Sprint 1 membership lifecycle mutations
+        run: npm run test:member-lifecycle:mutations:ci
+
+      - name: Sprint 1 audit mutations
+        run: npm run test:audit:mutations:ci
+
+      - name: Sprint 1 cross-tenant mutations
+        run: npm run test:cross-tenant:mutations:ci
+
+      - name: CRM database mutations
+        run: npm run test:crm:mutations:ci
+
+      - name: CRM customer API mutations
+        run: npm run test:crm:api:mutations:ci
+
+      - name: CRM vehicle API mutations
+        run: npm run test:crm:vehicle:mutations:ci
+
+      - name: CRM ownership API mutations
+        run: npm run test:crm:ownership:mutations:ci
 
   staging:
     needs: validate
