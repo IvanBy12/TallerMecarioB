@@ -38,15 +38,16 @@ const SECRET_PATTERNS = [
 // live secret.
 const ALLOWLIST_FILES = new Set(['scripts/secret-scan.cjs', '.env.example']);
 
+// Both CI jobs use this public, loopback-only password for their disposable
+// PostgreSQL service. Match the entire line instead of a line number: adding
+// workflow steps must not accidentally exempt a different secret.
+const CI_POSTGRES_PLACEHOLDER = 'DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/tallermecario_ci';
+
 // Exact, reviewed false positives, each with why it is not a real secret
 // (gitleaks-style fingerprint allowlist, kept in source so it is visible in
 // review instead of a silent side file). Add an entry here only for a
 // verified non-secret; never to silence a real finding.
 const ALLOWLIST_MATCHES = new Set([
-  // GitHub Actions `services.postgres` container: fixed, publicly-documented
-  // placeholder credential for an ephemeral CI-only loopback database, not a
-  // real secret -- same convention as the Postgres Docker image's own docs.
-  '.github/workflows/ci.yml:30',
   // docker-compose.staging.yml: `${VAR}` compose variable interpolation,
   // not a literal credential -- the real values live only in the gitignored,
   // per-run-generated `staging.env` (see staging.env.example).
@@ -103,6 +104,7 @@ function scanTrackedFiles() {
     const lines = content.split('\n');
     lines.forEach((line, idx) => {
       const lineNumber = idx + 1;
+      if (file === '.github/workflows/ci.yml' && line.trim() === CI_POSTGRES_PLACEHOLDER) return;
       if (ALLOWLIST_MATCHES.has(`${file}:${lineNumber}`)) return;
       for (const { name, regex } of SECRET_PATTERNS) {
         if (regex.test(line)) findings.push({ file, line: lineNumber, pattern: name });
