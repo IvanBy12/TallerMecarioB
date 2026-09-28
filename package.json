@@ -74,11 +74,20 @@
     "test:crm:api:mutations": "node --env-file=.env scripts/test-crm-api-mutations.cjs",
     "test:crm:api:mutations:ci": "node scripts/test-crm-api-mutations.cjs",
     "test:crm:ownership:mutations": "node --env-file=.env scripts/test-ownership-api-mutations.cjs",
+    "test:crm:ownership:mutations:ci": "node scripts/test-ownership-api-mutations.cjs",
+    "test:crm:vehicle:mutations": "node --env-file=.env scripts/test-vehicle-api-mutations.cjs",
+    "test:crm:vehicle:mutations:ci": "node scripts/test-vehicle-api-mutations.cjs",
+    "test:request-logging:mutation": "node --env-file=.env scripts/test-request-logging-mutation.cjs",
+    "test:request-logging:mutation:ci": "node scripts/test-request-logging-mutation.cjs",
+    "test:crm:db:ci": "node scripts/test-crm-db.cjs",
+    "test:crm:upgrade:ci": "node scripts/test-crm-migration-upgrade.cjs",
+    "test:crm:mutations:ci": "node scripts/test-crm-mutations.cjs",
     "smoke:clerk:dev": "npm run build && node --env-file=.env scripts/smoke-clerk-dev.cjs",
     "rbac:generate-seed-sql": "node scripts/generate-rbac-seed-sql.cjs",
     "rbac:check-doc-parity": "node scripts/check-rbac-matrix-doc.cjs",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "lint": "biome lint src tests scripts drizzle.config.ts tsconfig.json tsconfig.build.json package.json",
+    "test": "npm run test:authz && npm run test:tenant-context-core && npm run test:wompi"
   },
   "repository": {
     "type": "git",
@@ -104,6 +113,7 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.14",
     "@types/node": "^26.6.2",
     "drizzle-kit": "^0.31.10",
     "typescript": "^7.0.2"

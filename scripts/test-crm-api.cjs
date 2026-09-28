@@ -20,7 +20,7 @@
 
 const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
-const { mkdtempSync, readdirSync, rmSync } = require('node:fs');
+const { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const postgres = require('postgres');
@@ -144,6 +144,16 @@ async function main() {
     await applyMutation('js', { compiledRoot });
     await applyVehicleMutation('js', { compiledRoot });
     await applyOwnershipMutation('js', { compiledRoot });
+    if (process.env.S208_LOG_MUTATION === 'request-url') {
+      const file = join(compiledRoot, 'api', 'app.js');
+      const source = readFileSync(file, 'utf8');
+      const anchor = "route: request.routeOptions.url ?? 'unmatched',";
+      if (!source.includes(anchor)) throw new Error('MUTATION_ANCHOR_NOT_FOUND request-url');
+      writeFileSync(file, source.replace(anchor, 'route: request.url,'));
+      process.stdout.write('S208_LOG_MUTATION_APPLIED request-url\n');
+    } else if (process.env.S208_LOG_MUTATION) {
+      throw new Error(`UNKNOWN_MUTATION ${process.env.S208_LOG_MUTATION}`);
+    }
 
     const files = readdirSync('tests/crm-api')
       .filter((name) => name.endsWith('.test.cjs'))

@@ -204,6 +204,16 @@ Un FAILED se corrige y se vuelve a ejecutar; no se cambia manualmente a PASSED.
 
 **Staging de Sprint 2 (S2-02, D-23):** el drill remoto de CI (`staging:deploy-drill:ci`) cuenta como staging de Sprint 2 solo si S2-08 lo amplía con la migración 0018, el ledger esperado, health/smoke, el E2E CRM customer → vehicle → búsqueda → cambio de propietario → historial con 2 tenants, rollback y la evidencia del run remoto. No se aprovisiona staging cloud solo para Sprint 2; el staging cloud real se resuelve antes del piloto según roadmap/ADR-007. Los criterios transversales de lint y observabilidad se cierran explícitamente en S2-08 con las convenciones/herramientas aprobadas del repositorio; S2-02 no introduce herramientas.
 
+**S2-08 — criterios transversales aprobados (evidencia remota T9 completa; revisión independiente aceptada):**
+
+- [ ] `npm run lint` usa Biome como dependencia solo de desarrollo, cubre razonablemente fuentes `src/`, pruebas `tests/` y utilidades `scripts/`, y falla el CI ante infracciones. Typecheck es separado; no se usa ESLint/`typescript-eslint` ni se disfraza `tsc` de lint. La adopción no exige reformateo masivo.
+- [ ] Logger integrado de Fastify/Pino con `disableRequestLogging: true` y sin serialización automática del request crudo; exactamente un log estructurado de finalización por request manejado. Campos permitidos: `request_id`, `method`, plantilla `route`, `status_code`, `error_code` cuando aplique, `duration_ms`, y `tenant_id`/`user_id`/`membership_id` solo desde contexto verificado del servidor. Redacción central; sin body, query/valores, URL cruda, Authorization/Cookie, tokens/secretos ni PII CRM.
+- [ ] Pruebas de logs: `request_id` y plantilla de ruta presentes; búsqueda/creación/error CRM sin valores de query, PII, token o cookie en logs; `error_code` donde aplique; 500 `INTERNAL_ERROR` genérico para el cliente con diagnóstico técnico seguro en log servidor. Metrics, traces, dashboards SLO, alertas y `trace_id` quedan después de Sprint 2.
+
+**Aclaración de campos para S2-08:** `level` es el único metadato de envoltura Pino aprobado además del payload funcional cerrado del evento; no se cuenta como campo funcional. `time` sigue deshabilitado. Ningún otro metadato automático (`pid`, `hostname`, `req`, `res`, URL cruda, query, headers, body u otros) está permitido.
+
+Estas decisiones cierran S2-08 DOC_GAP-01 y DOC_GAP-02 a nivel de contrato. **Sprint 2 Quality Gate: PASSED (2026-09-28).** En el commit `9e0254d4056e614fdc67ea110e785d761de43ff9`, el [run CI #36390497888](https://github.com/IvanBy12/TallerMecarioB/actions/runs/36390497888) concluyó `validate=success`, `mutations=success` y `staging=success` sobre el mismo SHA. Los nueve runners de mutación mataron 122/122 mutantes (0 survived, 0 invalid, 0 apply failures) en Node 22. El staging desechable pasó 20/20 gates, ledger 19/19 hasta 0018, idempotencia 19/19, CRM E2E de dos tenants, historial, auditoría exacta, privacidad de logs, recuperación de mala configuración, preservación de datos y limpieza. Evidencia detallada: `docs/SPRINT-2-FINAL-QUALITY-GATE.md` en la rama T9. La revisión independiente aceptó la evidencia; no hay defectos bloqueantes. Este cierre documental no formaba parte del SHA probado y no implica fusión a `main`.
+
 # 6. Sprint 3 — Recepción
 
 - [ ]  Buscar placa.

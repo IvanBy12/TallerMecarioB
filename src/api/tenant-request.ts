@@ -121,6 +121,21 @@ interface TenantRequestState {
 
 const tenantRequestStates = new WeakMap<FastifyRequest, TenantRequestState>();
 
+/** Logging may read only IDs from the server-validated tenant context, even
+ * after the transaction has closed. Never resolve these from request input. */
+export function verifiedTenantLogIds(request: FastifyRequest): {
+  tenant_id: string;
+  user_id: string;
+  membership_id: string;
+} | undefined {
+  const tenant = tenantRequestStates.get(request)?.context.tenant;
+  return tenant ? {
+    tenant_id: tenant.tenantId,
+    user_id: tenant.userId,
+    membership_id: tenant.membershipId,
+  } : undefined;
+}
+
 export function getTenantRequestContext(request: FastifyRequest): TenantRequestContext {
   const state = tenantRequestStates.get(request);
   if (state?.status !== 'open') {

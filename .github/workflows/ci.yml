@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -54,6 +55,9 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
 
       - name: Build
         run: npm run build
@@ -115,6 +119,17 @@ jobs:
       - name: Final cross-tenant isolation (S1-08)
         run: npm run test:cross-tenant:final:ci
 
+      # Each CRM suite creates and cleans up its own disposable database.
+      # Keep upgrade and API runs serial with the other PostgreSQL suites.
+      - name: CRM PostgreSQL integrity (S2-01 to S2-03)
+        run: npm run test:crm:db:ci
+
+      - name: CRM migration upgrade (S2-01 to S2-03)
+        run: npm run test:crm:upgrade:ci
+
+      - name: CRM customer, vehicle, and ownership API (S2-04 to S2-06)
+        run: npm run test:crm:api:ci
+
       - name: Outbox worker regression
         run: npm run test:outbox:ci
 
@@ -124,10 +139,39 @@ jobs:
       - name: Concurrent-migration lock protection
         run: npm run test:db:migration-lock:ci
 
-  staging:
+      - name: RBAC documentation parity
+        run: npm run rbac:check-doc-parity
+
+  # The expensive mutation gate runs on integration, the Sprint 2 final gate
+  # branch (S2-08 T9: dispatch is unavailable until ci.yml reaches main) and
+  # explicit pre-release dispatch, after the regular validation job has passed.
+  mutations:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/integration/sprint-2' || github.ref == 'refs/heads/task/s2-08-final-quality-gate'))
     needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 180
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: tallermecario_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tallermecario_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/tallermecario_ci
+      # Mutation runners classify kills from spec-reporter "✖ name (Nms)" lines.
+      # Node 22 defaults to TAP when stdout is not a TTY, which turns every
+      # killed mutant into INVALID; pin the reporter the runners parse.
+      NODE_OPTIONS: --test-reporter=spec
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -141,14 +185,54 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Sprint 0: no real cloud staging account is provisioned for this
-      # project yet (see docs/ADR-007 -- portability principle, not a
-      # decided provider). This drill IS staging for now: it builds the
-      # ADR-007 image, brings up an isolated, disposable docker-compose
-      # stack (own Postgres, own network, its own generated secrets -- see
-      # staging.env.example), runs migrations through the concurrency-safe
-      # lock, deploys the API, smoke-tests it, then proves a bad deploy is
-      # detected and rolled back. Everything is torn down at the end
-      # regardless of outcome.
-      - name: Build image, deploy to local "staging", migrate, smoke test, rollback drill
+      # Mutation runners create disposable databases and must run serially.
+      - name: Sprint 1 role mutations
+        run: npm run test:member-roles:mutations:ci
+
+      - name: Sprint 1 membership lifecycle mutations
+        run: npm run test:member-lifecycle:mutations:ci
+
+      - name: Sprint 1 audit mutations
+        run: npm run test:audit:mutations:ci
+
+      - name: Sprint 1 cross-tenant mutations
+        run: npm run test:cross-tenant:mutations:ci
+
+      - name: CRM database mutations
+        run: npm run test:crm:mutations:ci
+
+      - name: CRM customer API mutations
+        run: npm run test:crm:api:mutations:ci
+
+      - name: CRM vehicle API mutations
+        run: npm run test:crm:vehicle:mutations:ci
+
+      - name: CRM ownership API mutations
+        run: npm run test:crm:ownership:mutations:ci
+
+      - name: Request logging privacy mutation
+        run: npm run test:request-logging:mutation:ci
+
+  staging:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Sprint 2 extends the disposable Sprint 0 stack with a hermetic Clerk
+      # verifier, migration ledger/idempotency, deployed CRM E2E for two
+      # tenants, logging privacy and data-preserving bad-config recovery.
+      # The drill writes gate results to GITHUB_STEP_SUMMARY on pass or fail.
+      - name: Build, migrate, CRM E2E and rollback in disposable staging
         run: npm run staging:deploy-drill:ci

@@ -80,7 +80,6 @@ test('S2-06 transfer and retry preserve vehicle, history and minimized audit', a
   assert.equal(db.length, 2);
   assert.equal(db[0].id, original.ownershipId);
   assert.equal(db[1].id, o.ownershipId);
-  assert.equal(db[0].valid_to.getTime(), db[1].valid_from.getTime());
   const [equal] = await h.admin`SELECT (a.valid_to = b.valid_from) AS same,
     (b.valid_from > a.valid_from) AS later FROM public.vehicle_owners a
     JOIN public.vehicle_owners b ON b.id=${o.ownershipId} WHERE a.id=${original.ownershipId}`;
@@ -252,6 +251,68 @@ test('S2-06 RBAC guard survives vehicles.update; technician denied even when ass
   }
   assert.equal((await rows(v.vehicleId)).length, 1);
   assert.equal((await audits(v.vehicleId)).length, 1);
+});
+
+test('S2-06 GET owners independently requires customers.read while vehicle detail retains vehicles.read', async () => {
+  const { a } = await h.twoTenants();
+  const ca = await customer(a.owner, a.tenantId);
+  const { vehicle: v } = await vehicle(a.owner, a.tenantId, ca);
+  const [role] = await h.admin`SELECT id FROM public.roles WHERE code='service_advisor'`;
+  const [customerPermission] = await h.admin`SELECT id FROM public.permissions WHERE code='customers.read'`;
+  const [vehiclePermission] = await h.admin`SELECT id FROM public.permissions WHERE code='vehicles.read'`;
+  const [grant] = await h.admin`SELECT resource_scope FROM public.role_permissions
+    WHERE role_id=${role.id} AND permission_id=${customerPermission.id}`;
+  assert.ok(grant, 'service_advisor must initially have customers.read');
+  await h.admin`DELETE FROM public.role_permissions
+    WHERE role_id=${role.id} AND permission_id=${customerPermission.id}`;
+  try {
+    const [retained] = await h.admin`SELECT count(*)::int AS n FROM public.role_permissions
+      WHERE role_id=${role.id} AND permission_id=${vehiclePermission.id}`;
+    assert.equal(retained.n, 1);
+    const denied = await history(a.advisor, a.tenantId, v.vehicleId);
+    assert.equal(denied.status, 403);
+    assert.equal(code(denied), 'PERMISSION_DENIED');
+    const detail = await h.call(app, { subject: a.advisor.subject, tenantId: a.tenantId,
+      url: `/api/v1/vehicles/${v.vehicleId}` });
+    assert.equal(detail.status, 200, JSON.stringify(detail.json));
+  } finally {
+    await h.admin`INSERT INTO public.role_permissions (role_id,permission_id,resource_scope)
+      VALUES (${role.id},${customerPermission.id},${grant.resource_scope}) ON CONFLICT DO NOTHING`;
+  }
+});
+
+test('S2-06 transfers preserve exact PostgreSQL microseconds across consecutive owners', async () => {
+  const clock = await h.admin`SELECT pg_catalog.to_char(
+    pg_catalog.clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS t
+    FROM pg_catalog.generate_series(1, 64)`;
+  const hasSubMillisecond = (value) => Number(value.slice(-4, -1)) !== 0;
+  assert.ok(clock.some((sample) => hasSubMillisecond(sample.t)),
+    'POSTGRES_CLOCK_LACKS_SUB_MS_PRECISION');
+  const { a } = await h.twoTenants();
+  const customers = [];
+  for (let i = 0; i < 4; i++) customers.push(await customer(a.owner, a.tenantId));
+  const { vehicle: v, ownership: first } = await vehicle(a.owner, a.tenantId, customers[0]);
+  let priorId = first.ownershipId;
+  let sawSubMillisecond = false;
+  for (const nextCustomer of customers.slice(1)) {
+    const result = await transfer(a.owner, a.tenantId, v.vehicleId, body(nextCustomer, priorId));
+    assert.equal(result.status, 201, JSON.stringify(result.json));
+    const nextId = result.json.ownership.ownershipId;
+    const [boundary] = await h.admin`SELECT previous.valid_to = successor.valid_from AS same,
+      pg_catalog.to_char(previous.valid_to AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS closed,
+      pg_catalog.to_char(successor.valid_from AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS opened
+      FROM public.vehicle_owners AS previous
+      JOIN public.vehicle_owners AS successor ON successor.id=${nextId}
+      WHERE previous.id=${priorId}`;
+    assert.equal(boundary.same, true, 'close and successor must share one exact database timestamp');
+    assert.equal(boundary.closed, boundary.opened);
+    assert.equal(result.json.ownership.validFrom, boundary.opened);
+    sawSubMillisecond ||= hasSubMillisecond(boundary.opened);
+    priorId = nextId;
+  }
+  assert.ok(sawSubMillisecond, 'transfers must retain real sub-millisecond precision');
 });
 
 test('S2-06 audit failure rolls back close and successor', async () => {

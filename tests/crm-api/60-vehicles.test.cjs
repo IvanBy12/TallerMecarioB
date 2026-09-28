@@ -34,6 +34,7 @@ const list = (actor, tenantId, query = '') => h.call(app, {
 const patch = (actor, tenantId, id, body) => h.call(app, {
   subject: actor.subject, method: 'PATCH', url: `/api/v1/vehicles/${id}`, tenantId, body,
 });
+const cursor = (payload) => Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
 async function customer(actor, tenantId) {
   const r = await h.createCustomer(app, actor, tenantId, h.validCustomer());
   assert.equal(r.status, 201, JSON.stringify(r.json));
@@ -54,6 +55,11 @@ async function audits(id) {
   return h.admin`SELECT action, tenant_id, actor_type, actor_user_id, actor_membership_id,
     before_json, after_json, metadata_json, user_agent, request_id FROM public.audit_logs
     WHERE entity_type='vehicle' AND entity_id=${id} ORDER BY created_at, id`;
+}
+async function vehicleAuditCount(tenantId) {
+  const [result] = await h.admin`SELECT count(*)::int AS n FROM public.audit_logs
+    WHERE tenant_id=${tenantId} AND action LIKE 'vehicle.%'`;
+  return result.n;
 }
 async function count(tenantId) {
   const [r] = await h.admin`SELECT count(*)::int AS n FROM public.vehicles WHERE tenant_id=${tenantId}`;
@@ -147,6 +153,62 @@ test('S2-05 POST rollback: invalid/foreign customer, owner insert failure, or ei
   }
 });
 
+test('S2-05 boundary: one and sixteen character plates, model-year endpoints, media type and absent archive', async () => {
+  const { a } = await h.twoTenants();
+  const ca = await customer(a.owner, a.tenantId);
+  const single = await create(a.owner, a.tenantId, valid(ca, 'a', { modelYear: 1886 }));
+  assert.equal(single.status, 201, JSON.stringify(single.json));
+  assert.equal(single.json.vehicle.plate, 'A');
+  assert.equal(single.json.vehicle.modelYear, 1886);
+  assert.equal((await row(single.json.vehicle.vehicleId)).plate, 'A');
+  assert.deepEqual((await list(a.owner, a.tenantId, 'plate=a')).json.vehicles.map((v) => v.vehicleId),
+    [single.json.vehicle.vehicleId]);
+  const longest = await create(a.owner, a.tenantId,
+    valid(ca, 'ABCDEFGHIJKLMNOP', { modelYear: 2200 }));
+  assert.equal(longest.status, 201, JSON.stringify(longest.json));
+  assert.equal(longest.json.vehicle.plate, 'ABCDEFGHIJKLMNOP');
+  assert.equal(longest.json.vehicle.modelYear, 2200);
+  const firstPatch = await patch(a.owner, a.tenantId, single.json.vehicle.vehicleId,
+    { expectedUpdatedAt: single.json.vehicle.updatedAt, modelYear: 2200 });
+  assert.equal(firstPatch.status, 200, JSON.stringify(firstPatch.json));
+  assert.equal(firstPatch.json.vehicle.modelYear, 2200);
+  const secondPatch = await patch(a.owner, a.tenantId, longest.json.vehicle.vehicleId,
+    { expectedUpdatedAt: longest.json.vehicle.updatedAt, modelYear: 1886 });
+  assert.equal(secondPatch.status, 200, JSON.stringify(secondPatch.json));
+  assert.equal(secondPatch.json.vehicle.modelYear, 1886);
+  for (const year of [1885, 2201]) {
+    assert.equal((await create(a.owner, a.tenantId,
+      valid(ca, `Y${year}`, { modelYear: year }))).status, 400);
+    const rejected = await patch(a.owner, a.tenantId, single.json.vehicle.vehicleId,
+      { expectedUpdatedAt: firstPatch.json.vehicle.updatedAt, modelYear: year });
+    assert.equal(rejected.status, 400);
+    assert.equal(code(rejected), 'REQUEST_VALIDATION_FAILED');
+  }
+  const before = await audits(single.json.vehicle.vehicleId);
+  const beforeTenantAudits = await vehicleAuditCount(a.tenantId);
+  for (const [method, url] of [
+    ['POST', '/api/v1/vehicles'],
+    ['PATCH', `/api/v1/vehicles/${single.json.vehicle.vehicleId}`],
+  ]) {
+    const unsupported = await h.call(app, { subject: a.owner.subject, tenantId: a.tenantId,
+      method, url, body: method === 'POST' ? valid(ca, 'MEDIA1') :
+        { expectedUpdatedAt: firstPatch.json.vehicle.updatedAt, brand: 'Changed' },
+      headers: { 'content-type': 'text/plain' } });
+    assert.equal(unsupported.status, 415, JSON.stringify(unsupported.json));
+    assert.equal(code(unsupported), 'UNSUPPORTED_MEDIA_TYPE');
+  }
+  assert.deepEqual(await audits(single.json.vehicle.vehicleId), before);
+  assert.equal(await vehicleAuditCount(a.tenantId), beforeTenantAudits);
+  assert.equal(app.hasRoute({ method: 'DELETE', url: '/api/v1/vehicles/:vehicleId' }), false);
+  assert.equal(app.hasRoute({ method: 'POST', url: '/api/v1/vehicles/:vehicleId/archive' }), false);
+  for (const [method, url] of [
+    ['DELETE', `/api/v1/vehicles/${single.json.vehicle.vehicleId}`],
+    ['POST', `/api/v1/vehicles/${single.json.vehicle.vehicleId}/archive`],
+  ]) assert.equal((await h.call(app, { subject: a.owner.subject, tenantId: a.tenantId, method, url })).status, 404);
+  assert.deepEqual(await audits(single.json.vehicle.vehicleId), before);
+  assert.equal(await vehicleAuditCount(a.tenantId), beforeTenantAudits);
+});
+
 test('S2-05 RBAC, anti-oracle, exact plate search and keyset pagination', async () => {
   const { a, b } = await h.twoTenants();
   const ca = await customer(a.owner, a.tenantId);
@@ -166,6 +228,17 @@ test('S2-05 RBAC, anti-oracle, exact plate search and keyset pagination', async 
   assert.equal((await list(a.owner, a.tenantId, 'plate=Q00')).json.vehicles.length, 0);
   for (const query of ['limit=0', 'limit=101', 'cursor=bad', 'plate=%C3%B1', 'q=Q000', 'plate=Q000&plate=Q001'])
     assert.equal((await list(a.owner, a.tenantId, query)).status, 400, query);
+  for (const payload of [
+    { v: 2, id: created[0].vehicleId },
+    { v: 1, id: created[0].vehicleId.toUpperCase() },
+    { v: 1, id: created[0].vehicleId, extra: true },
+    [1, created[0].vehicleId],
+    'not-an-object',
+  ]) {
+    const response = await list(a.owner, a.tenantId, `cursor=${cursor(payload)}`);
+    assert.equal(response.status, 400, JSON.stringify(payload));
+    assert.equal(code(response), 'REQUEST_VALIDATION_FAILED');
+  }
   const foreignRead = await get(a.owner, a.tenantId, foreign.vehicleId);
   assert.equal(errorShape(foreignRead), errorShape(await get(a.owner, a.tenantId, randomUUID())));
   assert.equal(errorShape(foreignRead), errorShape(await get(a.owner, a.tenantId, 'bad')));
@@ -228,7 +301,7 @@ test('S2-05 technician detail: active lead/support only; released and QC-only re
     { expectedUpdatedAt: v.updatedAt, model: 'X' })).status, 403);
 });
 
-test('S2-05 PATCH: exact microsecond OCC, stale before no-op, no-op xmin, changed-fields order and concurrency', async () => {
+test('S2-05 PATCH: exact microsecond OCC, stale before no-op, no-op xmin and changed-fields order', async () => {
   const { a } = await h.twoTenants();
   const ca = await customer(a.owner, a.tenantId);
   const v = await vehicle(a.owner, a.tenantId, ca);
@@ -271,12 +344,72 @@ test('S2-05 PATCH: exact microsecond OCC, stale before no-op, no-op xmin, change
   assert.equal((await patch(a.owner, a.tenantId, v.vehicleId,
     { expectedUpdatedAt: exact.updatedAt, plate: 'XYZ789' })).status, 409,
   'stale identical payload conflicts before semantic no-op');
-  const token = updated.json.vehicle.updatedAt;
-  const concurrent = await Promise.all([
-    patch(a.owner, a.tenantId, v.vehicleId, { expectedUpdatedAt: token, model: 'Uno' }),
-    patch(a.admin, a.tenantId, v.vehicleId, { expectedUpdatedAt: token, model: 'Dos' }),
-  ]);
-  assert.deepEqual(concurrent.map((r) => r.status).sort(), [200, 409]);
+});
+
+async function blockedPatch(a, vehicleId, token, holderWrite, expectedStatus) {
+  const holder = await h.admin.reserve();
+  await holder.unsafe('BEGIN');
+  const [backend] = await holder`SELECT pg_catalog.pg_backend_pid() AS pid`;
+  await holder`SELECT id FROM public.vehicles WHERE tenant_id=${a.tenantId}
+    AND id=${vehicleId} FOR NO KEY UPDATE`;
+  let settled = false;
+  try {
+    const pending = patch(a.owner, a.tenantId, vehicleId,
+      { expectedUpdatedAt: token, model: 'WaitingPatch' }).finally(() => { settled = true; });
+    let blocked = false;
+    for (let i = 0; i < 200; i++) {
+      const waits = await h.admin`SELECT pid FROM pg_catalog.pg_stat_activity
+        WHERE datname=pg_catalog.current_database()
+          AND ${backend.pid} = ANY(pg_catalog.pg_blocking_pids(pid))`;
+      if (waits.length) { blocked = true; break; }
+      if (settled) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(blocked, true, 'PATCH must have a PostgreSQL blocking edge to holder');
+    assert.equal(settled, false, 'PATCH remains pending while holder owns row lock');
+    if (holderWrite) await holder`UPDATE public.vehicles SET model='HolderChanged',
+      updated_at=GREATEST(pg_catalog.clock_timestamp(), updated_at + interval '1 microsecond')
+      WHERE tenant_id=${a.tenantId} AND id=${vehicleId}`;
+    await holder.unsafe('COMMIT');
+    const result = await pending;
+    assert.equal(result.status, expectedStatus, JSON.stringify(result.json));
+    return result;
+  } finally {
+    await holder.unsafe('ROLLBACK').catch(() => undefined);
+    holder.release();
+  }
+}
+
+test('S2-05 PATCH: lock-proven wait succeeds after unchanged holder and conflicts after holder update', async () => {
+  const { a } = await h.twoTenants();
+  const ca = await customer(a.owner, a.tenantId);
+  const v = await vehicle(a.owner, a.tenantId, ca);
+  const originalAudit = (await audits(v.vehicleId)).length;
+  const first = await blockedPatch(a, v.vehicleId, v.updatedAt, false, 200);
+  assert.equal(first.json.vehicle.model, 'WaitingPatch');
+  assert.equal((await audits(v.vehicleId)).length, originalAudit + 1);
+  const token = first.json.vehicle.updatedAt;
+  const conflict = await blockedPatch(a, v.vehicleId, token, true, 409);
+  assert.equal(code(conflict), 'RESOURCE_VERSION_CONFLICT');
+  assert.equal((await row(v.vehicleId)).model, 'HolderChanged');
+  assert.equal((await audits(v.vehicleId)).length, originalAudit + 1);
+});
+
+test('S2-05 PATCH audit failure rolls back row, timestamp, xmin and audit', async () => {
+  const { a } = await h.twoTenants();
+  const ca = await customer(a.owner, a.tenantId);
+  const v = await vehicle(a.owner, a.tenantId, ca);
+  const before = await row(v.vehicleId);
+  const beforeAudit = await audits(v.vehicleId);
+  const remove = await h.injectFailure('audit_logs', "NEW.action = 'vehicle.updated'");
+  try {
+    const response = await patch(a.owner, a.tenantId, v.vehicleId,
+      { expectedUpdatedAt: v.updatedAt, brand: 'MustRollback' });
+    assert.equal(response.status, 500, JSON.stringify(response.json));
+    assert.equal(code(response), 'INTERNAL_ERROR');
+  } finally { await remove(); }
+  assert.deepEqual(await row(v.vehicleId), before);
+  assert.deepEqual(await audits(v.vehicleId), beforeAudit);
 });
 
 test('S2-05 strict input and restricted runtime RLS/grants; ownership history route is registered', async () => {

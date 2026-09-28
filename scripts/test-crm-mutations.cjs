@@ -20,6 +20,8 @@ const mutations = {
   M10: ['DO $crm_hardening_checks$', 'GRANT MAINTAIN ON TABLE public.customers TO tallermecario_api;\n--> statement-breakpoint\nDO $crm_hardening_checks$'],
   M11: ['ALTER TABLE public.vehicles ADD CONSTRAINT vehicles_plate_format_check\n\tCHECK (plate COLLATE "C" ~ \'^[A-Z0-9]{1,16}$\');',
     'ALTER TABLE public.vehicles ADD CONSTRAINT vehicles_plate_format_check\n\tCHECK (TRUE);'],
+  M12: ["CHECK (plate COLLATE \"C\" ~ '^[A-Z0-9]{1,16}$');",
+    "CHECK (plate COLLATE \"C\" ~ '^[A-Z0-9]{2,16}$');"],
 };
 
 let failed = false;
@@ -42,7 +44,7 @@ for (const [name,[anchor,replacement]] of selected) {
     const output = `${r.stdout || ''}${r.stderr || ''}`;
     const migrationRejected = output.includes('Migration failed.') &&
       ['M1','M2','M3','M6','M7','M10'].includes(name);
-    const testRejected = /CRM_TEST_COUNTS PASS=\d+ FAIL=[1-9]/u.test(output) && ['M4','M5','M11'].includes(name);
+    const testRejected = /CRM_TEST_COUNTS PASS=\d+ FAIL=[1-9]/u.test(output) && ['M4','M5','M11','M12'].includes(name);
     const preflightRejected = name==='M8' && output.includes('preflight must see legacy rows before ADD CONSTRAINT');
     const withCheckRejected = name==='M9' && output.includes('CRM_WITH_CHECK_PROBE_ACCEPTED_MOVE');
     const teardownClean = output.includes('CRM_TEARDOWN dbs=0 logins=0') || output.includes('CRM_UPGRADE_TEARDOWN dbs=0 logins=0');
@@ -59,7 +61,7 @@ for (const [name,[anchor,replacement]] of selected) {
 if (failed) process.exitCode=1;
 else {
   if (!process.env.CRM_MUTATION) {
-    process.stdout.write('CRM_MUTATIONS_M1_M11_PASS 11/11 killed\n');
+    process.stdout.write('CRM_MUTATIONS_M1_M12_PASS 12/12 killed\n');
   }
   process.stdout.write(`CRM_MUTATIONS_PASS ${selected.length}/${selected.length} killed\n`);
 }
