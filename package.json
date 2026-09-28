@@ -90,6 +90,8 @@
     "test:reception:upgrade:ci": "node scripts/test-reception-migration-upgrade.cjs",
     "test:reception:mutations": "node --env-file=.env scripts/test-reception-mutations.cjs",
     "test:reception:mutations:ci": "node scripts/test-reception-mutations.cjs",
+    "test:reception:api": "node --env-file=.env scripts/test-reception-api.cjs",
+    "test:reception:api:ci": "node scripts/test-reception-api.cjs",
     "smoke:clerk:dev": "npm run build && node --env-file=.env scripts/smoke-clerk-dev.cjs",
     "rbac:generate-seed-sql": "node scripts/generate-rbac-seed-sql.cjs",
     "rbac:check-doc-parity": "node scripts/check-rbac-matrix-doc.cjs",
