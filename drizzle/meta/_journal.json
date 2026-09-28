@@ -134,6 +134,13 @@
       "when": 1790371765309,
       "tag": "0018_s2_03_crm_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1790611200000,
+      "tag": "0019_s3_02_reception_invariants",
+      "breakpoints": true
     }
   ]
 }

@@ -815,6 +815,9 @@ export const receptions = pgTable(
   (t) => [
     unique('receptions_tenant_id_key').on(t.tenantId, t.id),
     unique('receptions_lineage_key').on(t.tenantId, t.id, t.vehicleId, t.customerId),
+    uniqueIndex('receptions_one_open_vehicle_uq')
+      .on(t.tenantId, t.vehicleId)
+      .where(sql`status = 'open'`),
     foreignKey({
       name: 'receptions_vehicle_fk',
       columns: [t.tenantId, t.vehicleId],
@@ -1003,6 +1006,9 @@ export const orderStatusHistory = pgTable(
     index('osh_changed_by_idx').on(t.tenantId, t.changedByMembershipId),
     enumCheck('osh_from_status_check', t.fromStatus, SERVICE_ORDER_STATUSES),
     enumCheck('osh_to_status_check', t.toStatus, SERVICE_ORDER_STATUSES),
+    uniqueIndex('osh_one_initial_reception_uq')
+      .on(t.tenantId, t.orderId)
+      .where(sql`from_status IS NULL AND to_status = 'reception'`),
     index('osh_order_changed_idx').on(t.tenantId, t.orderId, t.changedAt.desc()),
   ],
 );
@@ -2291,12 +2297,17 @@ export const signatures = pgTable(
     signedByName: varchar('signed_by_name', { length: 200 }).notNull(),
     signedByDocument: varchar('signed_by_document', { length: 60 }),
     signatureMediaId: uuid('signature_media_id').notNull(),
+    documentVersion: varchar('document_version', { length: 40 }).notNull(),
+    documentHash: varchar('document_hash', { length: 128 }).notNull(),
     signedAt: ts('signed_at').notNull(),
     ipAddress: inet('ip_address'),
     createdAt: createdAt(),
   },
   (t) => [
     unique('signatures_tenant_id_key').on(t.tenantId, t.id),
+    uniqueIndex('signatures_one_reception_uq')
+      .on(t.tenantId, t.receptionId)
+      .where(sql`reception_id IS NOT NULL`),
     foreignKey({
       name: 'signatures_reception_fk',
       columns: [t.tenantId, t.receptionId],
@@ -2316,6 +2327,10 @@ export const signatures = pgTable(
       'signatures_parent_xor_check',
       `("reception_id" IS NOT NULL AND "delivery_id" IS NULL)
        OR ("reception_id" IS NULL AND "delivery_id" IS NOT NULL)`,
+    ),
+    rawCheck(
+      'signatures_acceptance_evidence_check',
+      'length(btrim("document_version")) > 0 AND length(btrim("document_hash")) > 0',
     ),
     index('signatures_reception_idx').on(t.tenantId, t.receptionId),
     index('signatures_delivery_idx').on(t.tenantId, t.deliveryId),
