@@ -142,10 +142,11 @@ jobs:
       - name: RBAC documentation parity
         run: npm run rbac:check-doc-parity
 
-  # The expensive mutation gate runs on integration and explicit pre-release
-  # dispatch, after the regular validation job has passed.
+  # The expensive mutation gate runs on integration, the Sprint 2 final gate
+  # branch (S2-08 T9: dispatch is unavailable until ci.yml reaches main) and
+  # explicit pre-release dispatch, after the regular validation job has passed.
   mutations:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/sprint-2')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/integration/sprint-2' || github.ref == 'refs/heads/task/s2-08-final-quality-gate'))
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 180
