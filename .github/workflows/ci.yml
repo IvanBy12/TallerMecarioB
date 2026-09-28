@@ -62,6 +62,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: R2 presigned PUT security (no R2 credentials)
+        run: npm run test:media:presign:ci
+
       - name: RBAC matrix and TenantContext core (S1-02, no database)
         run: |
           npm run test:authz
