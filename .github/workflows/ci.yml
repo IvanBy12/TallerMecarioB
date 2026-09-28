@@ -167,6 +167,10 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/tallermecario_ci
+      # Mutation runners classify kills from spec-reporter "✖ name (Nms)" lines.
+      # Node 22 defaults to TAP when stdout is not a TTY, which turns every
+      # killed mutant into INVALID; pin the reporter the runners parse.
+      NODE_OPTIONS: --test-reporter=spec
 
     steps:
       - name: Checkout
