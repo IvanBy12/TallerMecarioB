@@ -68,6 +68,11 @@ export interface PresignOptions {
   now?: Date;
 }
 
+/** Exact headers that a client must send with a write-once presigned PUT. */
+export function writeOnceUploadHeaders(contentType: string): Record<string, string> {
+  return { 'Content-Type': contentType, 'If-None-Match': '*' };
+}
+
 /** Builds a presigned R2 URL (query-string SigV4, path-style bucket addressing). */
 export function presignR2Url(config: R2Config, options: PresignOptions): string {
   const now = options.now ?? new Date();
@@ -86,6 +91,15 @@ export function presignR2Url(config: R2Config, options: PresignOptions): string 
   const headerValues: Record<string, string> = { host };
   for (const [name, value] of Object.entries(extraHeaders)) {
     headerValues[name.toLowerCase()] = value;
+  }
+  // A presigned PUT remains a capability until expiry, but may create its key
+  // only once. The condition belongs in SigV4's canonical headers: omitting or
+  // changing it must invalidate the URL, not turn it into an overwrite token.
+  if (options.method === 'PUT') {
+    if (headerValues['if-none-match'] !== undefined && headerValues['if-none-match'] !== '*') {
+      throw new Error('R2_PUT_REQUIRES_IF_NONE_MATCH_STAR');
+    }
+    headerValues['if-none-match'] = '*';
   }
   const signedHeaderNames = Object.keys(headerValues).sort();
   const canonicalHeaders = signedHeaderNames.map((name) => `${name}:${headerValues[name].trim()}\n`).join('');

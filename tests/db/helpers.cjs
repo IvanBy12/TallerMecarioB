@@ -100,8 +100,12 @@ async function makeTenant({ members = 2, withOrder = false } = {}) {
       t.reception = id();
       t.order = id();
       await tx`INSERT INTO vehicles ${tx({ id: t.vehicle, tenant_id: t.tenant, plate: `P${t.vehicle.slice(0, 6).toUpperCase()}`, vehicle_type: 'car', brand: 'b', model: 'm' })}`;
-      await tx`INSERT INTO receptions ${tx({ id: t.reception, tenant_id: t.tenant, vehicle_id: t.vehicle, customer_id: t.customer, received_by_membership_id: t.members[0], mileage_km: 1 })}`;
+      await tx`INSERT INTO receptions ${tx({ id: t.reception, tenant_id: t.tenant, vehicle_id: t.vehicle, customer_id: t.customer, received_by_membership_id: t.members[0], mileage_km: 1, status: 'closed', closed_at: new Date() })}`;
+      const signatureMedia = id();
+      await tx`INSERT INTO media_assets ${tx({ id: signatureMedia, tenant_id: t.tenant, bucket: 'fixture', object_key: signatureMedia, media_type: 'signature', mime_type: 'image/png', status: 'active', retention_class: 'operational', retention_policy_version: 'v1' })}`;
+      await tx`INSERT INTO signatures ${tx({ id: id(), tenant_id: t.tenant, reception_id: t.reception, signed_by_name: 'Fixture', signature_media_id: signatureMedia, signed_at: new Date(), document_version: 'v1', document_hash: 'a'.repeat(64) })}`;
       await tx`INSERT INTO service_orders ${tx({ id: t.order, tenant_id: t.tenant, reception_id: t.reception, vehicle_id: t.vehicle, customer_id: t.customer, order_number: 1, created_by_membership_id: t.members[0] })}`;
+      await tx`INSERT INTO order_status_history ${tx({ id: id(), tenant_id: t.tenant, order_id: t.order, to_status: 'reception', request_id: id() })}`;
     }
   });
   return t;

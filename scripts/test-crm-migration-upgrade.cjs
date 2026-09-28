@@ -176,8 +176,8 @@ async function main() {
   const maintenance = postgres(source.toString(), { max: 1, prepare: false, onnotice: () => {} });
   const original = new Set((await maintenance`SELECT rolname FROM pg_roles WHERE rolname = ANY(${ROLES})`).map((r) => r.rolname));
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json','utf8'));
-  assert.equal(journal.entries.length,19);
-  const headFolder = process.env.CRM_HEAD_FOLDER || 'drizzle';
+  assert.equal(journal.entries.length,20);
+  const headFolder = mkdtempSync(join(tmpdir(),'tm-crm-head-'));
   const temp = mkdtempSync(join(tmpdir(),'tm-crm-upgrade-'));
   const suffix = randomUUID().replaceAll('-','').slice(0,12);
   const cases = [
@@ -194,6 +194,8 @@ async function main() {
   const createdLogins = [];
   let failure;
   try {
+    cpSync(process.env.CRM_HEAD_FOLDER || 'drizzle',headFolder,{recursive:true});
+    writeFileSync(join(headFolder,'meta','_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0,19) }));
     cpSync('drizzle',temp,{recursive:true});
     writeFileSync(join(temp,'meta','_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0,18) }));
     for (let i=0;i<cases.length;i++) {
@@ -247,6 +249,7 @@ async function main() {
       (SELECT count(*)::int FROM pg_database WHERE datname=ANY(${dbs})) AS dbs,
       (SELECT count(*)::int FROM pg_roles WHERE rolname=ANY(${createdLogins})) AS logins`;
     rmSync(temp,{recursive:true,force:true});
+    rmSync(headFolder,{recursive:true,force:true});
     process.stdout.write(`CRM_UPGRADE_TEARDOWN dbs=${left.dbs} logins=${left.logins}\n`);
     await maintenance.end({timeout:5});
     if (cleanupError || left.dbs!==0 || left.logins!==0) failure ||= new Error('CRM_UPGRADE_TEARDOWN_FAILED');

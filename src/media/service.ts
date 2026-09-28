@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
-import { headR2Object, presignR2Url, type R2Config } from './r2.js';
+import { headR2Object, presignR2Url, writeOnceUploadHeaders, type R2Config } from './r2.js';
 import { MEDIA_TYPES } from '../db/schema.js';
 
 /**
@@ -87,8 +87,19 @@ export interface UploadSessionResult {
   mediaAssetId: string;
   status: 'pending';
   uploadUrl: string;
+  uploadMethod: 'PUT';
+  uploadHeaders: Record<string, string>;
   objectKey: string;
   expiresAt: string;
+}
+
+function signedUploadTarget(r2: R2Config, objectKey: string, mimeType: string) {
+  const uploadHeaders = writeOnceUploadHeaders(mimeType);
+  const uploadUrl = presignR2Url(r2, {
+    method: 'PUT', objectKey, expiresInSeconds: UPLOAD_URL_TTL_SECONDS,
+    extraSignedHeaders: uploadHeaders,
+  });
+  return { uploadUrl, uploadMethod: 'PUT' as const, uploadHeaders };
 }
 
 export async function createUploadSession(
@@ -139,22 +150,18 @@ export async function createUploadSession(
       throw new MediaError(409, 'UPLOAD_SESSION_EXPIRED', 'This upload session expired; retry with a new idempotency key.');
     }
     // Same in-flight request retried: return the same target, a fresh signed PUT URL.
-    const uploadUrl = presignR2Url(r2, {
-      method: 'PUT',
-      objectKey: existing.object_key,
-      expiresInSeconds: UPLOAD_URL_TTL_SECONDS,
-      extraSignedHeaders: { 'content-type': existing.mime_type },
-    });
     return {
       uploadSessionId: existing.id,
       mediaAssetId: existing.media_asset_id,
       status: 'pending',
-      uploadUrl,
+      ...signedUploadTarget(r2, existing.object_key, existing.mime_type),
       objectKey: existing.object_key,
       expiresAt: new Date(existing.expires_at).toISOString(),
     };
   }
 
+  // A fresh opaque media ID determines the object key. The database UNIQUE
+  // constraint rejects collisions; conditional PUT protects the R2 object.
   const mediaAssetId = randomUUID();
   const uploadSessionId = randomUUID();
   const objectKey = buildObjectKey(tenantId, mediaAssetId, input.mimeType);
@@ -177,14 +184,9 @@ export async function createUploadSession(
     )
   `;
 
-  const uploadUrl = presignR2Url(r2, {
-    method: 'PUT',
-    objectKey,
-    expiresInSeconds: UPLOAD_URL_TTL_SECONDS,
-    extraSignedHeaders: { 'content-type': input.mimeType },
-  });
-
-  return { uploadSessionId, mediaAssetId, status: 'pending', uploadUrl, objectKey, expiresAt: expiresAt.toISOString() };
+  return { uploadSessionId, mediaAssetId, status: 'pending',
+    ...signedUploadTarget(r2, objectKey, input.mimeType),
+    objectKey, expiresAt: expiresAt.toISOString() };
 }
 
 export interface CompleteUploadResult {

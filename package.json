@@ -13,6 +13,8 @@
     "test:api:multitenant:ci": "node scripts/test-api-multitenant.cjs",
     "test:media:r2": "node --env-file=.env scripts/test-media-r2.cjs",
     "test:media:r2:ci": "node scripts/test-media-r2.cjs",
+    "test:media:presign": "npm run build && npm run test:media:presign:ci",
+    "test:media:presign:ci": "node --test tests/media/r2-presign.test.cjs",
     "test:api:security": "node --env-file=.env scripts/test-api-security.cjs",
     "test:api:security:ci": "node scripts/test-api-security.cjs",
     "security:dependency-audit": "npm audit",
@@ -82,12 +84,18 @@
     "test:crm:db:ci": "node scripts/test-crm-db.cjs",
     "test:crm:upgrade:ci": "node scripts/test-crm-migration-upgrade.cjs",
     "test:crm:mutations:ci": "node scripts/test-crm-mutations.cjs",
+    "test:reception:db": "node --env-file=.env scripts/test-reception-db.cjs",
+    "test:reception:db:ci": "node scripts/test-reception-db.cjs",
+    "test:reception:upgrade": "node --env-file=.env scripts/test-reception-migration-upgrade.cjs",
+    "test:reception:upgrade:ci": "node scripts/test-reception-migration-upgrade.cjs",
+    "test:reception:mutations": "node --env-file=.env scripts/test-reception-mutations.cjs",
+    "test:reception:mutations:ci": "node scripts/test-reception-mutations.cjs",
     "smoke:clerk:dev": "npm run build && node --env-file=.env scripts/smoke-clerk-dev.cjs",
     "rbac:generate-seed-sql": "node scripts/generate-rbac-seed-sql.cjs",
     "rbac:check-doc-parity": "node scripts/check-rbac-matrix-doc.cjs",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "biome lint src tests scripts drizzle.config.ts tsconfig.json tsconfig.build.json package.json",
-    "test": "npm run test:authz && npm run test:tenant-context-core && npm run test:wompi"
+    "test": "npm run test:authz && npm run test:tenant-context-core && npm run test:wompi && npm run test:media:presign"
   },
   "repository": {
     "type": "git",

@@ -182,13 +182,13 @@ async function main() {
     report.migration = 'PASS';
     const initialMigrationState = await migrationState(admin);
     report.migration_ledger = 'PASS';
-    process.stdout.write('MIGRATION_LEDGER_PASS 19/19; latest 0018; plate check valid; history guard enabled\n');
+    process.stdout.write('MIGRATION_LEDGER_PASS 20/20; latest 0019; plate check valid; history guard enabled\n');
     const rerun = compose(project, envFile, ['run', '--rm', 'migrate']);
     if (rerun.status !== 0) throw new Error('SECOND_STAGING_MIGRATION_FAILED');
     assert.equal(await migrationState(admin), initialMigrationState,
       'second migration must leave ledger and schema unchanged');
     report.migration_idempotency = 'PASS';
-    process.stdout.write('MIGRATION_IDEMPOTENCY_PASS 19/19; schema unchanged\n');
+    process.stdout.write('MIGRATION_IDEMPOTENCY_PASS 20/20; schema unchanged\n');
 
     const provision = compose(project, envFile, ['run', '--rm', 'provision-runtime-login']);
     if (provision.status !== 0) throw new Error('RUNTIME_LOGIN_PROVISION_FAILED');

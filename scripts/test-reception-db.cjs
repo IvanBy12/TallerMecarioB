@@ -48,7 +48,7 @@ function child(args, env, capture = false) {
     process.stdout.write(result.stdout || '');
     process.stderr.write(result.stderr || '');
   }
-  if (result.error || result.status !== 0) throw new Error('CRM_CHILD_PROCESS_FAILED');
+  if (result.error || result.status !== 0) throw new Error('RECEPTION_CHILD_PROCESS_FAILED');
   return result.stdout;
 }
 
@@ -68,9 +68,9 @@ async function main() {
   const source = sourceUrl();
   localOnly(source);
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
-  const dbName = `tm_test_crm_${suffix}`;
-  const apiLogin = `tm_test_crma_${suffix}`;
-  const workerLogin = `tm_test_crmw_${suffix}`;
+  const dbName = `tm_test_reception_${suffix}`;
+  const apiLogin = `tm_test_receptiona_${suffix}`;
+  const workerLogin = `tm_test_receptionw_${suffix}`;
   const testUrl = new URL(source);
   testUrl.pathname = `/${dbName}`;
   const maintenance = postgres(source.toString(), { max: 1, prepare: false, onnotice: () => {} });
@@ -90,8 +90,8 @@ async function main() {
     admin = postgres(testUrl.toString(), { max: 1, prepare: false, onnotice: () => {} });
     child(['scripts/migrate.cjs'], { ...process.env, DATABASE_URL: testUrl.toString() });
     const [ledger] = await admin`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    if (expectedMigrationCount() !== 20 || ledger.count !== 20) throw new Error('CRM_MIGRATION_LEDGER_INVALID');
-    process.stdout.write('CRM_MIGRATION_LEDGER_PASS 20 (0000..0019)\n');
+    if (expectedMigrationCount() !== 20 || ledger.count !== 20) throw new Error('RECEPTION_MIGRATION_LEDGER_INVALID');
+    process.stdout.write('RECEPTION_MIGRATION_LEDGER_PASS 20 (0000..0019)\n');
     for (const [login, password, role] of [
       [apiLogin, `rt_${randomUUID()}`, 'tallermecario_api'],
       [workerLogin, `rt_${randomUUID()}`, 'tallermecario_worker'],
@@ -102,8 +102,8 @@ async function main() {
       if (role === 'tallermecario_api') process.env.TEST_API_PASSWORD = password;
       else process.env.TEST_WORKER_PASSWORD = password;
     }
-    const files = readdirSync('tests/crm').filter((f) => f.endsWith('.test.cjs')).sort().map((f) => `tests/crm/${f}`);
-    if (!files.length) throw new Error('CRM_TEST_FILES_MISSING');
+    const files = readdirSync('tests/reception').filter((f) => f.endsWith('.test.cjs')).sort().map((f) => `tests/reception/${f}`);
+    if (!files.length) throw new Error('RECEPTION_TEST_FILES_MISSING');
     const testEnv = {
       ...process.env, NO_COLOR: '1', TEST_DATABASE_URL_ADMIN: testUrl.toString(),
       TEST_API_LOGIN: apiLogin, TEST_WORKER_LOGIN: workerLogin,
@@ -112,8 +112,8 @@ async function main() {
     const { output, code } = await testChild(['--test', '--test-concurrency=1', '--test-timeout=90000', ...files], testEnv);
     const count = (name) => Number(output.match(new RegExp(`^(?:#|ℹ) ${name} (\\d+)$`, 'mu'))?.[1] ?? -1);
     const pass = count('pass'), fail = count('fail'), skip = count('skipped'), todo = count('todo');
-    process.stdout.write(`CRM_TEST_COUNTS PASS=${pass} FAIL=${fail} SKIP=${skip} TODO=${todo}\n`);
-    if (code !== 0 || pass <= 0 || fail !== 0 || skip !== 0 || todo !== 0) throw new Error('CRM_TEST_COUNTS_INVALID');
+    process.stdout.write(`RECEPTION_TEST_COUNTS PASS=${pass} FAIL=${fail} SKIP=${skip} TODO=${todo}\n`);
+    if (code !== 0 || pass <= 0 || fail !== 0 || skip !== 0 || todo !== 0) throw new Error('RECEPTION_TEST_COUNTS_INVALID');
   } catch (error) {
     resultError = error;
   } finally {
@@ -139,16 +139,16 @@ async function main() {
       SELECT (SELECT count(*)::int FROM pg_database WHERE datname = ${dbName}) AS dbs,
         (SELECT count(*)::int FROM pg_roles WHERE rolname = ANY(${[apiLogin, workerLogin]})) AS logins
     `.catch((e) => { cleanupError ||= e; return [{}]; });
-    if (remaining.dbs !== 0 || remaining.logins !== 0) cleanupError ||= new Error('CRM_TEARDOWN_RESIDUE');
-    process.stdout.write(`CRM_TEARDOWN dbs=${remaining.dbs ?? 'unknown'} logins=${remaining.logins ?? 'unknown'}\n`);
+    if (remaining.dbs !== 0 || remaining.logins !== 0) cleanupError ||= new Error('RECEPTION_TEARDOWN_RESIDUE');
+    process.stdout.write(`RECEPTION_TEARDOWN dbs=${remaining.dbs ?? 'unknown'} logins=${remaining.logins ?? 'unknown'}\n`);
     await maintenance.end({ timeout: 5 }).catch(() => undefined);
   }
-  if (cleanupError) throw new Error('CRM_TEARDOWN_FAILED');
+  if (cleanupError) throw new Error('RECEPTION_TEARDOWN_FAILED');
   if (resultError) throw resultError;
 }
 
 main().catch((error) => {
-  const allowed = /^(DATABASE_CONFIGURATION_REQUIRED|REFUSING_NON_LOCAL_DATABASE|POSTGRESQL_18_REQUIRED|CRM_[A-Z_]+)$/u;
-  process.stderr.write(`${allowed.test(error.message) ? error.message : 'CRM_DB_TEST_RUN_FAILED'}\n`);
+  const allowed = /^(DATABASE_CONFIGURATION_REQUIRED|REFUSING_NON_LOCAL_DATABASE|POSTGRESQL_18_REQUIRED|RECEPTION_[A-Z_]+)$/u;
+  process.stderr.write(`${allowed.test(error.message) ? error.message : 'RECEPTION_DB_TEST_RUN_FAILED'}\n`);
   process.exitCode = 1;
 });
