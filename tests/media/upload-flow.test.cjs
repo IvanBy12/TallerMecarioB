@@ -351,15 +351,27 @@ test('signed reception evidence survives replay and unsigned-header attempts on 
   assert.equal(complete.statusCode, 200);
   assert.equal(complete.json().checksumSha256, checksumSha256);
 
-  const customer = randomUUID(), vehicle = randomUUID(), reception = randomUUID(), signature = randomUUID();
+  const customer = randomUUID(), vehicle = randomUUID(), consent = randomUUID();
+  const reception = randomUUID(), signature = randomUUID();
   await database.begin(async (sql) => {
     await sql`SELECT set_config('app.tenant_id', ${fixture.tenantA}, true)`;
     await sql`INSERT INTO customers (id,tenant_id,first_name,last_name,phone)
       VALUES (${customer},${fixture.tenantA},'Signed','Evidence','3000000002')`;
     await sql`INSERT INTO vehicles (id,tenant_id,plate,vehicle_type,brand,model)
       VALUES (${vehicle},${fixture.tenantA},${`S${vehicle.slice(0, 6).toUpperCase()}`},'car','B','M')`;
-    await sql`INSERT INTO receptions (id,tenant_id,vehicle_id,customer_id,received_by_membership_id,mileage_km)
-      VALUES (${reception},${fixture.tenantA},${vehicle},${customer},${fixture.membershipA},0)`;
+    await sql`INSERT INTO vehicle_owners
+      (id,tenant_id,vehicle_id,customer_id,relationship_type,is_primary)
+      VALUES (${randomUUID()},${fixture.tenantA},${vehicle},${customer},'owner',true)`;
+    await sql`INSERT INTO privacy_consents
+      (id,tenant_id,customer_id,purpose_code,privacy_notice_version,authorization_text_version,
+        authorization_text_hash,channel,captured_at,controller_notice_snapshot)
+      VALUES (${consent},${fixture.tenantA},${customer},'service_provision','test-notice-1',
+        'test-service-1',${'f'.repeat(64)},'in_person',now(),
+        ${sql.json({ legalName: 'TEST-ONLY', address: 'TEST-ONLY', phone: '+5700000000',
+          email: null, rightsChannel: 'TEST-ONLY' })})`;
+    await sql`INSERT INTO receptions
+      (id,tenant_id,vehicle_id,customer_id,privacy_consent_id,received_by_membership_id,mileage_km)
+      VALUES (${reception},${fixture.tenantA},${vehicle},${customer},${consent},${fixture.membershipA},0)`;
     await sql`INSERT INTO signatures (id,tenant_id,reception_id,signed_by_name,signature_media_id,
       signed_at,document_version,document_hash)
       VALUES (${signature},${fixture.tenantA},${reception},'Signed Evidence',${created.mediaAssetId},
@@ -380,4 +392,19 @@ test('signed reception evidence survives replay and unsigned-header attempts on 
   assert.equal(stored.equals(original), true, 'signed R2 bytes must remain the original bytes');
   const [row] = await admin`SELECT signature_media_id FROM signatures WHERE id=${signature}`;
   assert.equal(row.signature_media_id, created.mediaAssetId);
+  await database.begin(async (sql) => {
+    await sql`SELECT set_config('app.tenant_id', ${fixture.tenantA}, true)`;
+    await sql`UPDATE media_assets SET status='quarantined' WHERE id=${created.mediaAssetId}`;
+  });
+  const denied = await app.inject({ method: 'GET',
+    url: `/api/v1/media/${created.mediaAssetId}/download-url`, headers: auth('token-a') });
+  assert.equal(denied.statusCode, 409);
+  assert.equal(denied.json().error.code, 'MEDIA_ASSET_NOT_ACTIVE');
+  const [historical] = await admin`SELECT signature_media_id FROM signatures WHERE id=${signature}`;
+  assert.equal(historical.signature_media_id, created.mediaAssetId);
+  const [quarantined] = await admin`SELECT status,object_key FROM media_assets WHERE id=${created.mediaAssetId}`;
+  assert.deepEqual([quarantined.status, quarantined.object_key], ['quarantined', created.objectKey]);
+  const retained = await headR2Object(r2, created.objectKey);
+  assert.deepEqual([retained.exists, retained.sizeBytes, retained.etag],
+    [true, before.sizeBytes, before.etag]);
 });

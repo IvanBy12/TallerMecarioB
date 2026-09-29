@@ -124,6 +124,33 @@ async function seedPrivacy(sql, kind) {
   });
   return tenant;
 }
+/** 0020-shaped evidence, including a deliberate legacy reuse only in the duplicate case. */
+async function seedSingleUse(sql, duplicate) {
+  const tenant = await seedPrivacy(sql, 'clean');
+  const [vehicle] = await sql`SELECT id FROM vehicles WHERE tenant_id=${tenant}`;
+  const [customer] = await sql`SELECT id FROM customers WHERE tenant_id=${tenant}`;
+  const [member] = await sql`SELECT id FROM memberships WHERE tenant_id=${tenant}`;
+  const media = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`INSERT INTO media_assets
+      (id,tenant_id,bucket,object_key,media_type,mime_type,status,retention_class,retention_policy_version)
+      VALUES (${media},${tenant},'fixture',${media},'signature','image/png','active','operational','v1')`;
+    for (let i = 0; i < (duplicate ? 2 : 1); i += 1) {
+      const reception = randomUUID();
+      const signedVehicle = i === 0 ? vehicle.id : randomUUID();
+      if (i > 0) await tx`INSERT INTO vehicles (id,tenant_id,plate,vehicle_type,brand,model)
+        VALUES (${signedVehicle},${tenant},${`D${signedVehicle.slice(0, 6).toUpperCase()}`},'car','B','M')`;
+      await tx`INSERT INTO receptions
+        (id,tenant_id,vehicle_id,customer_id,privacy_consent_id,received_by_membership_id,mileage_km)
+        VALUES (${reception},${tenant},${signedVehicle},${customer.id},${randomUUID()},${member.id},0)`;
+      await tx`INSERT INTO signatures
+        (id,tenant_id,reception_id,signed_by_name,signature_media_id,signed_at,document_version,document_hash)
+        VALUES (${randomUUID()},${tenant},${reception},'Legacy',${media},now(),'v1',${'a'.repeat(64)})`;
+    }
+  });
+  return { tenant, media };
+}
 async function privacySnapshot(sql, tenant) {
   const result = {};
   for (const table of ['customers', 'vehicles', 'vehicle_owners', 'receptions', 'privacy_consents']) {
@@ -160,10 +187,11 @@ async function main() {
   const maintenance = postgres(source.toString(), { max: 1, prepare: false, onnotice: () => {} });
   const original = new Set((await maintenance`SELECT rolname FROM pg_roles WHERE rolname = ANY(${ROLES})`).map((r) => r.rolname));
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json','utf8'));
-  assert.equal(journal.entries.length, 22);
+  assert.equal(journal.entries.length, 23);
   // 0019 cases upgrade to a 0019 head: their valid fixture holds a legacy
   // reception, which 0020 deliberately refuses (fail closed, covered below).
   const head19 = mkdtempSync(join(tmpdir(), 'tm-reception-head19-'));
+  const head20 = mkdtempSync(join(tmpdir(), 'tm-reception-head20-'));
   const temp = mkdtempSync(join(tmpdir(), 'tm-reception-upgrade-'));
   const cases = [
     ['valid', null, null],
@@ -187,6 +215,9 @@ async function main() {
   const privacyNames = privacyCases.map(([kind]) =>
     `tm_test_recup_p${kind.slice(0, 10)}_${randomUUID().replaceAll('-', '').slice(0, 10)}`);
   names.push(...privacyNames);
+  const singleUseNames = [false, true].map((duplicate) =>
+    `tm_test_recup_s${duplicate ? 'dup' : 'clean'}_${randomUUID().replaceAll('-', '').slice(0, 10)}`);
+  names.push(...singleUseNames);
   const created = [];
   let failure;
   try {
@@ -196,6 +227,9 @@ async function main() {
     cpSync('drizzle', head19, { recursive: true });
     writeFileSync(join(head19, 'meta', '_journal.json'),
       JSON.stringify({ ...journal, entries: journal.entries.slice(0, 20) }));
+    cpSync('drizzle', head20, { recursive: true });
+    writeFileSync(join(head20, 'meta', '_journal.json'),
+      JSON.stringify({ ...journal, entries: journal.entries.slice(0, 21) }));
     for (const [index, [kind, expectedCode, expectedConstraint]] of cases.entries()) {
       const name = names[index];
       await maintenance.unsafe(`CREATE DATABASE ${name}`); created.push(name);
@@ -267,7 +301,7 @@ async function main() {
         if (!expectedConstraint) {
           assert.equal(diagnostic, null, 'clean preflight');
           assert.equal(upgraded.status, 0, upgraded.stderr);
-          assert.equal(await ledger(sql), 22);
+          assert.equal(await ledger(sql), 23);
           await forced();
           assert.deepEqual(await privacySnapshot(sql, tenant), before);
           const schemaAfter = await privacySchema(sql);
@@ -277,7 +311,7 @@ async function main() {
             'privacy_consents_evidence_truncate_trg', 'receptions_guard_10_current_owner_trg',
             'receptions_guard_20_privacy_consent_trg']);
           assert.equal(migrate(target.toString(), 'drizzle').status, 0);
-          assert.equal(await ledger(sql), 22);
+          assert.equal(await ledger(sql), 23);
           assert.deepEqual(await privacySchema(sql), schemaAfter, 'rerun is a no-op');
           process.stdout.write(`UPGRADE_PRIVACY_${kind.toUpperCase()}_PASS 0019 -> 0020; data unchanged; rerun no-op\n`);
         } else {
@@ -299,6 +333,44 @@ async function main() {
         }
       } finally { await sql.end({ timeout: 5 }); }
     }
+    // D-SIG-01: 0021 must fail closed on reused legacy media with no dedupe.
+    for (const [index, duplicate] of [false, true].entries()) {
+      const name = singleUseNames[index];
+      await maintenance.unsafe(`CREATE DATABASE ${name}`); created.push(name);
+      const target = new URL(source); target.pathname = `/${name}`;
+      const sql = postgres(target.toString(), { max: 2, prepare: false, onnotice: () => {} });
+      try {
+        const baseline = migrate(target.toString(), head20);
+        assert.equal(baseline.status, 0, baseline.stderr);
+        assert.equal(await ledger(sql), 21);
+        const { tenant, media } = await seedSingleUse(sql, duplicate);
+        const before = await dataSnapshot(sql, tenant);
+        const upgrade = migrate(target.toString(), 'drizzle');
+        if (duplicate) {
+          assert.notEqual(upgrade.status, 0, 'legacy duplicate must fail 0021');
+          assert.match(upgrade.stderr, /Migration failed\./u);
+          assert.equal(await ledger(sql), 21);
+          const [state] = await sql`SELECT to_regclass('public.signatures_one_media_uq') IS NULL AS no_index`;
+          assert.equal(state.no_index, true);
+          assert.deepEqual(await dataSnapshot(sql, tenant), before);
+          assert.equal((await sql`SELECT id FROM signatures WHERE tenant_id=${tenant}
+            AND signature_media_id=${media}`).length, 2);
+          assert.notEqual(migrate(target.toString(), 'drizzle').status, 0);
+          assert.equal(await ledger(sql), 21);
+          assert.deepEqual(await dataSnapshot(sql, tenant), before);
+          process.stdout.write('UPGRADE_SINGLE_USE_DUPLICATE_FAIL_CLOSED_PASS ledger=21; rows intact; rollback complete\n');
+        } else {
+          assert.equal(upgrade.status, 0, upgrade.stderr);
+          assert.equal(await ledger(sql), 23);
+          const [state] = await sql`SELECT to_regclass('public.signatures_one_media_uq') IS NOT NULL AS indexed`;
+          assert.equal(state.indexed, true);
+          assert.deepEqual(await dataSnapshot(sql, tenant), before);
+          assert.equal(migrate(target.toString(), 'drizzle').status, 0);
+          assert.equal(await ledger(sql), 23);
+          process.stdout.write('UPGRADE_SINGLE_USE_CLEAN_PASS 0020 -> 0022; rows intact; rerun no-op\n');
+        }
+      } finally { await sql.end({ timeout: 5 }); }
+    }
   } catch (e) { failure = e; }
   finally {
     let cleanupError;
@@ -313,6 +385,7 @@ async function main() {
     const [left] = await maintenance`SELECT count(*)::int AS n FROM pg_database WHERE datname=ANY(${names})`;
     rmSync(temp, { recursive: true, force: true });
     rmSync(head19, { recursive: true, force: true });
+    rmSync(head20, { recursive: true, force: true });
     process.stdout.write(`RECEPTION_UPGRADE_TEARDOWN dbs=${left.n}\n`);
     await maintenance.end({ timeout: 5 });
     if (cleanupError || left.n !== 0) failure ||= new Error('RECEPTION_UPGRADE_TEARDOWN_FAILED');

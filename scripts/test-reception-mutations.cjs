@@ -14,6 +14,8 @@ const migrations = new Map([
     readFileSync('drizzle/0020_s3_04_5_reception_privacy_contract.sql', 'utf8').replace(/\r\n/gu, '\n')],
   ['0021_s3_05_signature_media_single_use.sql',
     readFileSync('drizzle/0021_s3_05_signature_media_single_use.sql', 'utf8').replace(/\r\n/gu, '\n')],
+  ['0022_s3_05_signed_media_quarantine.sql',
+    readFileSync('drizzle/0022_s3_05_signed_media_quarantine.sql', 'utf8').replace(/\r\n/gu, '\n')],
 ]);
 const cases = [
   ['transition', "IF OLD.status <> 'open' OR NEW.status NOT IN ('open', 'closed')", 'IF false'],
@@ -31,6 +33,9 @@ const cases = [
   ['signature_media_unique_removed',
     'CREATE UNIQUE INDEX signatures_one_media_uq\n  ON public.signatures (tenant_id, signature_media_id);',
     'SELECT 1;', '0021_s3_05_signature_media_single_use.sql'],
+  ['signed_media_quarantine_frozen',
+    "AND NOT (OLD.status = 'active' AND NEW.status = 'quarantined')",
+    'AND NOT false', '0022_s3_05_signed_media_quarantine.sql'],
   // S3-04.5: each mutant must migrate successfully and be rejected by a
   // behavioral assertion in tests/reception/privacy-contract-db.test.cjs.
   ['owner_guard_removed', 'IF v_owner IS DISTINCT FROM NEW.customer_id THEN', 'IF false THEN', '0020_s3_04_5_reception_privacy_contract.sql'],

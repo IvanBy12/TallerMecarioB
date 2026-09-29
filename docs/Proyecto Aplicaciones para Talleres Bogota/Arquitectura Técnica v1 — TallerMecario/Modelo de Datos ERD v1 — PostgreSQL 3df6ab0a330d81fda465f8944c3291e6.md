@@ -519,6 +519,9 @@ CHECK (
 ```
 
 La firma debe pertenecer exactamente a una recepción **o** a una entrega; nunca a ambas ni a ninguna.
+Cada recepción tiene exactamente una firma; cada entrega debe tener exactamente
+una cuando se implemente su flujo. `UNIQUE(tenant_id,signature_media_id)` hace
+single-use a la media de firma: una captura no puede respaldar ambos actos.
 
 # 8. Órdenes de trabajo
 

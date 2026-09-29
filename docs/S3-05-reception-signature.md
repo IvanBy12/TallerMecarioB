@@ -45,13 +45,17 @@ minimal `reception.signed` success audit, then commits. The media must belong
 to the same tenant, have `media_type=signature`, `status=active`, and have no
 deletion or purge marker. Quarantined, pending, deleted and foreign media are
 rejected. Missing and foreign media share a safe 404. The 0019 trigger repeats
-the reception/media guards. The same media cannot back two signatures: 0021
-adds `signatures_one_media_uq` after auditing this missing invariant.
+the reception/media guards. Exactly one signature belongs to a reception;
+exactly one belongs to a delivery when that flow is implemented. A signature
+media asset can back only one signing act within its tenant, whether reception
+or delivery. The 0021 `signatures_one_media_uq` enforces this single use.
 
 The lock order is reception → media, including the 0019 trigger. A concurrent
-quarantine update waits on the media lock; after a committed signature, the
-signed-media trigger rejects quarantine and object-key changes. If quarantine
-commits first, signature validation fails. A future close must start with the
+quarantine update waits on the media lock; after a committed signature, 0022
+allows `active → quarantined` while the signed-media trigger continues to
+protect the object identity, deletion and purge markers. Normal download URL
+generation rejects quarantined media. If quarantine commits first, signature
+validation fails. A future close must start with the
 same reception lock; if close commits first, capture returns
 `409 RECEPTION_NOT_EDITABLE`. S3-05 leaves receptions open and does not create
 service orders.

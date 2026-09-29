@@ -7,6 +7,7 @@ const { assert } = h;
 const { buildApi } = h.load('api/app.js');
 const { ClerkIdentityProvider } = h.load('identity/clerk/clerk-identity-provider.js');
 const { registerReceptionRoutes } = h.load('receptions/routes.js');
+const { registerMediaRoutes } = h.load('media/routes.js');
 const { RECEPTION_ACCEPTANCE_VERSION, RECEPTION_ACCEPTANCE_TEXT,
   canonicalAcceptanceBytes, acceptanceHash } = h.load('receptions/acceptance-document.js');
 const provider = new ClerkIdentityProvider(h.clerkAuthenticationConfig(), { usersApi: h.clerkUsers });
@@ -15,7 +16,11 @@ let app;
 before(async () => {
   app = await buildApi({ database: h.apiPool, identityProvider: provider,
     rateLimit: { max: 100_000, timeWindow: '1 minute' },
-    registerRoutes: registerReceptionRoutes });
+    registerRoutes: (server) => {
+      registerReceptionRoutes(server);
+      registerMediaRoutes(server, { endpoint: 'https://r2.invalid', region: 'auto',
+        bucket: 'test', accessKeyId: 'test', secretAccessKey: 'test' });
+    } });
 });
 after(async () => h.closeAll(app));
 
@@ -149,6 +154,27 @@ test('RBAC, tenant, version and strict body failures leave no evidence', async (
   assert.equal((await audits(reception)).length, 0);
 });
 
+test('signer identity rejects original controls before trimming and preserves safe Unicode', async () => {
+  const { a } = await h.twoTenants();
+  const { reception } = await fixture(a);
+  const m = await media(a.tenantId);
+  for (const value of ['\tAlice', 'Alice\n', '\rAlice', '\0Alice',
+    'Alice\u0085', '\u202eAlice', 'Alice\u2067', '\ud800Alice', 'Alice\udc00']) {
+    for (const field of ['signedByName', 'signedByDocument']) {
+      const result = await capture(a.owner, a.tenantId, reception, body(m, { [field]: value }));
+      assert.deepEqual([result.status, code(result)], [400, 'REQUEST_VALIDATION_FAILED'],
+        `${field}: ${JSON.stringify(value)}`);
+    }
+  }
+  assert.equal((await signatures(reception)).length, 0);
+  assert.equal((await audits(reception)).length, 0);
+  const result = await capture(a.owner, a.tenantId, reception,
+    body(m, { signedByName: '  María Gómez  ', signedByDocument: '  00-١٢  ' }));
+  assert.equal(result.status, 201, JSON.stringify(result.json));
+  const [stored] = await signatures(reception);
+  assert.deepEqual([stored.signed_by_name, stored.signed_by_document], ['María Gómez', '00-١٢']);
+});
+
 test('media eligibility and foreign media fail without signature or success audit', async () => {
   const { a, b } = await h.twoTenants();
   const { reception } = await fixture(a);
@@ -192,7 +218,7 @@ test('two overlapping POSTs serialize on reception and commit one signature and 
   assert.equal((await audits(reception)).length, 1);
 });
 
-test('quarantine wins media lock; capture fails, while signed media cannot later quarantine', async () => {
+test('quarantine wins media lock; capture fails, and signed media can later quarantine', async () => {
   const { a } = await h.twoTenants();
   const { reception } = await fixture(a);
   const m = await media(a.tenantId);
@@ -217,8 +243,15 @@ test('quarantine wins media lock; capture fails, while signed media cannot later
   const second = await fixture(a);
   const signedMedia = await media(a.tenantId);
   assert.equal((await capture(a.owner, a.tenantId, second.reception, body(signedMedia))).status, 201);
-  await assert.rejects(h.admin`UPDATE public.media_assets SET status='quarantined'
-    WHERE id=${signedMedia}`, (e) => e.code === '23514' && e.constraint_name === 'signatures_media_guard');
+  const [before] = await signatures(second.reception);
+  await h.admin`UPDATE public.media_assets SET status='quarantined' WHERE id=${signedMedia}`;
+  const [after] = await signatures(second.reception);
+  assert.deepEqual(after, before);
+  const [state] = await h.admin`SELECT status FROM public.media_assets WHERE id=${signedMedia}`;
+  assert.equal(state.status, 'quarantined');
+  const denied = await h.call(app, { subject: a.owner.subject, tenantId: a.tenantId,
+    method: 'GET', url: `/api/v1/media/${signedMedia}/download-url` });
+  assert.deepEqual([denied.status, code(denied)], [409, 'MEDIA_ASSET_NOT_ACTIVE']);
 });
 
 test('capture holds reception lock while waiting for media lock', async () => {

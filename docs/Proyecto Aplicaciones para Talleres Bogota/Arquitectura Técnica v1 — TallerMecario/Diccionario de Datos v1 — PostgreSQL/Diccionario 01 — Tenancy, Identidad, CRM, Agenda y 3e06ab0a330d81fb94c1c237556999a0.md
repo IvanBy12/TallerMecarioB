@@ -414,5 +414,7 @@ created_at | timestamptz | NOT NULL DEFAULT now() | - |
 ```
 
 CHECK XOR: exactamente uno de `reception_id`/`delivery_id` es NOT NULL. Evidencia append-only después de firma.
-UNIQUE parcial `(tenant_id,reception_id)` para una firma por recepción;
-UNIQUE `(tenant_id,signature_media_id)` para uso único de la imagen de firma.
+UNIQUE parcial `(tenant_id,reception_id)` para exactamente una firma por recepción;
+el flujo de entrega, cuando se implemente, debe garantizar exactamente una firma por entrega.
+UNIQUE `(tenant_id,signature_media_id)` impide que la misma media respalde dos actos
+de firma, sean de recepción o de entrega, dentro del tenant.

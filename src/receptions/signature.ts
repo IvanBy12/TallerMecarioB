@@ -20,10 +20,11 @@ export interface SignatureInput {
 
 const invalid = () => new ApiError(400, 'REQUEST_VALIDATION_FAILED', 'The request body is invalid.');
 function normalized(value: unknown, max: number): string | null {
-  if (typeof value !== 'string' || !hasValidUnicode(value)) throw invalid();
+  if (typeof value !== 'string' || !hasValidUnicode(value)
+    || BIDI_CONTROL_CHARACTERS.test(value)
+    || PROHIBITED_CONTROL_CHARACTERS.test(value)) throw invalid();
   const result = value.normalize('NFC').trim();
-  if (codePointLength(result) > max || BIDI_CONTROL_CHARACTERS.test(result)
-    || PROHIBITED_CONTROL_CHARACTERS.test(result)) throw invalid();
+  if (codePointLength(result) > max) throw invalid();
   return result || null;
 }
 export function parseSignatureInput(body: unknown): SignatureInput {

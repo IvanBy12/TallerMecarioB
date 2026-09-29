@@ -90,8 +90,8 @@ async function main() {
     admin = postgres(testUrl.toString(), { max: 1, prepare: false, onnotice: () => {} });
     child(['scripts/migrate.cjs'], { ...process.env, DATABASE_URL: testUrl.toString() });
     const [ledger] = await admin`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    if (expectedMigrationCount() !== 22 || ledger.count !== 22) throw new Error('RECEPTION_MIGRATION_LEDGER_INVALID');
-    process.stdout.write('RECEPTION_MIGRATION_LEDGER_PASS 22 (0000..0021)\n');
+    if (expectedMigrationCount() !== 23 || ledger.count !== 23) throw new Error('RECEPTION_MIGRATION_LEDGER_INVALID');
+    process.stdout.write('RECEPTION_MIGRATION_LEDGER_PASS 23 (0000..0022)\n');
     for (const [login, password, role] of [
       [apiLogin, `rt_${randomUUID()}`, 'tallermecario_api'],
       [workerLogin, `rt_${randomUUID()}`, 'tallermecario_worker'],

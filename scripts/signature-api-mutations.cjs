@@ -8,6 +8,7 @@ const MUTANTS = Object.freeze({
   client_owned_fields: ['if (Object.keys(raw).some((key) => ![', 'if (false && Object.keys(raw).some((key) => !['],
   reception_lock: ['FOR NO KEY UPDATE', ''],
   audit_rollback: ['await sql `INSERT INTO public.audit_logs', 'if (false) await sql `INSERT INTO public.audit_logs'],
+  trim_before_controls: ["BIDI_CONTROL_CHARACTERS.test(value)", "BIDI_CONTROL_CHARACTERS.test(value.normalize('NFC').trim())"],
 });
 
 function applySignatureMutation(compiledRoot) {
@@ -19,6 +20,13 @@ function applySignatureMutation(compiledRoot) {
   const original = readFileSync(file, 'utf8');
   if (!original.includes(pair[0])) throw new Error(`S305_MUTATION_ANCHOR_MISSING ${name}`);
   writeFileSync(file, original.replace(pair[0], pair[1]));
+  if (name === 'trim_before_controls') {
+    const source = readFileSync(file, 'utf8');
+    const anchor = 'PROHIBITED_CONTROL_CHARACTERS.test(value)';
+    if (!source.includes(anchor)) throw new Error('S305_MUTATION_ANCHOR_MISSING prohibited_controls');
+    writeFileSync(file, source.replace(anchor,
+      "PROHIBITED_CONTROL_CHARACTERS.test(value.normalize('NFC').trim())"));
+  }
   if (name === 'client_owned_fields') {
     const route = join(compiledRoot, 'receptions', 'signature.js');
     const source = readFileSync(route, 'utf8');
