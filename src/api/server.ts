@@ -1,5 +1,5 @@
-import postgres from 'postgres';
 import { buildApi, getTenantRequestContext } from './app.js';
+import { runtimeDatabase } from '../platform/runtime-database.js';
 import type {
   IdentityProvider,
   VerifiedIdentity,
@@ -41,22 +41,6 @@ class UnimplementedIdentityProvider implements IdentityProvider {
   }
 }
 
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name}_REQUIRED`);
-  return value;
-}
-
-function databaseUrlFromEnv(): string {
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
-  const host = requiredEnv('PGHOST');
-  const port = process.env.PGPORT ?? '5432';
-  const database = requiredEnv('PGDATABASE');
-  const user = requiredEnv('PGUSER');
-  const password = requiredEnv('PGPASSWORD');
-  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(database)}`;
-}
-
 function parseCorsAllowedOrigins(): string[] {
   const raw = process.env.CORS_ALLOWED_ORIGINS;
   if (!raw) return [];
@@ -73,14 +57,7 @@ async function main(): Promise<void> {
   const port =Number(process.env.PORT ?? 3000);
   const host = process.env.HOST ?? '0.0.0.0';
 
-  // ADR-009: runtime connects NOBYPASSRLS, never as owner/migrator. The
-  // login role authenticates; `connection.role` then `SET ROLE`s into the
-  // actual runtime role for every session this pool opens.
-  const runtimeRole = process.env.DB_RUNTIME_ROLE ?? 'tallermecario_api';
-  const database = postgres(databaseUrlFromEnv(), {
-    max: Number(process.env.DB_POOL_MAX ?? 10),
-    connection: { role: runtimeRole },
-  });
+  const database = await runtimeDatabase('api', Number(process.env.DB_POOL_MAX ?? 10));
 
   const app = await buildApi({
     database,

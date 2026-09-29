@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const { readFileSync } = require('node:fs');
+const postgres = require('postgres');
 const h = require('./helpers.cjs');
 
 const { admin, id, fixture, makeTenant } = h;
@@ -52,6 +53,85 @@ test.after(async () => {
 });
 
 test.describe('runtime database privilege boundary', () => {
+  test('one NOINHERIT login, two effective roles, no inherited union', async () => {
+    const login = process.env.TEST_RUNTIME_LOGIN;
+    const [flags] = await admin`
+      SELECT rolcanlogin, rolinherit, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole
+      FROM pg_catalog.pg_roles WHERE rolname = ${login}`;
+    assert.deepEqual({ ...flags }, {
+      rolcanlogin: true, rolinherit: false, rolsuper: false, rolbypassrls: false,
+      rolcreatedb: false, rolcreaterole: false,
+    });
+    const [membership] = await admin`
+      SELECT count(*)::int AS n,
+        bool_and(NOT m.inherit_option AND m.set_option) AS restricted
+      FROM pg_catalog.pg_auth_members m
+      JOIN pg_catalog.pg_roles parent ON parent.oid = m.roleid
+      JOIN pg_catalog.pg_roles child ON child.oid = m.member
+      WHERE child.rolname = ${login}
+        AND parent.rolname IN ('tallermecario_api', 'tallermecario_worker')`;
+    assert.deepEqual({ ...membership }, { n: 2, restricted: true });
+
+    const url = new URL(process.env.TEST_DATABASE_URL_ADMIN);
+    url.username = login;
+    url.password = process.env.TEST_RUNTIME_PASSWORD;
+    const neutral = postgres(url.toString(), { max: 1, onnotice: () => {} });
+    try {
+      const [identity] = await neutral`
+        SELECT session_user AS session_role, current_user AS effective_role,
+          pg_catalog.has_schema_privilege(current_user, 'app', 'USAGE') AS app_usage,
+          pg_catalog.has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage`;
+      assert.deepEqual({ ...identity }, {
+        session_role: login, effective_role: login, app_usage: false, public_usage: false,
+      });
+    } finally { await neutral.end(); }
+
+    for (const [pool, role] of [[api, 'tallermecario_api'], [worker, 'tallermecario_worker']]) {
+      const [identity] = await pool`
+        SELECT session_user AS session_role, current_user AS effective_role,
+          r.rolbypassrls AS bypass
+        FROM pg_catalog.pg_roles r WHERE r.rolname = current_user`;
+      assert.deepEqual({ ...identity }, { session_role: login, effective_role: role, bypass: false });
+    }
+    const [apiGrant] = await api`SELECT pg_catalog.has_function_privilege(current_user,
+      'app.bootstrap_claim_outbox_events(integer)', 'EXECUTE') AS allowed`;
+    const [workerGrant] = await worker`SELECT pg_catalog.has_table_privilege(current_user,
+      'public.customers', 'INSERT') AS allowed`;
+    assert.equal(apiGrant.allowed, false);
+    assert.equal(workerGrant.allowed, false);
+  });
+
+  test('SET LOCAL ROLE is scoped to the transaction and reused pool session stays API', async () => {
+    const conn = await api.reserve();
+    try {
+      await conn.unsafe('BEGIN');
+      await conn.unsafe('SET LOCAL ROLE tallermecario_worker');
+      const [inside] = await conn`SELECT current_user AS effective_role`;
+      assert.equal(inside.effective_role, 'tallermecario_worker');
+      await conn.unsafe('ROLLBACK');
+      const [after] = await conn`SELECT current_user AS effective_role`;
+      assert.equal(after.effective_role, 'tallermecario_api');
+    } finally {
+      await conn.unsafe('ROLLBACK').catch(() => undefined);
+      conn.release();
+    }
+    const [reused] = await api`SELECT current_user AS effective_role`;
+    assert.equal(reused.effective_role, 'tallermecario_api');
+    const [otherPool] = await worker`SELECT current_user AS effective_role`;
+    assert.equal(otherPool.effective_role, 'tallermecario_worker');
+  });
+
+  test('unauthorized startup role fails before a query can run', async () => {
+    const url = new URL(process.env.TEST_DATABASE_URL_ADMIN);
+    url.username = process.env.TEST_RUNTIME_LOGIN;
+    url.password = process.env.TEST_RUNTIME_PASSWORD;
+    const invalid = postgres(url.toString(), { max: 1, onnotice: () => {},
+      connection: { role: 'tallermecario_migrator' } });
+    try {
+      await assert.rejects(invalid`SELECT 1 AS would_run`, denied);
+    } finally { await invalid.end(); }
+  });
+
   for (const [role, getConnection] of [
     ['tallermecario_api', () => api],
     ['tallermecario_worker', () => worker],

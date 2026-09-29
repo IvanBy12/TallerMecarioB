@@ -54,20 +54,11 @@ const ALLOWLIST_MATCHES = new Set([
   'docker-compose.staging.yml:25',
   'docker-compose.staging.yml:34',
   'docker-compose.staging.yml:44',
-  'docker-compose.staging.yml:65',
+  'docker-compose.staging.yml:64',
   // staging-deploy-drill.cjs: the literal string "wrong-password" used on
   // purpose to deploy a broken config and prove the rollback drill detects
   // and recovers from it -- not a real credential.
-  'scripts/staging-deploy-drill.cjs:274',
-  // server.ts/run.ts: assembles a connection string from process.env at
-  // runtime (encodeURIComponent(user)/(password)) -- no literal secret here.
-  // (Line numbers moved when S1-03 wired Clerk into both entrypoints; the
-  // flagged line is the same runtime assembly, re-reviewed. Moved again by
-  // S1-04 invitation imports, S1-05 member-role import, S1-06
-  // member-lifecycle import, S2-04 customers import and S2-05 vehicles import; same line content,
-  // re-reviewed.)
-  'src/api/server.ts:56',
-  'src/worker/run.ts:102',
+  'scripts/staging-deploy-drill.cjs:305',
 ]);
 
 const SKIP_EXTENSIONS = new Set([
