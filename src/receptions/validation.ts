@@ -5,6 +5,12 @@ import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
 
 export const RECEPTION_BODY_LIMIT = 16 * 1024;
 const NOTES_MAX = 2000;
+const VERSION_TOKEN_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u;
+export const EDITABLE_FIELDS = [
+  ['appointmentId', 'appointment_id'], ['locationId', 'location_id'],
+  ['mileageKm', 'mileage_km'], ['fuelLevelPct', 'fuel_level_pct'],
+  ['customerNotes', 'customer_notes'], ['advisorNotes', 'advisor_notes'],
+] as const;
 const FIELDS = [
   ['vehicleId', 'vehicle_id'], ['customerId', 'customer_id'],
   ['appointmentId', 'appointment_id'], ['locationId', 'location_id'],
@@ -24,6 +30,23 @@ const createSchema = z.object({
   fuelLevelPct: z.number().int().min(0).max(100).nullable().optional(),
   customerNotes: notes.optional(), advisorNotes: notes.optional(),
 }).strict();
+const patchSchema = z.object({
+  expectedUpdatedAt: z.string().regex(VERSION_TOKEN_PATTERN),
+  appointmentId: z.string().nullable().optional(), locationId: z.string().nullable().optional(),
+  mileageKm: z.number().int().min(0).max(2147483647).optional(),
+  fuelLevelPct: z.number().int().min(0).max(100).nullable().optional(),
+  customerNotes: notes.optional(), advisorNotes: notes.optional(),
+}).strict();
+
+export type EditableColumn = (typeof EDITABLE_FIELDS)[number][1];
+export type EditableValues = {
+  appointment_id: string | null; location_id: string | null; mileage_km: number;
+  fuel_level_pct: number | null; customer_notes: string | null; advisor_notes: string | null;
+};
+export interface PatchReceptionInput {
+  expectedUpdatedAt: string;
+  changes: Partial<EditableValues>;
+}
 
 export interface CreateReceptionInput {
   vehicleId: string;
@@ -40,6 +63,13 @@ export interface CreateReceptionInput {
 export const createReceptionBodySchema = { type: 'object', additionalProperties: false,
   required: ['vehicleId', 'customerId', 'mileageKm'], properties: {
     vehicleId: { type: 'string' }, customerId: { type: 'string' },
+    appointmentId: { type: ['string', 'null'] }, locationId: { type: ['string', 'null'] },
+    mileageKm: { type: 'integer' }, fuelLevelPct: { type: ['integer', 'null'] },
+    customerNotes: { type: ['string', 'null'] }, advisorNotes: { type: ['string', 'null'] },
+  } } as const;
+export const patchReceptionBodySchema = { type: 'object', additionalProperties: false,
+  required: ['expectedUpdatedAt'], minProperties: 2, properties: {
+    expectedUpdatedAt: { type: 'string' },
     appointmentId: { type: ['string', 'null'] }, locationId: { type: ['string', 'null'] },
     mileageKm: { type: 'integer' }, fuelLevelPct: { type: ['integer', 'null'] },
     customerNotes: { type: ['string', 'null'] }, advisorNotes: { type: ['string', 'null'] },
@@ -64,4 +94,24 @@ export function parseCreateReception(body: unknown): CreateReceptionInput {
     advisorNotes: value.advisorNotes ?? null,
     fields: FIELDS.filter(([field]) => Object.hasOwn(value, field)).map(([, column]) => column),
   };
+}
+
+export function parsePatchReception(body: unknown): PatchReceptionInput {
+  const parsed = patchSchema.safeParse(body);
+  if (!parsed.success) throw invalid();
+  const input = parsed.data;
+  const changes: Record<string, string | number | null> = {};
+  for (const [field, column] of EDITABLE_FIELDS) {
+    if (!Object.hasOwn(input, field)) continue;
+    const value = input[field];
+    if (field === 'appointmentId' || field === 'locationId') {
+      const canonical = value === null ? null : parseCanonicalUuid(value);
+      if (canonical === undefined) throw invalid();
+      changes[column] = canonical;
+    } else {
+      changes[column] = value as string | number | null;
+    }
+  }
+  if (Object.keys(changes).length === 0) throw invalid();
+  return { expectedUpdatedAt: input.expectedUpdatedAt, changes: changes as Partial<EditableValues> };
 }
