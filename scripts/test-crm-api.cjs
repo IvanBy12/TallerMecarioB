@@ -155,10 +155,11 @@ async function main() {
       throw new Error(`UNKNOWN_MUTATION ${process.env.S208_LOG_MUTATION}`);
     }
 
-    const files = readdirSync('tests/crm-api')
+    const suiteDir = process.env.TEST_SUITE_DIR === 'reception-api' ? 'tests/reception-api' : 'tests/crm-api';
+    const files = readdirSync(suiteDir)
       .filter((name) => name.endsWith('.test.cjs'))
       .sort()
-      .map((name) => `tests/crm-api/${name}`);
+      .map((name) => `${suiteDir}/${name}`);
     const testArgs = ['--test', '--test-concurrency=1', '--test-timeout=60000'];
     if (process.env.TEST_NAME_PATTERN) testArgs.push(`--test-name-pattern=${process.env.TEST_NAME_PATTERN}`);
     testArgs.push(...files);

@@ -6,7 +6,8 @@ const { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('no
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 
-const original = readFileSync('drizzle/0019_s3_02_reception_invariants.sql', 'utf8');
+// Mutation anchors use LF; checked-in migrations may have CRLF on Windows.
+const original = readFileSync('drizzle/0019_s3_02_reception_invariants.sql', 'utf8').replace(/\r\n/gu, '\n');
 const cases = [
   ['transition', "IF OLD.status <> 'open' OR NEW.status NOT IN ('open', 'closed')", 'IF false'],
   ['parent_open', "IF v_status IS DISTINCT FROM 'open' THEN", 'IF false THEN'],
@@ -25,7 +26,7 @@ try {
     const folder = join(temporary, name);
     cpSync('drizzle', folder, { recursive: true });
     const changed = original.replace(from, to);
-    assert.notEqual(changed, original, `${name} mutation target missing`);
+    assert.ok(changed !== original, `${name} mutation target missing`);
     writeFileSync(join(folder, '0019_s3_02_reception_invariants.sql'), changed);
     const r = spawnSync(process.execPath,
       ['scripts/test-reception-db.cjs'], {
