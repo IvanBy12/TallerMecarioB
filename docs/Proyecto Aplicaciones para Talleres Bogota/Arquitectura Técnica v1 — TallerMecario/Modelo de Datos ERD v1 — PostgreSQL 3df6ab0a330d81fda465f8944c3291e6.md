@@ -506,7 +506,7 @@ tenant_id, reception_id, zone_code, damage_type, severity, description, created_
 
 ## signatures
 
-tenant_id, reception_id nullable, delivery_id nullable, signed_by_name, signed_by_document nullable, signature_media_id, signed_at, ip_address nullable, created_at.
+tenant_id, reception_id nullable, delivery_id nullable, signed_by_name, signed_by_document nullable, signature_media_id, document_version, document_hash, signed_at, ip_address nullable, created_at.
 
 Constraint XOR obligatorio:
 

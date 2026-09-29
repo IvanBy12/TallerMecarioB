@@ -442,6 +442,19 @@ test('NULL vehicle mileage has no historical lower bound', async () => {
   assert.ok(r);
 });
 
+test('signature media is single-use across receptions and runtime cannot truncate signatures', async () => {
+  const firstVehicle = await newVehicle(), secondVehicle = await newVehicle();
+  const firstReception = await scoped(api, a.tenant, (c) => reception(c, a.tenant, firstVehicle));
+  const secondReception = await scoped(api, a.tenant, (c) => reception(c, a.tenant, secondVehicle));
+  const m = await scoped(api, a.tenant, (c) => media(c));
+  await scoped(api, a.tenant, (c) => signature(c, firstReception, m));
+  await assert.rejects(scoped(api, a.tenant, (c) => signature(c, secondReception, m)),
+    failure('23505', 'signatures_one_media_uq'));
+  await assert.rejects(scoped(api, a.tenant, (c) => c`TRUNCATE TABLE public.signatures`),
+    failure('42501'));
+  assert.equal((await admin`SELECT id FROM signatures WHERE signature_media_id=${m}`).length, 1);
+});
+
 test('signature and quarantine serialize in both commit orders', async () => {
   const vehicleId = await newVehicle();
   const r = await scoped(api, a.tenant, (c) => reception(c, a.tenant, vehicleId));
@@ -486,6 +499,30 @@ test('signature and quarantine serialize in both commit orders', async () => {
   } finally {
     if (!signerDone) await end(signer).catch(() => undefined);
     if (!quarantinerDone) await end(quarantiner).catch(() => undefined);
+  }
+});
+
+test('signature wins reception lock before close-like operation and becomes committed close evidence', async () => {
+  const vehicleId = await newVehicle();
+  const r = await scoped(api, a.tenant, (c) => reception(c, a.tenant, vehicleId));
+  const m = await scoped(api, a.tenant, (c) => media(c));
+  const signer = await begin(api, a.tenant), closer = await begin(api, a.tenant);
+  let signerDone = false, closerDone = false;
+  try {
+    const [p1] = await signer`SELECT pg_backend_pid() AS pid`;
+    const [p2] = await closer`SELECT pg_backend_pid() AS pid`;
+    await signature(signer, r, m);
+    const waiting = Promise.resolve(closeWithOrder(closer, r, 501n, vehicleId));
+    await blockedBy(p2.pid, p1.pid);
+    await end(signer, true); signerDone = true;
+    await waiting;
+    await end(closer, true); closerDone = true;
+    const [state] = await admin`SELECT status FROM receptions WHERE id=${r}`;
+    assert.equal(state.status, 'closed');
+    assert.equal((await admin`SELECT id FROM signatures WHERE reception_id=${r}`).length, 1);
+  } finally {
+    if (!signerDone) await end(signer).catch(() => undefined);
+    if (!closerDone) await end(closer).catch(() => undefined);
   }
 });
 

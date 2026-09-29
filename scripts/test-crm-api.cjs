@@ -28,6 +28,7 @@ const { expectedMigrationCount } = require('./migration-count.cjs');
 const { applyMutation } = require('./crm-api-mutations.cjs');
 const { applyVehicleMutation } = require('./vehicle-api-mutations.cjs');
 const { applyOwnershipMutation } = require('./ownership-api-mutations.cjs');
+const { applySignatureMutation } = require('./signature-api-mutations.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -144,6 +145,7 @@ async function main() {
     await applyMutation('js', { compiledRoot });
     await applyVehicleMutation('js', { compiledRoot });
     await applyOwnershipMutation('js', { compiledRoot });
+    if (process.env.TEST_SUITE_DIR === 'reception-api') applySignatureMutation(compiledRoot);
     if (process.env.S208_LOG_MUTATION === 'request-url') {
       const file = join(compiledRoot, 'api', 'app.js');
       const source = readFileSync(file, 'utf8');
@@ -158,6 +160,7 @@ async function main() {
     const suiteDir = process.env.TEST_SUITE_DIR === 'reception-api' ? 'tests/reception-api' : 'tests/crm-api';
     const files = readdirSync(suiteDir)
       .filter((name) => name.endsWith('.test.cjs'))
+      .filter((name) => !process.env.TEST_FILE_FILTER || name === process.env.TEST_FILE_FILTER)
       .sort()
       .map((name) => `${suiteDir}/${name}`);
     // S3-04.5: the no-database privacy primitives also run against this

@@ -406,9 +406,13 @@ delivery_id | uuid | NULL | composite FK deliveries |
 signed_by_name | varchar(200) | NOT NULL | - |
 signed_by_document | varchar(60) | NULL | - | minimize
 signature_media_id | uuid | NOT NULL | composite FK media_assets | media_type=signature guard domain
+document_version | varchar(40) | NOT NULL | server-owned acceptance catalog version |
+document_hash | varchar(128) | NOT NULL | SHA-256 of canonical acceptance text |
 signed_at | timestamptz | NOT NULL | - |
 ip_address | inet | NULL | - |
 created_at | timestamptz | NOT NULL DEFAULT now() | - |
 ```
 
 CHECK XOR: exactamente uno de `reception_id`/`delivery_id` es NOT NULL. Evidencia append-only después de firma.
+UNIQUE parcial `(tenant_id,reception_id)` para una firma por recepción;
+UNIQUE `(tenant_id,signature_media_id)` para uso único de la imagen de firma.

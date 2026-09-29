@@ -160,7 +160,7 @@ async function main() {
   const maintenance = postgres(source.toString(), { max: 1, prepare: false, onnotice: () => {} });
   const original = new Set((await maintenance`SELECT rolname FROM pg_roles WHERE rolname = ANY(${ROLES})`).map((r) => r.rolname));
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json','utf8'));
-  assert.equal(journal.entries.length, 21);
+  assert.equal(journal.entries.length, 22);
   // 0019 cases upgrade to a 0019 head: their valid fixture holds a legacy
   // reception, which 0020 deliberately refuses (fail closed, covered below).
   const head19 = mkdtempSync(join(tmpdir(), 'tm-reception-head19-'));
@@ -267,7 +267,7 @@ async function main() {
         if (!expectedConstraint) {
           assert.equal(diagnostic, null, 'clean preflight');
           assert.equal(upgraded.status, 0, upgraded.stderr);
-          assert.equal(await ledger(sql), 21);
+          assert.equal(await ledger(sql), 22);
           await forced();
           assert.deepEqual(await privacySnapshot(sql, tenant), before);
           const schemaAfter = await privacySchema(sql);
@@ -277,7 +277,7 @@ async function main() {
             'privacy_consents_evidence_truncate_trg', 'receptions_guard_10_current_owner_trg',
             'receptions_guard_20_privacy_consent_trg']);
           assert.equal(migrate(target.toString(), 'drizzle').status, 0);
-          assert.equal(await ledger(sql), 21);
+          assert.equal(await ledger(sql), 22);
           assert.deepEqual(await privacySchema(sql), schemaAfter, 'rerun is a no-op');
           process.stdout.write(`UPGRADE_PRIVACY_${kind.toUpperCase()}_PASS 0019 -> 0020; data unchanged; rerun no-op\n`);
         } else {
