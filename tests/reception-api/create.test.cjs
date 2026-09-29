@@ -200,6 +200,9 @@ test('RBAC and unauthenticated: route permission blocks technician before handle
   registerReceptionRoutes({ post(path, options) {
     assert.equal(path, '/api/v1/receptions');
     assert.deepEqual(options.config, { permission: 'receptions.create' });
+  }, patch(path, options) {
+    assert.equal(path, '/api/v1/receptions/:receptionId');
+    assert.deepEqual(options.config, { permission: 'receptions.update_open' });
   } });
   for (const actor of [a.owner, a.admin, a.advisor]) {
     const ownVehicle = actor === a.owner ? v : await vehicle(a.owner, a.tenantId, c);
@@ -302,6 +305,8 @@ test('only known PostgreSQL constraints map; audit failure rolls insert back', a
   ]) assert.equal(mapReceptionDbError(state)?.code, expected);
   assert.equal(mapReceptionDbError({ code: '23505', constraint_name: 'other' }), null);
   assert.equal(mapReceptionDbError({ code: '23514', constraint_name: 'other' }), null);
+  assert.equal(mapReceptionDbError({ code: '23503', constraint_name: 'other' }), null);
+  assert.equal(mapReceptionDbError({ code: '23514', constraint_name: 'receptions_lifecycle_guard' }), null);
   const { a } = await h.twoTenants();
   const c = await customer(a.owner, a.tenantId);
   const v = await vehicle(a.owner, a.tenantId, c);

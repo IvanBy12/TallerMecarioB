@@ -1,7 +1,8 @@
 import type postgres from 'postgres';
 import { ApiError, type TenantRequestContext } from '../api/app.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
-import type { CreateReceptionInput } from './validation.js';
+import { EDITABLE_FIELDS, type CreateReceptionInput, type EditableColumn,
+  type EditableValues, type PatchReceptionInput } from './validation.js';
 
 const TIMESTAMP_FORMAT = 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"';
 export interface RequestMeta { requestId: string; ipAddress: string; }
@@ -16,8 +17,8 @@ interface ReceptionRow {
   id: string; vehicle_id: string; customer_id: string;
   appointment_id: string | null; location_id: string | null;
   received_by_membership_id: string; mileage_km: number; fuel_level_pct: number | null;
-  customer_notes: string | null; advisor_notes: string | null; status: 'open';
-  received_at: string; closed_at: null; created_at: string; updated_at: string;
+  customer_notes: string | null; advisor_notes: string | null; status: 'open' | 'closed' | 'cancelled';
+  received_at: string; closed_at: string | null; created_at: string; updated_at: string;
 }
 const notFound = (entity: 'VEHICLE' | 'CUSTOMER' | 'APPOINTMENT' | 'LOCATION') =>
   new ApiError(404, `${entity}_NOT_FOUND`, `The ${entity.toLowerCase()} was not found.`);
@@ -32,6 +33,7 @@ function columns(sql: postgres.Sql) {
     pg_catalog.to_char(r.updated_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS updated_at`;
 }
 function toDto(row: ReceptionRow): ReceptionDto {
+  if (row.status !== 'open' || row.closed_at !== null) throw new Error('RECEPTION_DTO_NOT_OPEN');
   return { receptionId: row.id, vehicleId: row.vehicle_id, customerId: row.customer_id,
     appointmentId: row.appointment_id, locationId: row.location_id,
     receivedByMembershipId: row.received_by_membership_id, mileageKm: row.mileage_km,
@@ -89,5 +91,63 @@ export async function createReception(context: TenantRequestContext, input: Crea
   ) VALUES (${uuidV7()}, ${tenant.tenantId}, 'user', ${tenant.userId}, ${tenant.membershipId},
     'reception.created', 'success', 'reception', ${row.id}, NULL, NULL, NULL,
     ${sql.json({ fields: input.fields })}, ${meta.requestId}, ${meta.ipAddress}::inet)`;
+  return toDto(row);
+}
+
+export async function updateReception(context: TenantRequestContext, receptionId: string,
+  input: PatchReceptionInput, meta: RequestMeta): Promise<ReceptionDto> {
+  const { sql, tenant } = context;
+  // Match CRM's exact PostgreSQL text token: never parse it as a JS Date.
+  // Check open + OCC under the row lock, before deciding a normalized no-op.
+  const [current] = await sql<(ReceptionRow & { version_matches: boolean })[]>`
+    SELECT ${columns(sql)},
+      pg_catalog.to_char(r.updated_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) =
+        ${input.expectedUpdatedAt} AS version_matches
+    FROM public.receptions AS r
+    WHERE r.tenant_id = ${tenant.tenantId} AND r.id = ${receptionId}
+    FOR NO KEY UPDATE OF r`;
+  if (!current) throw new ApiError(404, 'RECEPTION_NOT_FOUND', 'The reception was not found.');
+  if (current.status !== 'open')
+    throw new ApiError(409, 'RECEPTION_NOT_EDITABLE', 'The reception cannot be edited.');
+  if (!current.version_matches)
+    throw new ApiError(409, 'RESOURCE_VERSION_CONFLICT', 'The reception was modified by another request.');
+
+  const changed: EditableColumn[] = EDITABLE_FIELDS.map(([, column]) => column)
+    .filter((column) => Object.hasOwn(input.changes, column)
+      && input.changes[column] !== current[column]);
+  if (changed.length === 0) return toDto(current);
+
+  // The reception row is locked first. The 0019 lifecycle trigger subsequently
+  // locks its vehicle (even when mileage is unchanged), preserving close's order.
+  for (const [column, table, entity] of [
+    ['appointment_id', 'appointments', 'APPOINTMENT'],
+    ['location_id', 'workshop_locations', 'LOCATION'],
+  ] as const) {
+    if (!changed.includes(column)) continue;
+    const id = input.changes[column];
+    if (id == null) continue;
+    const [reference] = await sql`SELECT id FROM public.${sql(table)}
+      WHERE tenant_id = ${tenant.tenantId} AND id = ${id}`;
+    if (!reference) throw notFound(entity);
+  }
+
+  const merged: EditableValues = { ...current, ...input.changes };
+  const assignments = changed.map((column) => sql`${sql(column)} = ${merged[column]}`)
+    .reduce((list, assignment) => sql`${list}, ${assignment}`);
+  const [row] = await sql<ReceptionRow[]>`UPDATE public.receptions AS r SET ${assignments},
+      updated_at = GREATEST(pg_catalog.now(), r.updated_at + interval '1 microsecond')
+    WHERE r.tenant_id = ${tenant.tenantId} AND r.id = ${receptionId}
+      AND r.status = 'open'
+      AND pg_catalog.to_char(r.updated_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) =
+        ${input.expectedUpdatedAt}
+    RETURNING ${columns(sql)}`;
+  if (!row) throw new Error('RECEPTION_LOCKED_UPDATE_FAILED');
+  await sql`INSERT INTO public.audit_logs (
+    id, tenant_id, actor_type, actor_user_id, actor_membership_id, action, outcome,
+    entity_type, entity_id, reason_code, before_json, after_json, metadata_json,
+    request_id, ip_address
+  ) VALUES (${uuidV7()}, ${tenant.tenantId}, 'user', ${tenant.userId}, ${tenant.membershipId},
+    'reception.updated', 'success', 'reception', ${row.id}, NULL, NULL, NULL,
+    ${sql.json({ changed_fields: changed })}, ${meta.requestId}, ${meta.ipAddress}::inet)`;
   return toDto(row);
 }

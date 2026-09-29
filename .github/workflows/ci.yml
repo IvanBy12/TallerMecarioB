@@ -139,7 +139,7 @@ jobs:
       - name: CRM customer, vehicle, and ownership API (S2-04 to S2-06)
         run: npm run test:crm:api:ci
 
-      - name: Reception create API (S3-03)
+      - name: Reception create and edit API (S3-03 to S3-04)
         run: npm run test:reception:api:ci
 
       - name: Shared runtime database role boundary
