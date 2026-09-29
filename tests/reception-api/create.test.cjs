@@ -47,6 +47,26 @@ async function count(vehicleId) {
     WHERE vehicle_id=${vehicleId} AND status='open'`;
   return row.n;
 }
+async function waitForBlockedOn(holderPid, expected, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [row] = await h.admin`WITH RECURSIVE waiting(pid) AS (
+      SELECT pid FROM pg_catalog.pg_stat_activity
+      WHERE datname = pg_catalog.current_database()
+        AND ${holderPid} = ANY(pg_catalog.pg_blocking_pids(pid))
+      UNION
+      SELECT a.pid FROM pg_catalog.pg_stat_activity a
+      JOIN waiting w ON w.pid = ANY(pg_catalog.pg_blocking_pids(a.pid))
+      WHERE a.datname = pg_catalog.current_database()
+    ) SELECT count(DISTINCT a.pid)::int AS n FROM waiting w
+      JOIN pg_catalog.pg_stat_activity a ON a.pid = w.pid
+      WHERE a.wait_event_type = 'Lock'
+        AND a.query LIKE '%INSERT INTO public.receptions AS r%'`;
+    if (row.n >= expected) return;
+    if (Date.now() > deadline) throw new Error(`RECEPTION_LOCK_WAITERS_NOT_REACHED ${row.n}/${expected}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 async function seedLocation(tenantId) {
   const id = randomUUID();
   await h.admin`INSERT INTO public.workshop_locations
@@ -152,7 +172,9 @@ test('validation and server controlled fields reject without insertion', async (
   const v = await vehicle(a.owner, a.tenantId, c);
   const invalid = [
     body(v, c, { mileageKm: -1 }), body(v, c, { fuelLevelPct: -1 }),
-    body(v, c, { fuelLevelPct: 101 }), body('bad', c), body(v, 'bad'),
+    body(v, c, { mileageKm: 1.5 }), body(v, c, { mileageKm: '100' }),
+    body(v, c, { mileageKm: null }), body(v, c, { fuelLevelPct: 101 }),
+    body('bad', c), body(v, 'bad'),
     body(v, c, { appointmentId: 'bad' }), body(v, c, { locationId: 'bad' }),
     body(v, c, { unknown: true }), body(v, c, { customerNotes: 'a'.repeat(2001) }),
     body(v, c, { advisorNotes: 'a'.repeat(2001) }),
@@ -165,6 +187,9 @@ test('validation and server controlled fields reject without insertion', async (
     assert.equal(code(result), 'REQUEST_VALIDATION_FAILED');
     assert.deepEqual(Object.keys(result.json.error).sort(), ['code', 'message', 'request_id']);
   }
+  const oversized = await call(a.owner, a.tenantId, body(v, c, { customerNotes: 'x'.repeat(17000) }));
+  assert.equal(oversized.status, 413);
+  assert.equal(code(oversized), 'PAYLOAD_TOO_LARGE');
   assert.equal(await count(v), 0);
 });
 
@@ -214,20 +239,20 @@ test('tenant references: foreign and absent IDs share 404, no owner requirement'
     const missing = await call(a.owner, a.tenantId, { ...payload,
       [field === 'VEHICLE' ? 'vehicleId' : field === 'CUSTOMER' ? 'customerId' :
         field === 'LOCATION' ? 'locationId' : 'appointmentId']: randomUUID() });
-    assert.equal(missing.status, 404);
-    assert.equal(missing.json.error.message, result.json.error.message);
+    assert.equal(h.errorShape(missing), h.errorShape(result));
   }
   assert.equal(await count(va), 0);
 });
 
-test('database mileage guard, duplicate open, and two simultaneous creates', async () => {
+test('database mileage conflict, duplicate open, and two creates blocked before INSERT', async () => {
   const { a } = await h.twoTenants();
   const c = await customer(a.owner, a.tenantId);
   const v = await vehicle(a.owner, a.tenantId, c);
   await h.admin`UPDATE public.vehicles SET current_mileage_km=100 WHERE id=${v}`;
   const low = await call(a.owner, a.tenantId, body(v, c, { mileageKm: 99 }));
-  assert.equal(low.status, 400);
-  assert.equal(code(low), 'REQUEST_VALIDATION_FAILED');
+  assert.equal(low.status, 409);
+  assert.equal(code(low), 'RECEPTION_MILEAGE_CONFLICT');
+  assert.deepEqual(Object.keys(low.json.error).sort(), ['code', 'message', 'request_id']);
   assert.equal(await count(v), 0);
   const first = await call(a.owner, a.tenantId, body(v, c));
   assert.equal(first.status, 201);
@@ -236,13 +261,32 @@ test('database mileage guard, duplicate open, and two simultaneous creates', asy
   assert.equal(code(duplicate), 'RECEPTION_ALREADY_OPEN');
   assert.equal(await count(v), 1);
   const concurrentVehicle = await vehicle(a.owner, a.tenantId, c);
-  const results = await Promise.all([
-    call(a.owner, a.tenantId, body(concurrentVehicle, c)),
-    call(a.admin, a.tenantId, body(concurrentVehicle, c)),
-  ]);
+  const holder = await h.admin.reserve();
+  let pending;
+  let barrierError;
+  try {
+    await holder.unsafe('BEGIN');
+    const [backend] = await holder`SELECT pg_catalog.pg_backend_pid() AS pid`;
+    await holder`SELECT id FROM public.vehicles
+      WHERE tenant_id=${a.tenantId} AND id=${concurrentVehicle} FOR UPDATE`;
+    pending = [call(a.owner, a.tenantId, body(concurrentVehicle, c)),
+      call(a.admin, a.tenantId, body(concurrentVehicle, c))];
+    // Both requests must reach the 0019 trigger's vehicle lock before release.
+    // Thus any SELECT-open-reception precheck has already run in both requests.
+    await waitForBlockedOn(backend.pid, 2);
+  } catch (error) {
+    barrierError = error;
+  } finally {
+    await holder.unsafe('ROLLBACK').catch(() => undefined);
+    holder.release();
+  }
+  const results = pending ? await Promise.all(pending) : [];
+  if (barrierError) throw barrierError;
   assert.deepEqual(results.map((result) => result.status).sort(), [201, 409]);
   assert.equal(results.find((result) => result.status === 409).json.error.code, 'RECEPTION_ALREADY_OPEN');
-  assert.equal(await count(concurrentVehicle), 1);
+  const [open] = await h.admin`SELECT count(*)::int AS n FROM public.receptions
+    WHERE tenant_id=${a.tenantId} AND vehicle_id=${concurrentVehicle} AND status='open'`;
+  assert.equal(open.n, 1);
 });
 
 test('only known PostgreSQL constraints map; audit failure rolls insert back', async () => {
@@ -252,7 +296,7 @@ test('only known PostgreSQL constraints map; audit failure rolls insert back', a
     [{ code: '23503', constraint_name: 'receptions_customer_fk' }, 'CUSTOMER_NOT_FOUND'],
     [{ code: '23503', constraint_name: 'receptions_appointment_fk' }, 'APPOINTMENT_NOT_FOUND'],
     [{ code: '23503', constraint_name: 'receptions_location_fk' }, 'LOCATION_NOT_FOUND'],
-    [{ code: '23514', constraint_name: 'receptions_vehicle_mileage_guard' }, 'REQUEST_VALIDATION_FAILED'],
+    [{ code: '23514', constraint_name: 'receptions_vehicle_mileage_guard' }, 'RECEPTION_MILEAGE_CONFLICT'],
     [{ code: '23514', constraint_name: 'receptions_fuel_check' }, 'REQUEST_VALIDATION_FAILED'],
     [{ code: '23514', constraint_name: 'receptions_mileage_check' }, 'REQUEST_VALIDATION_FAILED'],
   ]) assert.equal(mapReceptionDbError(state)?.code, expected);

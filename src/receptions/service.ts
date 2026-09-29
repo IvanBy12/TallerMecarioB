@@ -51,8 +51,11 @@ export function mapReceptionDbError(error: unknown): ApiError | null {
     if (name === 'receptions_appointment_fk') return notFound('APPOINTMENT');
     if (name === 'receptions_location_fk') return notFound('LOCATION');
   }
+  if (db.code === '23514' && name === 'receptions_vehicle_mileage_guard')
+    return new ApiError(409, 'RECEPTION_MILEAGE_CONFLICT',
+      'The reception mileage conflicts with the current vehicle mileage.');
   if (db.code === '23514' && [
-    'receptions_mileage_check', 'receptions_fuel_check', 'receptions_vehicle_mileage_guard',
+    'receptions_mileage_check', 'receptions_fuel_check',
   ].includes(name ?? '')) return invalid();
   return null;
 }
