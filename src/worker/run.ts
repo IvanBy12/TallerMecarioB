@@ -92,14 +92,9 @@ function createWompiHandlers(
 }
 
 function databaseUrlFromEnv(): string {
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
-  const host = process.env.PGHOST;
-  const database = process.env.PGDATABASE;
-  const user = process.env.PGUSER;
-  const password = process.env.PGPASSWORD;
-  if (!host || !database || !user || !password) throw new Error('DATABASE_CONFIGURATION_REQUIRED');
-  const port = process.env.PGPORT ?? '5432';
-  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(database)}`;
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error('DATABASE_CONFIGURATION_REQUIRED');
+  return url;
 }
 
 async function main(): Promise<void> {
