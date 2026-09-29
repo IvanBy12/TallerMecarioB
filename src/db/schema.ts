@@ -2320,6 +2320,8 @@ export const signatures = pgTable(
     uniqueIndex('signatures_one_reception_uq')
       .on(t.tenantId, t.receptionId)
       .where(sql`reception_id IS NOT NULL`),
+    // A captured image is evidence for one signing event, never reusable.
+    uniqueIndex('signatures_one_media_uq').on(t.tenantId, t.signatureMediaId),
     foreignKey({
       name: 'signatures_reception_fk',
       columns: [t.tenantId, t.receptionId],

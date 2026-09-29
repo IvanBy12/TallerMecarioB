@@ -148,6 +148,20 @@
       "when": 1790699630413,
       "tag": "0020_s3_04_5_reception_privacy_contract",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1790784000000,
+      "tag": "0021_s3_05_signature_media_single_use",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1790812800000,
+      "tag": "0022_s3_05_signed_media_quarantine",
+      "breakpoints": true
     }
   ]
 }

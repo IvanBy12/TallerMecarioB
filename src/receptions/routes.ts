@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ApiError, getTenantRequestContext } from '../api/app.js';
 import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
 import { createReception, mapReceptionDbError, updateReception } from './service.js';
+import { captureReceptionSignature, mapSignatureDbError, parseSignatureInput,
+  SIGNATURE_BODY_LIMIT, signatureBodySchema } from './signature.js';
 import { createReceptionBodySchema, parseCreateReception, parsePatchReception,
   patchReceptionBodySchema, RECEPTION_BODY_LIMIT } from './validation.js';
 
@@ -42,5 +44,21 @@ export function registerReceptionRoutes(app: FastifyInstance): void {
       throw mapReceptionDbError(error) ?? error;
     }
     return reply.send({ reception });
+  });
+  app.post('/api/v1/receptions/:receptionId/signature', { bodyLimit: SIGNATURE_BODY_LIMIT,
+    config: { permission: 'signatures.capture' }, schema: { body: signatureBodySchema },
+    onRequest: [noStore, requireJson],
+  }, async (request, reply) => {
+    const receptionId = parseCanonicalUuid((request.params as { receptionId?: unknown }).receptionId);
+    if (!receptionId) throw new ApiError(404, 'RECEPTION_NOT_FOUND', 'The reception was not found.');
+    const input = parseSignatureInput(request.body);
+    let signature;
+    try {
+      signature = await captureReceptionSignature(getTenantRequestContext(request), receptionId,
+        input, { requestId: request.id, ipAddress: request.ip });
+    } catch (error) {
+      throw mapSignatureDbError(error) ?? error;
+    }
+    return reply.code(201).send({ signature });
   });
 }

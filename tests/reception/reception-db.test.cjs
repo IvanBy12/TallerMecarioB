@@ -287,7 +287,13 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
   await assert.rejects(admin`UPDATE signatures SET document_hash=${'b'.repeat(64)} WHERE id=${sig}`,
     failure('23514', 'signatures_append_only_guard'));
   await assert.rejects(scoped(api, a.tenant, (c) => c`DELETE FROM signatures WHERE id=${sig}`), failure('42501'));
-  await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE media_assets SET status='quarantined' WHERE id=${good}`),
+  const [signatureBefore] = await admin`SELECT row_to_json(s)::text AS snapshot FROM signatures s WHERE id=${sig}`;
+  await scoped(api, a.tenant, (c) => c`UPDATE media_assets SET status='quarantined' WHERE id=${good}`);
+  const [quarantined] = await admin`SELECT status,object_key FROM media_assets WHERE id=${good}`;
+  assert.deepEqual([quarantined.status, quarantined.object_key], ['quarantined', good]);
+  const [signatureAfter] = await admin`SELECT row_to_json(s)::text AS snapshot FROM signatures s WHERE id=${sig}`;
+  assert.equal(signatureAfter.snapshot, signatureBefore.snapshot);
+  await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE media_assets SET status='active' WHERE id=${good}`),
     failure('23514', 'signatures_media_guard'));
   for (const [column, value] of [
     ['object_key', id()], ['checksum_sha256', 'b'.repeat(64)], ['media_type', 'photo'],
@@ -298,6 +304,8 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
       `UPDATE media_assets SET ${column}=$1 WHERE id=$2`, [value, good])),
     failure('23514', 'signatures_media_guard'));
   }
+  await assert.rejects(admin`DELETE FROM media_assets WHERE id=${good}`,
+    failure('23503', 'signatures_media_fk'));
   await scoped(api, a.tenant, (c) => c`UPDATE media_assets SET retention_policy_version='v2' WHERE id=${good}`);
   await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE receptions SET status='cancelled', closed_at=now() WHERE id=${r}`),
     failure('23514', 'receptions_lifecycle_guard'));
@@ -442,6 +450,29 @@ test('NULL vehicle mileage has no historical lower bound', async () => {
   assert.ok(r);
 });
 
+test('signature media is single-use across receptions and delivery and runtime cannot truncate signatures', async () => {
+  const firstVehicle = await newVehicle(), secondVehicle = await newVehicle();
+  const firstReception = await scoped(api, a.tenant, (c) => reception(c, a.tenant, firstVehicle));
+  const secondReception = await scoped(api, a.tenant, (c) => reception(c, a.tenant, secondVehicle));
+  const m = await scoped(api, a.tenant, (c) => media(c));
+  await scoped(api, a.tenant, (c) => signature(c, firstReception, m));
+  await assert.rejects(scoped(api, a.tenant, (c) => signature(c, secondReception, m)),
+    failure('23505', 'signatures_one_media_uq'));
+  const delivery = id();
+  const order = await scoped(api, a.tenant, (c) => closeWithOrder(c, firstReception, 934n, firstVehicle));
+  await admin.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`INSERT INTO deliveries (id,tenant_id,order_id) VALUES (${delivery},${a.tenant},${order})`;
+  });
+  await assert.rejects(scoped(api, a.tenant, (c) => c`INSERT INTO signatures
+    (id,tenant_id,delivery_id,signed_by_name,signature_media_id,signed_at,document_version,document_hash)
+    VALUES (${id()},${a.tenant},${delivery},'Delivery',${m},now(),'v1',${'a'.repeat(64)})`),
+  failure('23505', 'signatures_one_media_uq'));
+  await assert.rejects(scoped(api, a.tenant, (c) => c`TRUNCATE TABLE public.signatures`),
+    failure('42501'));
+  assert.equal((await admin`SELECT id FROM signatures WHERE signature_media_id=${m}`).length, 1);
+});
+
 test('signature and quarantine serialize in both commit orders', async () => {
   const vehicleId = await newVehicle();
   const r = await scoped(api, a.tenant, (c) => reception(c, a.tenant, vehicleId));
@@ -478,14 +509,38 @@ test('signature and quarantine serialize in both commit orders', async () => {
       SET status='quarantined' WHERE id=${secondMedia}`).then(() => null, (e) => e);
     await blockedBy(p2.pid, p1.pid);
     await end(signer, true); signerDone = true;
-    failure('23514', 'signatures_media_guard')(await waiting);
-    await end(quarantiner); quarantinerDone = true;
+    assert.equal(await waiting, null);
+    await end(quarantiner, true); quarantinerDone = true;
     const [state] = await admin`SELECT status FROM media_assets WHERE id=${secondMedia}`;
-    assert.equal(state.status, 'active');
+    assert.equal(state.status, 'quarantined');
     assert.equal((await admin`SELECT id FROM signatures WHERE signature_media_id=${secondMedia}`).length, 1);
   } finally {
     if (!signerDone) await end(signer).catch(() => undefined);
     if (!quarantinerDone) await end(quarantiner).catch(() => undefined);
+  }
+});
+
+test('signature wins reception lock before close-like operation and becomes committed close evidence', async () => {
+  const vehicleId = await newVehicle();
+  const r = await scoped(api, a.tenant, (c) => reception(c, a.tenant, vehicleId));
+  const m = await scoped(api, a.tenant, (c) => media(c));
+  const signer = await begin(api, a.tenant), closer = await begin(api, a.tenant);
+  let signerDone = false, closerDone = false;
+  try {
+    const [p1] = await signer`SELECT pg_backend_pid() AS pid`;
+    const [p2] = await closer`SELECT pg_backend_pid() AS pid`;
+    await signature(signer, r, m);
+    const waiting = Promise.resolve(closeWithOrder(closer, r, 501n, vehicleId));
+    await blockedBy(p2.pid, p1.pid);
+    await end(signer, true); signerDone = true;
+    await waiting;
+    await end(closer, true); closerDone = true;
+    const [state] = await admin`SELECT status FROM receptions WHERE id=${r}`;
+    assert.equal(state.status, 'closed');
+    assert.equal((await admin`SELECT id FROM signatures WHERE reception_id=${r}`).length, 1);
+  } finally {
+    if (!signerDone) await end(signer).catch(() => undefined);
+    if (!closerDone) await end(closer).catch(() => undefined);
   }
 });
 
