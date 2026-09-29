@@ -12,7 +12,7 @@ export const EDITABLE_FIELDS = [
   ['customerNotes', 'customer_notes'], ['advisorNotes', 'advisor_notes'],
 ] as const;
 const FIELDS = [
-  ['vehicleId', 'vehicle_id'], ['customerId', 'customer_id'],
+  ['vehicleId', 'vehicle_id'], ['customerId', 'customer_id'], ['privacyConsentId', 'privacy_consent_id'],
   ['appointmentId', 'appointment_id'], ['locationId', 'location_id'],
   ['mileageKm', 'mileage_km'], ['fuelLevelPct', 'fuel_level_pct'],
   ['customerNotes', 'customer_notes'], ['advisorNotes', 'advisor_notes'],
@@ -23,8 +23,10 @@ const notes = z.string().refine(hasValidUnicode)
   .refine((value) => !BIDI_CONTROL_CHARACTERS.test(value) && !NOTES_PROHIBITED.test(value))
   .refine((value) => codePointLength(value) <= NOTES_MAX)
   .nullable().transform((value) => value === '' ? null : value);
+// S3-04.5 (D-PRIV-01): the exact service_provision consent covering this
+// reception. Never derived, implicit or "latest"; immutable after INSERT.
 const createSchema = z.object({
-  vehicleId: z.string(), customerId: z.string(),
+  vehicleId: z.string(), customerId: z.string(), privacyConsentId: z.string(),
   appointmentId: z.string().nullable().optional(), locationId: z.string().nullable().optional(),
   mileageKm: z.number().int().min(0).max(2147483647),
   fuelLevelPct: z.number().int().min(0).max(100).nullable().optional(),
@@ -51,6 +53,7 @@ export interface PatchReceptionInput {
 export interface CreateReceptionInput {
   vehicleId: string;
   customerId: string;
+  privacyConsentId: string;
   appointmentId: string | null;
   locationId: string | null;
   mileageKm: number;
@@ -61,8 +64,8 @@ export interface CreateReceptionInput {
 }
 
 export const createReceptionBodySchema = { type: 'object', additionalProperties: false,
-  required: ['vehicleId', 'customerId', 'mileageKm'], properties: {
-    vehicleId: { type: 'string' }, customerId: { type: 'string' },
+  required: ['vehicleId', 'customerId', 'privacyConsentId', 'mileageKm'], properties: {
+    vehicleId: { type: 'string' }, customerId: { type: 'string' }, privacyConsentId: { type: 'string' },
     appointmentId: { type: ['string', 'null'] }, locationId: { type: ['string', 'null'] },
     mileageKm: { type: 'integer' }, fuelLevelPct: { type: ['integer', 'null'] },
     customerNotes: { type: ['string', 'null'] }, advisorNotes: { type: ['string', 'null'] },
@@ -85,11 +88,13 @@ export function parseCreateReception(body: unknown): CreateReceptionInput {
   const value = parsed.data;
   const vehicleId = parseCanonicalUuid(value.vehicleId);
   const customerId = parseCanonicalUuid(value.customerId);
+  const privacyConsentId = parseCanonicalUuid(value.privacyConsentId);
   const appointmentId = value.appointmentId == null ? null : parseCanonicalUuid(value.appointmentId);
   const locationId = value.locationId == null ? null : parseCanonicalUuid(value.locationId);
-  if (!vehicleId || !customerId || appointmentId === undefined || locationId === undefined) throw invalid();
+  if (!vehicleId || !customerId || !privacyConsentId || appointmentId === undefined
+    || locationId === undefined) throw invalid();
   return {
-    vehicleId, customerId, appointmentId, locationId, mileageKm: value.mileageKm,
+    vehicleId, customerId, privacyConsentId, appointmentId, locationId, mileageKm: value.mileageKm,
     fuelLevelPct: value.fuelLevelPct ?? null, customerNotes: value.customerNotes ?? null,
     advisorNotes: value.advisorNotes ?? null,
     fields: FIELDS.filter(([field]) => Object.hasOwn(value, field)).map(([, column]) => column),

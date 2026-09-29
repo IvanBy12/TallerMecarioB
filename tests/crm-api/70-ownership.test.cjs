@@ -220,9 +220,10 @@ test('S2-06 RBAC guard survives vehicles.update; technician denied even when ass
   const receptionId = randomUUID(); const orderId = randomUUID();
   await h.admin.begin(async (tx) => {
     const mediaId = randomUUID();
+    const consentId = await h.seedServiceConsent(tx, a.tenantId, c1);
     await tx`INSERT INTO public.receptions
-      (id,tenant_id,vehicle_id,customer_id,received_by_membership_id,mileage_km)
-      VALUES (${receptionId},${a.tenantId},${v.vehicleId},${c1},${a.advisor.membershipId},0)`;
+      (id,tenant_id,vehicle_id,customer_id,privacy_consent_id,received_by_membership_id,mileage_km)
+      VALUES (${receptionId},${a.tenantId},${v.vehicleId},${c1},${consentId},${a.advisor.membershipId},0)`;
     await tx`INSERT INTO public.media_assets
       (id,tenant_id,bucket,object_key,media_type,mime_type,status,retention_class,retention_policy_version)
       VALUES (${mediaId},${a.tenantId},'fixture',${mediaId},'signature','image/png','active','operational','v1')`;

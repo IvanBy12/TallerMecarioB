@@ -180,7 +180,7 @@ test.describe('2. QC vs executing technician separation', () => {
     const order2 = id();
     const reception2 = id();
     await fixture(async (tx) => {
-      await tx`INSERT INTO receptions ${tx({ id: reception2, tenant_id: t.tenant, vehicle_id: t.vehicle, customer_id: t.customer, received_by_membership_id: t.members[0], mileage_km: 2, status: 'closed', closed_at: new Date() })}`;
+      await tx`INSERT INTO receptions ${tx({ id: reception2, tenant_id: t.tenant, vehicle_id: t.vehicle, customer_id: t.customer, privacy_consent_id: t.consent, received_by_membership_id: t.members[0], mileage_km: 2, status: 'closed', closed_at: new Date() })}`;
       const signatureMedia = id();
       await tx`INSERT INTO media_assets ${tx({ id: signatureMedia, tenant_id: t.tenant, bucket: 'fixture', object_key: signatureMedia, media_type: 'signature', mime_type: 'image/png', status: 'active', retention_class: 'operational', retention_policy_version: 'v1' })}`;
       await tx`INSERT INTO signatures ${tx({ id: id(), tenant_id: t.tenant, reception_id: reception2, signed_by_name: 'Fixture', signature_media_id: signatureMedia, signed_at: new Date(), document_version: 'v1', document_hash: 'a'.repeat(64) })}`;

@@ -7,7 +7,12 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 
 // Mutation anchors use LF; checked-in migrations may have CRLF on Windows.
-const original = readFileSync('drizzle/0019_s3_02_reception_invariants.sql', 'utf8').replace(/\r\n/gu, '\n');
+const migrations = new Map([
+  ['0019_s3_02_reception_invariants.sql',
+    readFileSync('drizzle/0019_s3_02_reception_invariants.sql', 'utf8').replace(/\r\n/gu, '\n')],
+  ['0020_s3_04_5_reception_privacy_contract.sql',
+    readFileSync('drizzle/0020_s3_04_5_reception_privacy_contract.sql', 'utf8').replace(/\r\n/gu, '\n')],
+]);
 const cases = [
   ['transition', "IF OLD.status <> 'open' OR NEW.status NOT IN ('open', 'closed')", 'IF false'],
   ['parent_open', "IF v_status IS DISTINCT FROM 'open' THEN", 'IF false THEN'],
@@ -18,16 +23,29 @@ const cases = [
   ['initial_order_state', "IF TG_OP = 'INSERT' AND (NEW.status IS DISTINCT FROM 'reception'\n    OR NEW.version IS DISTINCT FROM 1 OR NEW.closed_at IS NOT NULL) THEN", 'IF false THEN'],
   ['insert_must_start_open', "IF TG_OP = 'INSERT' AND NEW.status <> 'open' THEN", 'IF false THEN'],
   ['media_share_lock_removed', 'AND m.id = NEW.signature_media_id FOR SHARE;', 'AND m.id = NEW.signature_media_id;'],
+  // S3-04.5: each mutant must migrate successfully and be rejected by a
+  // behavioral assertion in tests/reception/privacy-contract-db.test.cjs.
+  ['owner_guard_removed', 'IF v_owner IS DISTINCT FROM NEW.customer_id THEN', 'IF false THEN', '0020_s3_04_5_reception_privacy_contract.sql'],
+  ['vehicle_lock_removed', 'AND v.id = NEW.vehicle_id FOR NO KEY UPDATE;', 'AND v.id = NEW.vehicle_id;', '0020_s3_04_5_reception_privacy_contract.sql'],
+  ['consent_customer_removed', 'IF v_customer IS DISTINCT FROM NEW.customer_id', 'IF false', '0020_s3_04_5_reception_privacy_contract.sql'],
+  ['consent_purpose_removed', "OR v_purpose IS DISTINCT FROM 'service_provision'", 'OR false', '0020_s3_04_5_reception_privacy_contract.sql'],
+  // The status/revoked_at CHECK makes either condition redundant alone. Remove
+  // both to make a meaningful mutant of the eligibility invariant.
+  ['consent_state_removed', "OR v_status IS DISTINCT FROM 'granted'\n    OR v_revoked_at IS NOT NULL", 'OR false\n    OR false', '0020_s3_04_5_reception_privacy_contract.sql'],
+  ['consent_share_lock_removed', 'AND c.id = NEW.privacy_consent_id FOR SHARE;', 'AND c.id = NEW.privacy_consent_id;', '0020_s3_04_5_reception_privacy_contract.sql'],
+  ['consent_created_order_removed', 'OR v_created_at > NEW.created_at', 'OR false', '0020_s3_04_5_reception_privacy_contract.sql'],
 ];
 
 const temporary = mkdtempSync(join(tmpdir(), 'tm-reception-mutants-'));
 try {
-  for (const [name, from, to] of cases) {
+  for (const [name, from, to, file = '0019_s3_02_reception_invariants.sql'] of cases) {
     const folder = join(temporary, name);
     cpSync('drizzle', folder, { recursive: true });
+    const original = migrations.get(file);
+    assert.ok(original, `${name} migration source missing`);
     const changed = original.replace(from, to);
     assert.ok(changed !== original, `${name} mutation target missing`);
-    writeFileSync(join(folder, '0019_s3_02_reception_invariants.sql'), changed);
+    writeFileSync(join(folder, file), changed);
     const r = spawnSync(process.execPath,
       ['scripts/test-reception-db.cjs'], {
         cwd: process.cwd(), env: { ...process.env, MIGRATIONS_FOLDER: folder },
