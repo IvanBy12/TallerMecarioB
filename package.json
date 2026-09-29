@@ -94,6 +94,8 @@
     "test:reception:api": "node --env-file=.env scripts/test-reception-api.cjs",
     "test:reception:api:ci": "node scripts/test-reception-api.cjs",
     "test:reception": "npm run test:reception:api && npm run test:reception:db",
+    "test:runtime:db": "npm run build && node --env-file=.env scripts/test-runtime-database.cjs",
+    "test:runtime:db:ci": "node scripts/test-runtime-database.cjs",
     "smoke:clerk:dev": "npm run build && node --env-file=.env scripts/smoke-clerk-dev.cjs",
     "rbac:generate-seed-sql": "node scripts/generate-rbac-seed-sql.cjs",
     "rbac:check-doc-parity": "node scripts/check-rbac-matrix-doc.cjs",

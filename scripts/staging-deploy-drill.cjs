@@ -194,6 +194,37 @@ async function main() {
     if (provision.status !== 0) throw new Error('RUNTIME_LOGIN_PROVISION_FAILED');
     process.stdout.write('RUNTIME_LOGIN_PROVISION_PASS\n');
 
+    // Both deployed processes receive this exact URL. PostgreSQL sets each
+    // pool's fixed role at connection startup, including autocommit reads.
+    const runtimeUrl = new URL(adminUrl);
+    runtimeUrl.username = 'tallermecario_runtime';
+    runtimeUrl.password = runtimePassword;
+    const neutral = postgres(runtimeUrl.toString(), { max: 1, onnotice: () => {} });
+    const apiRole = postgres(runtimeUrl.toString(), { max: 1, onnotice: () => {},
+      connection: { role: 'tallermecario_api' } });
+    const workerRole = postgres(runtimeUrl.toString(), { max: 1, onnotice: () => {},
+      connection: { role: 'tallermecario_worker' } });
+    try {
+      const [base] = await neutral`SELECT session_user AS session_role,
+        current_user AS effective_role,
+        pg_catalog.has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage`;
+      assert.deepEqual({ ...base }, {
+        session_role: 'tallermecario_runtime', effective_role: 'tallermecario_runtime',
+        public_usage: false,
+      });
+      for (const [pool, expected] of [[apiRole, 'tallermecario_api'],
+        [workerRole, 'tallermecario_worker']]) {
+        const [identity] = await pool`SELECT session_user AS session_role,
+          current_user AS effective_role, r.rolbypassrls AS bypass
+          FROM pg_catalog.pg_roles r WHERE r.rolname = current_user`;
+        assert.deepEqual({ ...identity }, { session_role: 'tallermecario_runtime',
+          effective_role: expected, bypass: false });
+      }
+    } finally {
+      await Promise.all([neutral.end(), apiRole.end(), workerRole.end()]);
+    }
+    process.stdout.write('RUNTIME_ROLE_BOUNDARY_PASS\n');
+
     const apiUp = compose(project, envFile, ['up', '-d', 'api', 'worker']);
     if (apiUp.status !== 0) throw new Error('COMPOSE_API_UP_FAILED');
     report.staging_deploy = 'PASS';
@@ -271,7 +302,7 @@ async function main() {
       '  api:',
       `    image: ${imageBad}`,
       '    environment:',
-      "      DATABASE_URL: postgresql://tallermecario_staging_runtime:wrong-password@postgres:5432/tallermecario_staging",
+      "      DATABASE_URL: postgresql://tallermecario_runtime:wrong-password@postgres:5432/tallermecario_staging",
       '',
     ].join('\n');
     fs.writeFileSync(badOverrideFile, badOverride, 'utf8');
@@ -286,25 +317,14 @@ async function main() {
     ]);
     if (badDeploy.status !== 0) throw new Error('BAD_DEPLOY_COMMAND_FAILED');
 
-    let badDeployDetected = false;
-    try {
-      await waitFor(
-        async () => {
-          const result = await fetchJson(`${baseUrl}/health/ready`).catch(() => ({ status: 0 }));
-          return result.status === 503 && result.body?.checks?.database === false
-            && result.body?.status === 'not_ready' ? result : null;
-        },
-        { timeoutMs: 20000, intervalMs: 1000, label: 'BAD_DEPLOY_UNREADY' },
-      );
-      badDeployDetected = true;
-    } catch {
-      badDeployDetected = false;
-    }
-    if (!badDeployDetected) throw new Error('BAD_DEPLOY_WAS_NOT_DETECTED_AS_UNREADY');
-    const badLive = await fetchJson(`${baseUrl}/health/live`);
-    if (badLive.status !== 200 || badLive.body?.status !== 'live')
-      throw new Error('BAD_DEPLOY_LIVENESS_FAILED');
-    process.stdout.write('BAD_DEPLOY_CORRECTLY_DETECTED_AS_NOT_READY (database=false; live=200)\n');
+    await waitFor(async () => {
+      const logs = compose(project, envFile,
+        ['logs', '--no-color', '--no-log-prefix', 'api'], { capture: true });
+      return logs.status === 0 && logs.stdout.includes('DATABASE_RUNTIME_ROLE_INVALID');
+    }, { timeoutMs: 20000, intervalMs: 1000, label: 'BAD_DEPLOY_ROLE_REJECTED' });
+    const badReady = await fetchJson(`${baseUrl}/health/ready`).catch(() => ({ status: 0 }));
+    if (badReady.status === 200) throw new Error('BAD_DEPLOY_WAS_NOT_REJECTED');
+    process.stdout.write('BAD_DEPLOY_CORRECTLY_REJECTED_AT_STARTUP\n');
     report.bad_config = 'PASS';
 
     const rollback = compose(project, envFile, ['up', '-d', 'api']);

@@ -75,7 +75,7 @@ async function main() {
 
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
   const databaseName = `tallermecario_cross_row_${suffix}`;
-  const loginRole = `tm_test_api_${suffix}`;
+  const loginRole = `tm_test_runtime_${suffix}`;
   const loginPassword = `rt_${randomUUID()}`;
   const testUrl = new URL(sourceUrl.toString());
   testUrl.pathname = `/${databaseName}`;
@@ -168,7 +168,7 @@ async function main() {
       `CREATE ROLE ${loginRole} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '${loginPassword}'`,
     );
     loginCreated = true;
-    await testAdmin.unsafe(`GRANT tallermecario_api, tallermecario_worker TO ${loginRole}`);
+    await testAdmin.unsafe(`GRANT tallermecario_api, tallermecario_worker TO ${loginRole} WITH INHERIT FALSE, SET TRUE`);
 
     const testArgs = ['--test', '--test-concurrency=1', '--test-timeout=15000'];
     if (process.env.TEST_NAME_PATTERN) {

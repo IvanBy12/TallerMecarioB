@@ -54,11 +54,11 @@ const ALLOWLIST_MATCHES = new Set([
   'docker-compose.staging.yml:25',
   'docker-compose.staging.yml:34',
   'docker-compose.staging.yml:44',
-  'docker-compose.staging.yml:65',
+  'docker-compose.staging.yml:64',
   // staging-deploy-drill.cjs: the literal string "wrong-password" used on
   // purpose to deploy a broken config and prove the rollback drill detects
   // and recovers from it -- not a real credential.
-  'scripts/staging-deploy-drill.cjs:274',
+  'scripts/staging-deploy-drill.cjs:305',
 ]);
 
 const SKIP_EXTENSIONS = new Set([

@@ -1,4 +1,4 @@
-import postgres from 'postgres';
+import type postgres from 'postgres';
 import {
   claimBatch,
   processClaimedJob,
@@ -24,6 +24,7 @@ import { WompiAdapter } from '../integrations/wompi/adapter.js';
 import { PostgresWompiBillingRepository } from '../integrations/wompi/billing-repository.js';
 import { loadWompiConfig, type WompiRuntimeConfig } from '../integrations/wompi/config.js';
 import { WompiAdapterError } from '../integrations/wompi/errors.js';
+import { runtimeDatabase } from '../platform/runtime-database.js';
 import { handleSubscriptionChargeRequested } from '../integrations/wompi/outbox-handler.js';
 import {
   PostgresWompiWebhookAttemptRepository,
@@ -91,19 +92,9 @@ function createWompiHandlers(
   };
 }
 
-function databaseUrlFromEnv(): string {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error('DATABASE_CONFIGURATION_REQUIRED');
-  return url;
-}
-
 async function main(): Promise<void> {
   const wompi = loadWompiConfig();
-  const runtimeRole = process.env.DB_RUNTIME_ROLE ?? 'tallermecario_worker';
-  const database = postgres(databaseUrlFromEnv(), {
-    max: Number(process.env.DB_POOL_MAX ?? 5),
-    connection: { role: runtimeRole },
-  });
+  const database = await runtimeDatabase('worker', Number(process.env.DB_POOL_MAX ?? 5));
 
   const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 2000);
   const batchSize = Number(process.env.WORKER_BATCH_SIZE ?? 10);

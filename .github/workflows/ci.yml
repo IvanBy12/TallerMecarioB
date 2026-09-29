@@ -142,6 +142,9 @@ jobs:
       - name: Reception create API (S3-03)
         run: npm run test:reception:api:ci
 
+      - name: Shared runtime database role boundary
+        run: npm run test:runtime:db:ci
+
       - name: Outbox worker regression
         run: npm run test:outbox:ci
 
