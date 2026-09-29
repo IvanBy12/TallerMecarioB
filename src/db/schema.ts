@@ -803,6 +803,12 @@ export const receptions = pgTable(
     appointmentId: uuid('appointment_id'),
     locationId: uuid('location_id'),
     receivedByMembershipId: uuid('received_by_membership_id').notNull(),
+    /**
+     * RECEPTION-CONSENT-01 / D-PRIV-01: consentimiento `service_provision` que
+     * cubrió la recepción. Inmutable tras el INSERT; lo valida (0020) un trigger
+     * con `FOR SHARE` sobre el consentimiento, tras el lock del vehículo.
+     */
+    privacyConsentId: uuid('privacy_consent_id').notNull(),
     mileageKm: integer('mileage_km').notNull(),
     fuelLevelPct: smallint('fuel_level_pct'),
     customerNotes: text('customer_notes'),
@@ -843,6 +849,11 @@ export const receptions = pgTable(
       columns: [t.tenantId, t.receivedByMembershipId],
       foreignColumns: [memberships.tenantId, memberships.id],
     }),
+    foreignKey({
+      name: 'receptions_privacy_consent_fk',
+      columns: [t.tenantId, t.privacyConsentId],
+      foreignColumns: [privacyConsents.tenantId, privacyConsents.id],
+    }),
     enumCheck('receptions_status_check', t.status, ['open', 'closed', 'cancelled']),
     rawCheck('receptions_mileage_check', '"mileage_km" >= 0'),
     rawCheck('receptions_fuel_check', '"fuel_level_pct" BETWEEN 0 AND 100'),
@@ -860,6 +871,7 @@ export const receptions = pgTable(
     index('receptions_appointment_idx').on(t.tenantId, t.appointmentId),
     index('receptions_location_idx').on(t.tenantId, t.locationId),
     index('receptions_received_by_idx').on(t.tenantId, t.receivedByMembershipId),
+    index('receptions_privacy_consent_idx').on(t.tenantId, t.privacyConsentId),
   ],
 );
 
@@ -2941,6 +2953,17 @@ export const privacyConsents = pgTable(
     purposeCode: varchar('purpose_code', { length: 80 }).notNull(),
     privacyNoticeVersion: varchar('privacy_notice_version', { length: 40 }).notNull(),
     authorizationTextVersion: varchar('authorization_text_version', { length: 40 }).notNull(),
+    /**
+     * D-PRIV-02: SHA-256 hex lowercase de la representación canónica v1 del aviso
+     * + autorización + snapshot presentados. Calculado solo por el servidor.
+     */
+    authorizationTextHash: char('authorization_text_hash', { length: 64 }).notNull(),
+    /**
+     * D-PRIV-02/05: identidad del Responsable mostrada al titular
+     * (`legalName`, `address`, `phone`, `email`, `rightsChannel`). Server-owned e
+     * inmutable; nunca se reconstruye desde el estado actual del taller.
+     */
+    controllerNoticeSnapshot: jsonb('controller_notice_snapshot').notNull(),
     channel: varchar('channel', { length: 24 }).notNull(),
     status: varchar('status', { length: 16 }).notNull().default('granted'),
     capturedAt: ts('captured_at').notNull(),
@@ -2983,6 +3006,26 @@ export const privacyConsents = pgTable(
     rawCheck(
       'privacy_consents_revoked_check',
       `("status" = 'revoked') = ("revoked_at" IS NOT NULL)`,
+    ),
+    rawCheck(
+      'privacy_consents_authorization_text_hash_check',
+      `"authorization_text_hash" COLLATE "C" ~ '^[0-9a-f]{64}$'`,
+    ),
+    rawCheck(
+      'privacy_consents_controller_snapshot_check',
+      `jsonb_typeof("controller_notice_snapshot") = 'object'
+       AND "controller_notice_snapshot" ?& ARRAY['legalName','address','phone','email','rightsChannel']
+       AND ("controller_notice_snapshot" - ARRAY['legalName','address','phone','email','rightsChannel']) = '{}'::jsonb
+       AND jsonb_typeof("controller_notice_snapshot"->'legalName') = 'string'
+       AND jsonb_typeof("controller_notice_snapshot"->'address') = 'string'
+       AND jsonb_typeof("controller_notice_snapshot"->'rightsChannel') = 'string'
+       AND jsonb_typeof("controller_notice_snapshot"->'phone') IN ('string','null')
+       AND jsonb_typeof("controller_notice_snapshot"->'email') IN ('string','null')
+       AND (jsonb_typeof("controller_notice_snapshot"->'phone') = 'string'
+         OR jsonb_typeof("controller_notice_snapshot"->'email') = 'string')
+       AND length(btrim("controller_notice_snapshot"->>'legalName')) > 0
+       AND length(btrim("controller_notice_snapshot"->>'address')) > 0
+       AND length(btrim("controller_notice_snapshot"->>'rightsChannel')) > 0`,
     ),
     index('privacy_consents_lookup_idx').on(
       t.tenantId,

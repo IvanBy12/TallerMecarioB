@@ -3,6 +3,7 @@
 const { randomUUID } = require('node:crypto');
 const { test, before, after } = require('node:test');
 const h = require('../crm-api/helpers.cjs');
+const privacy = require('./privacy-helpers.cjs');
 const { assert } = h;
 const { buildApi } = h.load('api/app.js');
 const { ClerkIdentityProvider } = h.load('identity/clerk/clerk-identity-provider.js');
@@ -17,6 +18,7 @@ before(async () => {
     registerRoutes(server) {
       registerCustomerRoutes(server);
       registerVehicleRoutes(server);
+      privacy.registerTestPrivacyRoutes(server);
       registerReceptionRoutes(server);
     },
   });
@@ -36,9 +38,13 @@ async function created(tenant, extra = {}) {
       vehicleType: 'car', brand: 'Marca', model: 'Modelo',
     } });
   assert.equal(v.status, 201);
+  // S3-04.5: every reception needs the owner's service_provision consent.
+  const privacyConsentId = await privacy.serviceConsent(app, tenant.owner, tenant.tenantId,
+    c.json.customer.customerId);
   const r = await h.call(app, { subject: tenant.owner.subject, tenantId: tenant.tenantId,
     method: 'POST', url: '/api/v1/receptions', body: {
-      vehicleId: v.json.vehicle.vehicleId, customerId: c.json.customer.customerId, mileageKm: 1000, ...extra,
+      vehicleId: v.json.vehicle.vehicleId, customerId: c.json.customer.customerId, privacyConsentId,
+      mileageKm: 1000, ...extra,
     } });
   assert.equal(r.status, 201, JSON.stringify(r.json));
   return r.json.reception;
@@ -56,7 +62,7 @@ async function references(tenant, reception) {
   const locationId = randomUUID();
   await h.admin`INSERT INTO public.workshop_locations
     (id, tenant_id, name, address_line, city, department, is_primary)
-    VALUES (${locationId}, ${tenant.tenantId}, 'Sucursal', 'Calle 1', 'Bogotá', 'Bogotá', true)`;
+    VALUES (${locationId}, ${tenant.tenantId}, 'Sucursal', 'Calle 1', 'Bogotá', 'Bogotá', false)`;
   await h.admin`INSERT INTO public.appointments
     (id, tenant_id, customer_id, vehicle_id, scheduled_start, scheduled_end, reason)
     VALUES (${appointmentId}, ${tenant.tenantId}, ${reception.customerId}, ${reception.vehicleId},
@@ -220,7 +226,9 @@ test('PATCH strict validation, immutable/server fields, numeric bounds, Unicode 
     ...['', 'bad', '2026-01-01T00:00:00.123Z', '2026-01-01T00:00:00.123456+00:00', null, 1]
       .map((expectedUpdatedAt) => ({ expectedUpdatedAt, mileageKm: 1001 })),
     ...['unknown', 'tenantId', 'status', 'receivedByMembershipId', 'receivedAt', 'closedAt',
-      'createdAt', 'updatedAt', 'vehicleId', 'customerId', 'receptionId', 'id']
+      'createdAt', 'updatedAt', 'vehicleId', 'customerId', 'receptionId', 'id',
+      // S3-04.5: the covering consent is immutable after INSERT.
+      'privacyConsentId', 'privacy_consent_id']
       .map((key) => ({ expectedUpdatedAt: token, mileageKm: 1001, [key]: 'forged' })),
     ...[-1, 1.5, '100', null, 2147483648].map((mileageKm) => ({ expectedUpdatedAt: token, mileageKm })),
     ...[-1, 101, 0.5, '50'].map((fuelLevelPct) => ({ expectedUpdatedAt: token, fuelLevelPct })),
@@ -252,6 +260,7 @@ test('PATCH strict validation, immutable/server fields, numeric bounds, Unicode 
   });
   assert.equal(allowed.status, 200);
   assert.equal(allowed.json.reception.advisorNotes, 'a\nb\nc');
+  assert.equal((await row(r.receptionId)).privacy_consent_id, snapshot.privacy_consent_id);
 });
 
 test('tenant anti-oracle: foreign, missing and malformed reception; optional foreign references', async () => {

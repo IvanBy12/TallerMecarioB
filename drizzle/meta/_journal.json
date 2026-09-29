@@ -141,6 +141,13 @@
       "when": 1790611200000,
       "tag": "0019_s3_02_reception_invariants",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1790699630413,
+      "tag": "0020_s3_04_5_reception_privacy_contract",
+      "breakpoints": true
     }
   ]
 }

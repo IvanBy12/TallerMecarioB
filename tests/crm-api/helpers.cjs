@@ -72,6 +72,23 @@ async function seedCustomer(tenantId, overrides = {}) {
   return row;
 }
 
+/**
+ * Privileged S3-04.5 fixture: a granted service_provision consent row so direct
+ * reception fixtures satisfy RECEPTION-CONSENT-01 (all 0020 guards enabled).
+ * TEST-ONLY evidence values; real captures compute them server-side.
+ */
+async function seedServiceConsent(tx, tenantId, customerId) {
+  const id = randomUUID();
+  await tx`INSERT INTO public.privacy_consents ${tx({
+    id, tenant_id: tenantId, customer_id: customerId, purpose_code: 'service_provision',
+    privacy_notice_version: 'test-notice-1', authorization_text_version: 'test-service-1',
+    authorization_text_hash: 'f'.repeat(64), channel: 'in_person', captured_at: new Date(),
+    controller_notice_snapshot: tx.json({ legalName: 'TEST-ONLY', address: 'TEST-ONLY', phone: '+5700000000',
+      email: null, rightsChannel: 'TEST-ONLY' }),
+  })}`;
+  return id;
+}
+
 async function customerRow(customerId) {
   const [row] = await h.admin`
     SELECT id, tenant_id, first_name, last_name, phone, email, document_type, document_number, notes,
@@ -153,6 +170,7 @@ module.exports = {
   listCustomers,
   validCustomer,
   seedCustomer,
+  seedServiceConsent,
   customerRow,
   customerAudits,
   tenantAuditCount,

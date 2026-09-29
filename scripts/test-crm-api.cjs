@@ -160,6 +160,12 @@ async function main() {
       .filter((name) => name.endsWith('.test.cjs'))
       .sort()
       .map((name) => `${suiteDir}/${name}`);
+    // S3-04.5: the no-database privacy primitives also run against this
+    // compiled (and possibly mutated) tree, next to the reception API suite.
+    if (suiteDir === 'tests/reception-api') {
+      files.push(...readdirSync('tests/privacy').filter((name) => name.endsWith('.test.cjs')).sort()
+        .map((name) => `tests/privacy/${name}`));
+    }
     const testArgs = ['--test', '--test-concurrency=1', '--test-timeout=60000'];
     if (process.env.TEST_NAME_PATTERN) testArgs.push(`--test-name-pattern=${process.env.TEST_NAME_PATTERN}`);
     testArgs.push(...files);

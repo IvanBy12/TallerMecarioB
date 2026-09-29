@@ -19,8 +19,11 @@ function runtime(login, password, role) {
 const api = runtime(process.env.TEST_API_LOGIN, process.env.TEST_API_PASSWORD, 'tallermecario_api');
 const worker = runtime(process.env.TEST_WORKER_LOGIN, process.env.TEST_WORKER_PASSWORD, 'tallermecario_worker');
 const id = () => randomUUID();
-const a = { tenant: id(), customer: id(), otherCustomer: id(), vehicle: id(), member: id() };
-const b = { tenant: id(), customer: id(), vehicle: id(), member: id() };
+const a = { tenant: id(), customer: id(), otherCustomer: id(), vehicle: id(), member: id(), consent: id(),
+  otherConsent: id() };
+const b = { tenant: id(), customer: id(), vehicle: id(), member: id(), consent: id() };
+/** S3-04.5: each customer's granted service_provision consent (privileged fixture). */
+const consentOf = { [a.customer]: a.consent, [a.otherCustomer]: a.otherConsent, [b.customer]: b.consent };
 
 async function begin(sql, tenant) {
   const c = await sql.reserve();
@@ -47,14 +50,23 @@ async function reception(c, tenant = a.tenant, vehicle = a.vehicle, customer = a
   extra = {}) {
   const key = id();
   await c`INSERT INTO receptions ${c({ id: key, tenant_id: tenant, vehicle_id: vehicle,
-    customer_id: customer, received_by_membership_id: a.member, mileage_km: 0, ...extra })}`;
+    customer_id: customer, privacy_consent_id: consentOf[customer] ?? a.consent,
+    received_by_membership_id: a.member, mileage_km: 0, ...extra })}`;
   return key;
 }
-async function newVehicle() {
+/** D-PRIV-03: a reception vehicle needs a current primary owner. */
+async function own(c, vehicleId, customerId = a.customer, tenant = a.tenant) {
+  await c`INSERT INTO vehicle_owners ${c({ id: id(), tenant_id: tenant, vehicle_id: vehicleId,
+    customer_id: customerId, relationship_type: 'owner', is_primary: true })}`;
+}
+async function newVehicle(mileage = 0) {
   const key = id();
-  await scoped(api, a.tenant, (c) => c`INSERT INTO vehicles ${c({ id: key,
-    tenant_id: a.tenant, plate: `R${key.slice(0, 6).toUpperCase()}`,
-    vehicle_type: 'car', brand: 'B', model: 'M', current_mileage_km: 0 })}`);
+  await scoped(api, a.tenant, async (c) => {
+    await c`INSERT INTO vehicles ${c({ id: key,
+      tenant_id: a.tenant, plate: `R${key.slice(0, 6).toUpperCase()}`,
+      vehicle_type: 'car', brand: 'B', model: 'M', current_mileage_km: mileage })}`;
+    await own(c, key);
+  });
   return key;
 }
 async function media(c, tenant = a.tenant, type = 'signature', status = 'active') {
@@ -110,6 +122,19 @@ test.before(async () => {
     }
     await tx`INSERT INTO customers ${tx({ id: a.otherCustomer, tenant_id: a.tenant,
       first_name: 'Other', last_name: 'Customer', phone: '3000000001' })}`;
+    for (const [t, customer, consent] of [[a, a.customer, a.consent], [a, a.otherCustomer, a.otherConsent],
+      [b, b.customer, b.consent]]) {
+      await tx`INSERT INTO privacy_consents ${tx({ id: consent, tenant_id: t.tenant, customer_id: customer,
+        purpose_code: 'service_provision', privacy_notice_version: 'test-notice-1',
+        authorization_text_version: 'test-service-1', authorization_text_hash: 'f'.repeat(64),
+        controller_notice_snapshot: tx.json({ legalName: 'TEST-ONLY', address: 'TEST-ONLY',
+          phone: '+5700000000', email: null, rightsChannel: 'TEST-ONLY' }),
+        channel: 'in_person', captured_at: new Date(), created_at: new Date(Date.now() - 60_000) })}`;
+    }
+    for (const t of [a, b]) {
+      await tx`INSERT INTO vehicle_owners ${tx({ id: id(), tenant_id: t.tenant, vehicle_id: t.vehicle,
+        customer_id: t.customer, relationship_type: 'owner', is_primary: true })}`;
+    }
   });
 });
 test.after(async () => { await Promise.all([api.end({ timeout: 5 }), worker.end({ timeout: 5 }), admin.end({ timeout: 5 })]); });
@@ -154,8 +179,12 @@ test('catalog, grants and RLS enforce tenant boundary', async () => {
   await assert.rejects(worker`SELECT id FROM receptions`, failure('42501'));
 });
 
-test('open reception values, cross-tenant FKs and unrelated same-tenant customer', async () => {
-  const r = await scoped(api, a.tenant, (c) => reception(c, a.tenant, a.vehicle, a.otherCustomer,
+test('open reception values, cross-tenant FKs and D-PRIV-03 owner-only customer', async () => {
+  // S3-04.5 deliberately hardens S3-02/S3-03: an unrelated same-tenant customer
+  // (with its own valid consent) is no longer accepted; only the current owner.
+  await assert.rejects(scoped(api, a.tenant, (c) => reception(c, a.tenant, a.vehicle, a.otherCustomer)),
+    failure('23514', 'receptions_current_owner_guard'));
+  const r = await scoped(api, a.tenant, (c) => reception(c, a.tenant, a.vehicle, a.customer,
     { mileage_km: 0, fuel_level_pct: 0 }));
   const [row] = await scoped(api, a.tenant, (c) => c`SELECT status, fuel_level_pct FROM receptions WHERE id=${r}`);
   assert.equal(row.status, 'open');
@@ -165,7 +194,9 @@ test('open reception values, cross-tenant FKs and unrelated same-tenant customer
     [{ mileage_km: -1 }, 'receptions_mileage_check'],
     [{ fuel_level_pct: -1 }, 'receptions_fuel_check'],
     [{ fuel_level_pct: 101 }, 'receptions_fuel_check'],
-    [{ customer_id: b.customer }, 'receptions_customer_fk'],
+    // A foreign customer is never the owner of a tenant vehicle: the owner
+    // backstop fires before the (AFTER) composite FK check.
+    [{ customer_id: b.customer }, 'receptions_current_owner_guard'],
     [{ vehicle_id: b.vehicle }, 'receptions_vehicle_fk'],
   ]) {
     const vehicleId = extra.vehicle_id || await newVehicle();
@@ -179,10 +210,13 @@ test('open reception values, cross-tenant FKs and unrelated same-tenant customer
   assert.equal((await scoped(api, b.tenant, (c) => c`SELECT id FROM receptions WHERE id=${r} FOR UPDATE`)).length, 0);
 });
 
-test('partial UNIQUE serializes two concurrent open creates and permits later closed history', async () => {
+test('two concurrent open creates serialize on the vehicle lock; partial UNIQUE decides; later closed history', async () => {
   const v = id();
-  await scoped(api, a.tenant, (c) => c`INSERT INTO vehicles ${c({ id: v, tenant_id: a.tenant,
-    plate: `R${v.slice(0, 6).toUpperCase()}`, vehicle_type: 'car', brand: 'B', model: 'M' })}`);
+  await scoped(api, a.tenant, async (c) => {
+    await c`INSERT INTO vehicles ${c({ id: v, tenant_id: a.tenant,
+      plate: `R${v.slice(0, 6).toUpperCase()}`, vehicle_type: 'car', brand: 'B', model: 'M' })}`;
+    await own(c, v);
+  });
   const first = await begin(api, a.tenant), second = await begin(api, a.tenant);
   let firstDone = false, secondDone = false;
   try {
@@ -402,10 +436,7 @@ test('direct closed INSERT fails the birth-state guard even with closure fields'
 });
 
 test('NULL vehicle mileage has no historical lower bound', async () => {
-  const vehicleId = id();
-  await scoped(api, a.tenant, (c) => c`INSERT INTO vehicles ${c({ id: vehicleId,
-    tenant_id: a.tenant, plate: `R${vehicleId.slice(0, 6).toUpperCase()}`,
-    vehicle_type: 'car', brand: 'B', model: 'M', current_mileage_km: null })}`);
+  const vehicleId = await newVehicle(null);
   const r = await scoped(api, a.tenant, (c) => reception(c, a.tenant, vehicleId,
     a.customer, { mileage_km: 0 }));
   assert.ok(r);

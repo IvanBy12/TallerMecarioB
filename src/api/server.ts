@@ -23,6 +23,7 @@ import { registerMemberRoleRoutes } from '../memberships/roles-routes.js';
 import { registerCustomerRoutes } from '../customers/routes.js';
 import { registerVehicleRoutes } from '../vehicles/routes.js';
 import { registerReceptionRoutes } from '../receptions/routes.js';
+import { registerPrivacyConsentRoutes } from '../privacy/routes.js';
 
 /**
  * Used ONLY when no Clerk variable is configured at all (e.g. the local
@@ -89,6 +90,8 @@ async function main(): Promise<void> {
       registerMemberLifecycleRoutes(server);
       registerCustomerRoutes(server);
       registerVehicleRoutes(server);
+      // Production catalog publishes no privacy copy yet: capture fails closed.
+      registerPrivacyConsentRoutes(server);
       registerReceptionRoutes(server);
       // Deploy-smoke-test only: proves the full protected-route pipeline
       // (rate limit -> auth -> TenantContext transaction -> RBAC) is wired

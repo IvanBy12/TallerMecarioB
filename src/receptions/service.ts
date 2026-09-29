@@ -23,6 +23,13 @@ interface ReceptionRow {
 const notFound = (entity: 'VEHICLE' | 'CUSTOMER' | 'APPOINTMENT' | 'LOCATION') =>
   new ApiError(404, `${entity}_NOT_FOUND`, `The ${entity.toLowerCase()} was not found.`);
 const invalid = () => new ApiError(400, 'REQUEST_VALIDATION_FAILED', 'The request body is invalid.');
+// Reuses the published S2-06 code: the customer is not the current owner.
+const ownershipConflict = () => new ApiError(409, 'VEHICLE_OWNERSHIP_CONFLICT', 'The vehicle ownership changed.');
+// Absent and foreign consents are indistinguishable (RLS hides foreign rows).
+const consentNotFound = () => new ApiError(404, 'PRIVACY_CONSENT_NOT_FOUND', 'The privacy consent was not found.');
+// Wrong customer/purpose, revoked or newer than the reception: one stable code.
+const consentNotEligible = () => new ApiError(409, 'PRIVACY_CONSENT_NOT_ELIGIBLE',
+  'The privacy consent cannot cover this reception.');
 
 function columns(sql: postgres.Sql) {
   return sql`r.id, r.vehicle_id, r.customer_id, r.appointment_id, r.location_id,
@@ -52,7 +59,10 @@ export function mapReceptionDbError(error: unknown): ApiError | null {
     if (name === 'receptions_customer_fk') return notFound('CUSTOMER');
     if (name === 'receptions_appointment_fk') return notFound('APPOINTMENT');
     if (name === 'receptions_location_fk') return notFound('LOCATION');
+    if (name === 'receptions_privacy_consent_fk') return consentNotFound();
   }
+  if (db.code === '23514' && name === 'receptions_current_owner_guard') return ownershipConflict();
+  if (db.code === '23514' && name === 'receptions_privacy_consent_guard') return consentNotEligible();
   if (db.code === '23514' && name === 'receptions_vehicle_mileage_guard')
     return new ApiError(409, 'RECEPTION_MILEAGE_CONFLICT',
       'The reception mileage conflicts with the current vehicle mileage.');
@@ -65,10 +75,18 @@ export function mapReceptionDbError(error: unknown): ApiError | null {
 export async function createReception(context: TenantRequestContext, input: CreateReceptionInput,
   meta: RequestMeta): Promise<ReceptionDto> {
   const { sql, tenant } = context;
+  // S3-04.5 lock graph: vehicle FOR NO KEY UPDATE (the transferOwner gate)
+  // -> current primary owner -> consent FOR SHARE -> INSERT -> audit. Two
+  // creates for one vehicle serialize here; receptions_one_open_vehicle_uq
+  // still decides RECEPTION_ALREADY_OPEN. These checks give clean errors; the
+  // 0020 INSERT triggers repeat them (reentrant locks) as the authority.
+  const [vehicle] = await sql`SELECT id FROM public.vehicles
+    WHERE tenant_id = ${tenant.tenantId} AND id = ${input.vehicleId} FOR NO KEY UPDATE`;
+  if (!vehicle) throw notFound('VEHICLE');
   // Scoped reads give the same 404 for absent and foreign references. The FKs
   // remain the authority if a reference is deleted between these reads and INSERT.
   for (const [table, id, entity] of [
-    ['vehicles', input.vehicleId, 'VEHICLE'], ['customers', input.customerId, 'CUSTOMER'],
+    ['customers', input.customerId, 'CUSTOMER'],
     ['appointments', input.appointmentId, 'APPOINTMENT'], ['workshop_locations', input.locationId, 'LOCATION'],
   ] as const) {
     if (id === null) continue;
@@ -76,12 +94,27 @@ export async function createReception(context: TenantRequestContext, input: Crea
       WHERE tenant_id = ${tenant.tenantId} AND id = ${id}`;
     if (!row) throw notFound(entity);
   }
+  // D-PRIV-03: only the current primary owner can deliver the vehicle. The
+  // response never reveals who the owner is.
+  const [owner] = await sql<{ customer_id: string }[]>`SELECT customer_id FROM public.vehicle_owners
+    WHERE tenant_id = ${tenant.tenantId} AND vehicle_id = ${input.vehicleId}
+      AND is_primary = true AND valid_to IS NULL`;
+  if (owner?.customer_id !== input.customerId) throw ownershipConflict();
+  // RECEPTION-CONSENT-01: FOR SHARE conflicts with a concurrent revoke UPDATE.
+  // now() equals the reception's created_at default in this transaction.
+  const [consent] = await sql<{ eligible: boolean }[]>`SELECT (c.customer_id = ${input.customerId}
+      AND c.purpose_code = 'service_provision' AND c.status = 'granted' AND c.revoked_at IS NULL
+      AND c.created_at <= pg_catalog.now()) AS eligible
+    FROM public.privacy_consents AS c
+    WHERE c.tenant_id = ${tenant.tenantId} AND c.id = ${input.privacyConsentId} FOR SHARE OF c`;
+  if (!consent) throw consentNotFound();
+  if (!consent.eligible) throw consentNotEligible();
   const [row] = await sql<ReceptionRow[]>`INSERT INTO public.receptions AS r
-    (id, tenant_id, vehicle_id, customer_id, appointment_id, location_id,
+    (id, tenant_id, vehicle_id, customer_id, privacy_consent_id, appointment_id, location_id,
       received_by_membership_id, mileage_km, fuel_level_pct, customer_notes, advisor_notes)
     VALUES (${uuidV7()}, ${tenant.tenantId}, ${input.vehicleId}, ${input.customerId},
-      ${input.appointmentId}, ${input.locationId}, ${tenant.membershipId}, ${input.mileageKm},
-      ${input.fuelLevelPct}, ${input.customerNotes}, ${input.advisorNotes})
+      ${input.privacyConsentId}, ${input.appointmentId}, ${input.locationId}, ${tenant.membershipId},
+      ${input.mileageKm}, ${input.fuelLevelPct}, ${input.customerNotes}, ${input.advisorNotes})
     RETURNING ${columns(sql)}`;
   if (!row) throw new Error('RECEPTION_INSERT_FAILED');
   await sql`INSERT INTO public.audit_logs (
@@ -90,7 +123,8 @@ export async function createReception(context: TenantRequestContext, input: Crea
     request_id, ip_address
   ) VALUES (${uuidV7()}, ${tenant.tenantId}, 'user', ${tenant.userId}, ${tenant.membershipId},
     'reception.created', 'success', 'reception', ${row.id}, NULL, NULL, NULL,
-    ${sql.json({ fields: input.fields })}, ${meta.requestId}, ${meta.ipAddress}::inet)`;
+    ${sql.json({ fields: input.fields, privacy_consent_id: input.privacyConsentId })},
+    ${meta.requestId}, ${meta.ipAddress}::inet)`;
   return toDto(row);
 }
 

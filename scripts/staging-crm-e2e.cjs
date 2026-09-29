@@ -19,11 +19,11 @@ function must(value, label) { if (!value) throw new Error(`STAGING_${label}_FAIL
 async function migrationState(admin) {
   const journal = JSON.parse(readFileSync(join(root, 'drizzle/meta/_journal.json'), 'utf8'));
   const files = readMigrationFiles({ migrationsFolder: join(root, 'drizzle') });
-  assert.equal(journal.entries.length, 20);
-  assert.equal(files.length, 20);
-  assert.match(journal.entries.at(-1).tag, /^0019_/u);
+  const count = journal.entries.length;
+  assert.equal(files.length, count);
+  assert.match(journal.entries.at(-1).tag, /^0020_/u);
   const ledger = await admin`SELECT hash,created_at FROM drizzle.__drizzle_migrations ORDER BY id`;
-  assert.equal(ledger.length, 20);
+  assert.equal(ledger.length, count);
   for (let i = 0; i < files.length; i += 1) {
     assert.equal(ledger[i].hash, files[i].hash, `migration ${i} SQL hash`);
     assert.equal(Number(ledger[i].created_at), files[i].folderMillis, `migration ${i} timestamp`);

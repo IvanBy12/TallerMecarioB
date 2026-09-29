@@ -176,7 +176,7 @@ async function main() {
   const maintenance = postgres(source.toString(), { max: 1, prepare: false, onnotice: () => {} });
   const original = new Set((await maintenance`SELECT rolname FROM pg_roles WHERE rolname = ANY(${ROLES})`).map((r) => r.rolname));
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json','utf8'));
-  assert.equal(journal.entries.length,20);
+  assert.equal(journal.entries.length,21);
   const headFolder = mkdtempSync(join(tmpdir(),'tm-crm-head-'));
   const temp = mkdtempSync(join(tmpdir(),'tm-crm-upgrade-'));
   const suffix = randomUUID().replaceAll('-','').slice(0,12);
