@@ -1,0 +1,74 @@
+name: S3 R2 External Gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s3-r2-external
+  cancel-in-progress: false
+
+jobs:
+  r2-external:
+    environment: R2
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: tallermecario_r2_gate
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tallermecario_r2_gate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/tallermecario_r2_gate
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT || vars.R2_ENDPOINT }}
+      R2_REGION: ${{ secrets.R2_REGION || vars.R2_REGION }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET || vars.R2_BUCKET }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Validate required configuration without values
+        shell: bash
+        run: |
+          for name in R2_ENDPOINT R2_REGION R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required configuration: $name"
+              exit 1
+            fi
+          done
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Presign and transport regression
+        run: |
+          npm run test:media:presign:ci
+          node --test tests/media/r2-transport.test.cjs tests/media/r2-network.test.cjs
+      - name: Unsigned network diagnostics (no PUT, no retries)
+        run: node scripts/diagnose-r2-network.cjs
+      - name: Real R2 functional and security gate with disposable database
+        env:
+          R2_EXTERNAL_GATE: '1'
+        run: npm run test:media
+      - name: Record gate identity
+        if: always()
+        shell: bash
+        run: |
+          printf 'Run ID: %s\nCommit: %s\nAttempt: %s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
