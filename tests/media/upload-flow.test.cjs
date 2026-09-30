@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { createHash, randomUUID } = require('node:crypto');
 const test = require('node:test');
 const postgres = require('postgres');
-const { withR2Stage } = require('./r2-transport.cjs');
+const { withR2Stage, getTransientFailures } = require('./r2-transport.cjs');
 
 const apiModulePath = process.env.TEST_API_APP_MODULE;
 const routesModulePath = process.env.TEST_MEDIA_ROUTES_MODULE;
@@ -73,6 +73,9 @@ function samplePngBytes() {
 function fetchR2(stage, url, options = {}, readBytes = false) {
   return withR2Stage(stage, options.method ?? 'GET', async () => {
     const response = await fetch(url, options);
+    if (process.env.R2_EXTERNAL_GATE === '1') {
+      process.stdout.write(`R2_HTTP ${stage} ${options.method ?? 'GET'} status=${response.status}\n`);
+    }
     if (!readBytes || !response.ok) return { response };
     // Read inside the retry boundary: the peer can close after fetch resolves.
     return { response, bytes: Buffer.from(await response.arrayBuffer()) };
@@ -157,6 +160,11 @@ test.after(async () => {
 
   assert.equal(allDeleted, true,
     `R2 cleanup could not confirm deletion: ${cleanupFailures.join('; ')}`);
+  process.stdout.write('R2_OBJECT_CLEANUP_PASS\n');
+  if (process.env.R2_EXTERNAL_GATE === '1') {
+    assert.equal(getTransientFailures(), 0, 'External gate requires zero transient transport failures, including recovered retries');
+    process.stdout.write('R2_TRANSPORT_STABILITY_PASS\n');
+  }
 });
 
 test('full R2 flow: create session, upload real bytes, complete, and download them back', async () => {

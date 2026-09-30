@@ -3,6 +3,7 @@
 const RETRY_DELAYS_MS = [100, 300];
 const RETRYABLE_METHODS = new Set(['GET', 'HEAD', 'DELETE']);
 const TRANSIENT_CODES = new Set(['UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']);
+let transientFailures = 0;
 
 function errorCode(error) {
   let current = error;
@@ -28,6 +29,12 @@ async function withR2Stage(stage, method, operation, sleep = (ms) => new Promise
       return await operation();
     } catch (error) {
       const code = errorCode(error);
+      if (TRANSIENT_CODES.has(code)) {
+        transientFailures += 1;
+        if (process.env.R2_EXTERNAL_GATE === '1') {
+          process.stdout.write(`R2_TRANSPORT ${stage} ${method} ${code} attempt=${attempt + 1}/${attempts}\n`);
+        }
+      }
       if (attempt === attempts - 1 || !TRANSIENT_CODES.has(code)) {
         // Never attach the original error: fetch errors may contain signed URLs.
         throw new Error(`R2 ${stage} failed: ${code} (attempt ${attempt + 1}/${attempts})`);
@@ -38,4 +45,4 @@ async function withR2Stage(stage, method, operation, sleep = (ms) => new Promise
   throw new Error('UNREACHABLE_R2_RETRY_STATE');
 }
 
-module.exports = { withR2Stage };
+module.exports = { withR2Stage, getTransientFailures: () => transientFailures };

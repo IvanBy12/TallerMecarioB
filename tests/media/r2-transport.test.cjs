@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { withR2Stage } = require('./r2-transport.cjs');
+const { withR2Stage, getTransientFailures } = require('./r2-transport.cjs');
 
 function transient(code) {
   return Object.assign(new Error('synthetic transport failure'), { code });
@@ -35,19 +35,21 @@ for (const status of [403, 412]) {
   });
 }
 
-test('PUT socket failure is not replayed and diagnostics omit sensitive details', async () => {
-  let calls = 0;
-  await assert.rejects(withR2Stage('UNIT_PUT', 'PUT', () => {
-    calls += 1;
-    throw new TypeError('signed-url-secret', { cause: transient('UND_ERR_SOCKET') });
-  }, async () => { throw new Error('unexpected delay'); }), (error) => {
-    assert.match(error.message, /R2 UNIT_PUT failed: UND_ERR_SOCKET \(attempt 1\/1\)/);
-    assert.doesNotMatch(error.message, /signed-url-secret/);
-    assert.equal(error.cause, undefined);
-    return true;
+for (const code of ['UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']) {
+  test(`PUT ${code} is not replayed and diagnostics omit sensitive details`, async () => {
+    let calls = 0;
+    await assert.rejects(withR2Stage('UNIT_PUT', 'PUT', () => {
+      calls += 1;
+      throw new TypeError('signed-url-secret', { cause: transient(code) });
+    }, async () => { throw new Error('unexpected delay'); }), (error) => {
+      assert.equal(error.message, `R2 UNIT_PUT failed: ${code} (attempt 1/1)`);
+      assert.doesNotMatch(error.message, /signed-url-secret/);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(calls, 1);
   });
-  assert.equal(calls, 1);
-});
+}
 
 test('retry limit is three attempts with deterministic backoff', async () => {
   let calls = 0;
@@ -69,4 +71,16 @@ test('non-transient transport codes are not retried', async () => {
   }, async () => { throw new Error('unexpected delay'); }),
   /R2 UNIT_OTHER failed: CERT_HAS_EXPIRED \(attempt 1\/3\)/);
   assert.equal(calls, 1);
+});
+
+test('a recovered GET failure remains visible to the strict external gate', async () => {
+  const before = getTransientFailures();
+  let calls = 0;
+  await withR2Stage('UNIT_RECOVERED', 'GET', () => {
+    calls += 1;
+    if (calls === 1) throw transient('UND_ERR_CONNECT_TIMEOUT');
+    return 'success';
+  }, async () => {});
+  assert.equal(calls, 2);
+  assert.equal(getTransientFailures(), before + 1);
 });

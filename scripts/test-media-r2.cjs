@@ -56,15 +56,33 @@ function requireR2Env() {
   if (missing.length > 0) throw new Error('R2_CONFIGURATION_MISSING');
 }
 
-function runChild(args, env) {
+function runChild(args, env, externalGate = false) {
   const result = spawnSync(process.execPath, args, {
     cwd: process.cwd(),
     env,
-    stdio: 'inherit',
+    stdio: externalGate ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
     timeout: 60000,
   });
+  if (externalGate) {
+    process.stdout.write(result.stdout || '');
+    process.stderr.write(result.stderr || '');
+  }
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`CHILD_PROCESS_FAILED_${result.status}`);
+  if (externalGate) {
+    const output = result.stdout || '';
+    if (!/^# tests 6\r?$/m.test(output) || !/^# pass 6\r?$/m.test(output)
+      || !/^# fail 0\r?$/m.test(output) || !/^# skipped 0\r?$/m.test(output)
+      || !/^# cancelled 0\r?$/m.test(output)
+      || !output.includes('R2_OBJECT_CLEANUP_PASS')
+      || !output.includes('R2_TRANSPORT_STABILITY_PASS')
+      || /UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET/.test(output + result.stderr)) {
+      throw new Error('MEDIA_R2_EXTERNAL_EVIDENCE_INVALID');
+    }
+    process.stdout.write('REAL_R2_GATE_PASS 6/6\n');
+  }
 }
 
 async function main() {
@@ -86,6 +104,7 @@ async function main() {
   let testPassed = false;
   let cleanupPassed = false;
   let originalRoles = new Set();
+  let rolesSnapshotTaken = false;
   const compiledRoot = mkdtempSync(join(tmpdir(), 'tallermecario-media-test-'));
 
   try {
@@ -97,6 +116,7 @@ async function main() {
       SELECT rolname FROM pg_catalog.pg_roles WHERE rolname = ANY(${CANONICAL_ROLES})
     `;
     originalRoles = new Set(existingRoles.map((row) => row.rolname));
+    rolesSnapshotTaken = true;
 
     await maintenance.unsafe(`CREATE DATABASE ${databaseName}`);
     databaseCreated = true;
@@ -131,7 +151,7 @@ async function main() {
     );
 
     runChild(
-      ['--test', '--test-concurrency=1', '--test-timeout=30000', 'tests/media/upload-flow.test.cjs'],
+      ['--test', '--test-reporter=tap', '--test-concurrency=1', '--test-timeout=30000', 'tests/media/upload-flow.test.cjs'],
       {
         ...process.env,
         TEST_DATABASE_URL_ADMIN: testUrl.toString(),
@@ -142,6 +162,7 @@ async function main() {
         TEST_MEDIA_R2_MODULE: join(compiledRoot, 'media', 'r2.js'),
         NODE_PATH: resolve('node_modules'),
       },
+      process.env.R2_EXTERNAL_GATE === '1',
     );
     testPassed = true;
   } finally {
@@ -160,7 +181,7 @@ async function main() {
     }
 
     for (const role of [...CANONICAL_ROLES].reverse()) {
-      if (!originalRoles.has(role)) {
+      if (rolesSnapshotTaken && databaseCreated && !originalRoles.has(role)) {
         await maintenance.unsafe(`DROP ROLE IF EXISTS ${role}`).catch(() => undefined);
       }
     }
@@ -176,13 +197,15 @@ async function main() {
           EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = ${loginRole}) AS login_present
       `;
       cleanupPassed = !remaining.database_present && !remaining.login_present;
+      process.stdout.write(`FIXTURE_RESIDUE databases=${Number(remaining.database_present)} logins=${Number(remaining.login_present)}\n`);
     }
     await maintenance.end({ timeout: 5 });
+    if (cleanupPassed) process.stdout.write('FIXTURE_CLEANUP_PASS\n');
+    else if (databaseCreated || loginCreated) throw new Error('TEST_DATABASE_CLEANUP_FAILED');
   }
 
   if (!testPassed) throw new Error('MEDIA_R2_TEST_FAILED');
   if (!cleanupPassed) throw new Error('TEST_DATABASE_CLEANUP_FAILED');
-  process.stdout.write('FIXTURE_CLEANUP_PASS\n');
 }
 
 main().catch((error) => {
@@ -193,6 +216,7 @@ main().catch((error) => {
     'R2_CONFIGURATION_MISSING',
     'MEDIA_R2_TEST_FAILED',
     'TEST_DATABASE_CLEANUP_FAILED',
+    'MEDIA_R2_EXTERNAL_EVIDENCE_INVALID',
   ]);
   process.stderr.write(`${safeMessages.has(error.message) ? error.message : 'MEDIA_R2_TEST_RUN_FAILED'}\n`);
   process.exitCode = 1;
