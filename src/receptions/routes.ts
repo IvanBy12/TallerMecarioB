@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ApiError, getTenantRequestContext } from '../api/app.js';
 import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
 import { closeReception, mapCloseDbError } from './close.js';
+import { getReception, listReceptions } from './queries.js';
+import { parseListReceptionsQuery } from './queries-validation.js';
 import { createReception, mapReceptionDbError, updateReception } from './service.js';
 import { captureReceptionSignature, mapSignatureDbError, parseSignatureInput,
   SIGNATURE_BODY_LIMIT, signatureBodySchema } from './signature.js';
@@ -16,6 +18,17 @@ async function requireJson(request: FastifyRequest): Promise<void> {
     throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json.');
 }
 export function registerReceptionRoutes(app: FastifyInstance): void {
+  app.get('/api/v1/receptions', {
+    config: { permission: 'receptions.read' }, onRequest: noStore,
+  }, async (request, reply) => reply.send(await listReceptions(
+    getTenantRequestContext(request), parseListReceptionsQuery(request.query))));
+  app.get('/api/v1/receptions/:receptionId', {
+    config: { permission: 'receptions.read', permissionScope: 'resource' }, onRequest: noStore,
+  }, async (request, reply) => {
+    const receptionId = parseCanonicalUuid((request.params as { receptionId?: unknown }).receptionId);
+    if (!receptionId) throw new ApiError(404, 'RECEPTION_NOT_FOUND', 'The reception was not found.');
+    return reply.send({ reception: await getReception(getTenantRequestContext(request), receptionId) });
+  });
   app.post('/api/v1/receptions/:receptionId/close', {
     config: { permission: 'receptions.close' }, onRequest: [noStore],
   }, async (request, reply) => {

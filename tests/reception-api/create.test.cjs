@@ -125,7 +125,7 @@ const transfer = (actor, tenantId, vehicleId, customerId, expectedCurrentOwnersh
   body: { customerId, expectedCurrentOwnershipId },
 });
 
-test('POST minimum: stable DTO, server values, consent link, audit and no extra routes', async () => {
+test('POST minimum: stable DTO, server values, consent link, audit and no extra mutations', async () => {
   const { a } = await h.twoTenants();
   const { c, v, pc } = await scenario(a);
   const result = await call(a.advisor, a.tenantId, body(v, c, pc));
@@ -168,7 +168,8 @@ test('POST minimum: stable DTO, server values, consent link, audit and no extra 
   assert.deepEqual(audit.metadata_json, {
     fields: ['vehicle_id', 'customer_id', 'privacy_consent_id', 'mileage_km'], privacy_consent_id: pc,
   });
-  for (const method of ['GET', 'PATCH', 'DELETE'])
+  assert.equal(app.hasRoute({ method: 'GET', url: '/api/v1/receptions' }), true);
+  for (const method of ['PATCH', 'DELETE'])
     assert.equal(app.hasRoute({ method, url: '/api/v1/receptions' }), false);
 });
 
@@ -268,7 +269,12 @@ test('validation: privacyConsentId required and canonical; server controlled fie
 test('RBAC and unauthenticated: route permission blocks technician before handler', async () => {
   const { a } = await h.twoTenants();
   const { c, v, pc } = await scenario(a);
-  registerReceptionRoutes({ post(path, options) {
+  registerReceptionRoutes({ get(path, options) {
+    assert.ok(['/api/v1/receptions', '/api/v1/receptions/:receptionId'].includes(path));
+    assert.deepEqual(options.config, path.endsWith(':receptionId')
+      ? { permission: 'receptions.read', permissionScope: 'resource' }
+      : { permission: 'receptions.read' });
+  }, post(path, options) {
     const permissions = {
       '/api/v1/receptions': 'receptions.create',
       '/api/v1/receptions/:receptionId/close': 'receptions.close',
