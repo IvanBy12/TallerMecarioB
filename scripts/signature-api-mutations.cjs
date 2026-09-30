@@ -17,7 +17,7 @@ function applySignatureMutation(compiledRoot) {
   const pair = MUTANTS[name];
   if (!pair) throw new Error(`UNKNOWN_S305_MUTATION ${name}`);
   const file = join(compiledRoot, 'receptions', 'signature.js');
-  const original = readFileSync(file, 'utf8');
+  const original = readFileSync(file, 'utf8').replace(/\r\n/gu, '\n');
   if (!original.includes(pair[0])) throw new Error(`S305_MUTATION_ANCHOR_MISSING ${name}`);
   writeFileSync(file, original.replace(pair[0], pair[1]));
   if (name === 'trim_before_controls') {

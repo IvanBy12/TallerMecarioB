@@ -38,10 +38,45 @@ const detail = (actor, tenantId, id) => call(actor, tenantId, `/api/v1/reception
 const code = (result) => result.json?.error?.code;
 const keys = (value) => Object.keys(value).sort();
 
-test('explicit tenant predicates remain in compiled reception and assignment queries', () => {
+test('explicit tenant predicates remain in every compiled reception read query despite RLS', () => {
   const source = readFileSync(join(process.env.TEST_MODULE_ROOT, 'receptions/queries.js'), 'utf8');
   assert.match(source, /WHERE r\.tenant_id = \$\{tenant\.tenantId\}\s+\$\{query\.afterId/u);
   assert.match(source, /AND a\.tenant_id = \$\{tenant\.tenantId\} AND a\.membership_id/u);
+  assert.match(source, /FROM public\.receptions AS r\s+WHERE r\.tenant_id = \$\{tenant\.tenantId\} AND r\.id = \$\{receptionId\}/u);
+  assert.match(source, /JOIN public\.assignments AS a ON a\.tenant_id = so\.tenant_id AND a\.order_id = so\.id/u);
+  assert.match(source, /WHERE so\.tenant_id = \$\{tenant\.tenantId\} AND so\.reception_id = r\.id/u);
+  assert.match(source, /FROM public\.reception_check_items AS c\s+WHERE c\.tenant_id = \$\{tenant\.tenantId\} AND c\.reception_id = \$\{receptionId\}/u);
+  assert.match(source, /FROM public\.vehicle_damages AS d\s+WHERE d\.tenant_id = \$\{tenant\.tenantId\} AND d\.reception_id = \$\{receptionId\}/u);
+});
+
+test('syntactically valid base64url cursors reject invalid semantics and noncanonical encodings', async () => {
+  const { a } = await h.twoTenants();
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const encode = (payload) => Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const valid = encode({ v: 1, id });
+  assert.equal((await list(a.advisor, a.tenantId, `cursor=${valid}`)).status, 200);
+  const invalid = [
+    encode({ v: 2, id }), encode({ v: 0, id }), encode({ v: '1', id }),
+    encode({ v: 1, id: 'not-a-uuid' }), encode({ v: 1, id: 123 }),
+    encode({ v: 1, id, extra: true }), encode({ v: 1 }), encode({ id }),
+    encode({ v: 1, id: id.toUpperCase() }), encode({ v: 1, id: ` ${id}` }),
+    encode([]), encode(null),
+  ];
+  // Alternate trailing pad bits decode to the same bytes but are not canonical
+  // base64url. Keep the input alphabet and length syntactically valid.
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const withWhitespace = Buffer.from(`${JSON.stringify({ v: 1, id })} `).toString('base64url');
+  assert.notEqual(withWhitespace.length % 4, 0);
+  const noncanonical = withWhitespace.slice(0, -1)
+    + alphabet[alphabet.indexOf(withWhitespace.at(-1)) + 1];
+  assert.deepEqual(Buffer.from(noncanonical, 'base64url'), Buffer.from(withWhitespace, 'base64url'));
+  invalid.push(noncanonical);
+  for (const cursor of invalid) {
+    assert.match(cursor, /^[A-Za-z0-9_-]{1,128}$/u);
+    const response = await list(a.advisor, a.tenantId, `cursor=${cursor}`);
+    assert.equal(response.status, 400, `${cursor}: ${JSON.stringify(response.json)}`);
+    assert.equal(code(response), 'REQUEST_VALIDATION_FAILED');
+  }
 });
 
 async function fixture(tenant, { closed = false, children = false, customer = randomUUID(),

@@ -17,3 +17,4 @@ for (const name of Object.keys(MUTANTS)) {
     `${name}: normal test assertion did not kill mutant\n${result.stdout.slice(-2500)}\n${result.stderr}`);
   process.stdout.write(`SIGNATURE_MUTANT_${name.toUpperCase()}_KILLED fail=${match[1]}\n`);
 }
+process.stdout.write(`SIGNATURE_MUTATION_COUNTS killed=${Object.keys(MUTANTS).length} survived=0 invalid_apply_failures=0\n`);

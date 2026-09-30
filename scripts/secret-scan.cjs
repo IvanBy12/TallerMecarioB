@@ -42,6 +42,9 @@ const ALLOWLIST_FILES = new Set(['scripts/secret-scan.cjs', '.env.example']);
 // PostgreSQL service. Match the entire line instead of a line number: adding
 // workflow steps must not accidentally exempt a different secret.
 const CI_POSTGRES_PLACEHOLDER = 'DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/tallermecario_ci';
+// Match the complete intentional bad-config probe, scoped to its drill file.
+// A line-number exemption silently shifts whenever staging evidence expands.
+const STAGING_BAD_CONFIG_PLACEHOLDER = '"      DATABASE_URL: postgresql://tallermecario_runtime:wrong-password@postgres:5432/tallermecario_staging",';
 
 // Exact, reviewed false positives, each with why it is not a real secret
 // (gitleaks-style fingerprint allowlist, kept in source so it is visible in
@@ -55,10 +58,6 @@ const ALLOWLIST_MATCHES = new Set([
   'docker-compose.staging.yml:34',
   'docker-compose.staging.yml:44',
   'docker-compose.staging.yml:64',
-  // staging-deploy-drill.cjs: the literal string "wrong-password" used on
-  // purpose to deploy a broken config and prove the rollback drill detects
-  // and recovers from it -- not a real credential.
-  'scripts/staging-deploy-drill.cjs:305',
 ]);
 
 const SKIP_EXTENSIONS = new Set([
@@ -96,6 +95,7 @@ function scanTrackedFiles() {
     lines.forEach((line, idx) => {
       const lineNumber = idx + 1;
       if (file === '.github/workflows/ci.yml' && line.trim() === CI_POSTGRES_PLACEHOLDER) return;
+      if (file === 'scripts/staging-deploy-drill.cjs' && line.trim() === STAGING_BAD_CONFIG_PLACEHOLDER) return;
       if (ALLOWLIST_MATCHES.has(`${file}:${lineNumber}`)) return;
       for (const { name, regex } of SECRET_PATTERNS) {
         if (regex.test(line)) findings.push({ file, line: lineNumber, pattern: name });

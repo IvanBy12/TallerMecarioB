@@ -3,6 +3,15 @@
 const { readFileSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 
+const MUTATION_NAMES = Object.freeze([
+  'bodyless_empty_object_allowed',
+  'reception_lock_removed', 'signature_precheck_removed',
+  'mileage_revalidation_removed', 'vehicle_mileage_update_skipped',
+  'advisory_lock_removed', 'allocation_before_advisory',
+  'idempotent_branch_removed', 'duplicate_audit_on_retry',
+  'initial_history_skipped', 'audit_outside_transaction',
+]);
+
 function replaceExact(source, anchor, replacement, name) {
   // TypeScript preserves CRLF inside compiled SQL template literals on Windows.
   const match = source.includes(anchor) ? anchor : anchor.replace(/\n/gu, '\r\n');
@@ -15,7 +24,7 @@ function applyCloseMutation(compiledRoot) {
   if (!name) return;
   const file = join(compiledRoot, 'receptions',
     name === 'bodyless_empty_object_allowed' ? 'routes.js' : 'close.js');
-  let source = readFileSync(file, 'utf8');
+  let source = readFileSync(file, 'utf8').replace(/\r\n/gu, '\n');
   const changes = {
     bodyless_empty_object_allowed: () => {
       source = replaceExact(source, 'if (request.body !== undefined)',
@@ -80,4 +89,4 @@ function applyCloseMutation(compiledRoot) {
   process.stdout.write(`S306_MUTATION_APPLIED ${name}\n`);
 }
 
-module.exports = { applyCloseMutation };
+module.exports = { MUTATION_NAMES, applyCloseMutation };
