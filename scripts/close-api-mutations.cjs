@@ -4,8 +4,10 @@ const { readFileSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 
 function replaceExact(source, anchor, replacement, name) {
-  if (!source.includes(anchor)) throw new Error(`MUTATION_ANCHOR_NOT_FOUND ${name}`);
-  return source.replace(anchor, replacement);
+  // TypeScript preserves CRLF inside compiled SQL template literals on Windows.
+  const match = source.includes(anchor) ? anchor : anchor.replace(/\n/gu, '\r\n');
+  if (!source.includes(match)) throw new Error(`MUTATION_ANCHOR_NOT_FOUND ${name}`);
+  return source.replace(match, replacement);
 }
 
 function applyCloseMutation(compiledRoot) {
