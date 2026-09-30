@@ -45,7 +45,8 @@ async function migrationState(admin) {
     WHERE NOT tgisinternal AND tgrelid IN
       (SELECT oid FROM pg_class WHERE relnamespace='public'::regnamespace)
     ORDER BY relation,tgname`;
-  return JSON.stringify({ ledger, columns, constraints, triggers });
+  return JSON.stringify({ count, latestTag: journal.entries.at(-1).tag,
+    ledger, columns, constraints, triggers });
 }
 
 async function seedTwoTenants(admin) {

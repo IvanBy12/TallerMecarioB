@@ -3,14 +3,7 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 
-const cases = [
-  'bodyless_empty_object_allowed',
-  'reception_lock_removed', 'signature_precheck_removed',
-  'mileage_revalidation_removed', 'vehicle_mileage_update_skipped',
-  'advisory_lock_removed', 'allocation_before_advisory',
-  'idempotent_branch_removed', 'duplicate_audit_on_retry',
-  'initial_history_skipped', 'audit_outside_transaction',
-];
+const { MUTATION_NAMES: cases } = require('./close-api-mutations.cjs');
 for (const name of cases) {
   const result = spawnSync(process.execPath, ['scripts/test-reception-api.cjs'], {
     cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe', timeout: 120_000,
