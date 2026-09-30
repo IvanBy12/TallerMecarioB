@@ -218,13 +218,27 @@ test('S2-06 RBAC guard survives vehicles.update; technician denied even when ass
     const r = await action(); assert.equal(r.status, 403); assert.equal(code(r), 'PERMISSION_DENIED');
   }
   const receptionId = randomUUID(); const orderId = randomUUID();
-  await h.admin`INSERT INTO public.receptions
-    (id,tenant_id,vehicle_id,customer_id,received_by_membership_id,mileage_km)
-    VALUES (${receptionId},${a.tenantId},${v.vehicleId},${c1},${a.advisor.membershipId},0)`;
-  await h.admin`INSERT INTO public.service_orders
-    (id,tenant_id,reception_id,vehicle_id,customer_id,order_number,created_by_membership_id)
-    VALUES (${orderId},${a.tenantId},${receptionId},${v.vehicleId},${c1},
-      ${BigInt(`0x${randomUUID().replaceAll('-', '').slice(0, 12)}`)},${a.advisor.membershipId})`;
+  await h.admin.begin(async (tx) => {
+    const mediaId = randomUUID();
+    const consentId = await h.seedServiceConsent(tx, a.tenantId, c1);
+    await tx`INSERT INTO public.receptions
+      (id,tenant_id,vehicle_id,customer_id,privacy_consent_id,received_by_membership_id,mileage_km)
+      VALUES (${receptionId},${a.tenantId},${v.vehicleId},${c1},${consentId},${a.advisor.membershipId},0)`;
+    await tx`INSERT INTO public.media_assets
+      (id,tenant_id,bucket,object_key,media_type,mime_type,status,retention_class,retention_policy_version)
+      VALUES (${mediaId},${a.tenantId},'fixture',${mediaId},'signature','image/png','active','operational','v1')`;
+    await tx`INSERT INTO public.signatures
+      (id,tenant_id,reception_id,signed_by_name,signature_media_id,signed_at,document_version,document_hash)
+      VALUES (${randomUUID()},${a.tenantId},${receptionId},'Fixture',${mediaId},now(),'v1',${'a'.repeat(64)})`;
+    await tx`UPDATE public.receptions SET status='closed', closed_at=now() WHERE id=${receptionId}`;
+    await tx`INSERT INTO public.service_orders
+      (id,tenant_id,reception_id,vehicle_id,customer_id,order_number,created_by_membership_id)
+      VALUES (${orderId},${a.tenantId},${receptionId},${v.vehicleId},${c1},
+        ${BigInt(`0x${randomUUID().replaceAll('-', '').slice(0, 12)}`)},${a.advisor.membershipId})`;
+    await tx`INSERT INTO public.order_status_history
+      (id,tenant_id,order_id,to_status,request_id)
+      VALUES (${randomUUID()},${a.tenantId},${orderId},'reception',${randomUUID()})`;
+  });
   await h.admin`INSERT INTO public.assignments
     (id,tenant_id,order_id,membership_id,assignment_type,assigned_by_membership_id)
     VALUES (${randomUUID()},${a.tenantId},${orderId},${a.technician.membershipId},

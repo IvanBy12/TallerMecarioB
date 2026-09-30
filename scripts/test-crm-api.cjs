@@ -28,6 +28,9 @@ const { expectedMigrationCount } = require('./migration-count.cjs');
 const { applyMutation } = require('./crm-api-mutations.cjs');
 const { applyVehicleMutation } = require('./vehicle-api-mutations.cjs');
 const { applyOwnershipMutation } = require('./ownership-api-mutations.cjs');
+const { applySignatureMutation } = require('./signature-api-mutations.cjs');
+const { applyCloseMutation } = require('./close-api-mutations.cjs');
+const { applyReceptionQueriesMutation } = require('./reception-queries-mutations.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -144,6 +147,11 @@ async function main() {
     await applyMutation('js', { compiledRoot });
     await applyVehicleMutation('js', { compiledRoot });
     await applyOwnershipMutation('js', { compiledRoot });
+    if (process.env.TEST_SUITE_DIR === 'reception-api') {
+      applySignatureMutation(compiledRoot);
+      applyCloseMutation(compiledRoot);
+      applyReceptionQueriesMutation(compiledRoot);
+    }
     if (process.env.S208_LOG_MUTATION === 'request-url') {
       const file = join(compiledRoot, 'api', 'app.js');
       const source = readFileSync(file, 'utf8');
@@ -155,10 +163,18 @@ async function main() {
       throw new Error(`UNKNOWN_MUTATION ${process.env.S208_LOG_MUTATION}`);
     }
 
-    const files = readdirSync('tests/crm-api')
+    const suiteDir = process.env.TEST_SUITE_DIR === 'reception-api' ? 'tests/reception-api' : 'tests/crm-api';
+    const files = readdirSync(suiteDir)
       .filter((name) => name.endsWith('.test.cjs'))
+      .filter((name) => !process.env.TEST_FILE_FILTER || name === process.env.TEST_FILE_FILTER)
       .sort()
-      .map((name) => `tests/crm-api/${name}`);
+      .map((name) => `${suiteDir}/${name}`);
+    // S3-04.5: the no-database privacy primitives also run against this
+    // compiled (and possibly mutated) tree, next to the reception API suite.
+    if (suiteDir === 'tests/reception-api') {
+      files.push(...readdirSync('tests/privacy').filter((name) => name.endsWith('.test.cjs')).sort()
+        .map((name) => `tests/privacy/${name}`));
+    }
     const testArgs = ['--test', '--test-concurrency=1', '--test-timeout=60000'];
     if (process.env.TEST_NAME_PATTERN) testArgs.push(`--test-name-pattern=${process.env.TEST_NAME_PATTERN}`);
     testArgs.push(...files);

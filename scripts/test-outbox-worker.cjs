@@ -105,7 +105,7 @@ async function main() {
       `CREATE ROLE ${loginRole} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '${loginPassword}'`,
     );
     loginCreated = true;
-    await testAdmin.unsafe(`GRANT tallermecario_api, tallermecario_worker TO ${loginRole}`);
+    await testAdmin.unsafe(`GRANT tallermecario_api, tallermecario_worker TO ${loginRole} WITH INHERIT FALSE, SET TRUE`);
 
     runChild([
       resolve('node_modules/typescript/bin/tsc'),

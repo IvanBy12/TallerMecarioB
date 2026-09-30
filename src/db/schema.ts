@@ -803,6 +803,12 @@ export const receptions = pgTable(
     appointmentId: uuid('appointment_id'),
     locationId: uuid('location_id'),
     receivedByMembershipId: uuid('received_by_membership_id').notNull(),
+    /**
+     * RECEPTION-CONSENT-01 / D-PRIV-01: consentimiento `service_provision` que
+     * cubrió la recepción. Inmutable tras el INSERT; lo valida (0020) un trigger
+     * con `FOR SHARE` sobre el consentimiento, tras el lock del vehículo.
+     */
+    privacyConsentId: uuid('privacy_consent_id').notNull(),
     mileageKm: integer('mileage_km').notNull(),
     fuelLevelPct: smallint('fuel_level_pct'),
     customerNotes: text('customer_notes'),
@@ -815,6 +821,9 @@ export const receptions = pgTable(
   (t) => [
     unique('receptions_tenant_id_key').on(t.tenantId, t.id),
     unique('receptions_lineage_key').on(t.tenantId, t.id, t.vehicleId, t.customerId),
+    uniqueIndex('receptions_one_open_vehicle_uq')
+      .on(t.tenantId, t.vehicleId)
+      .where(sql`status = 'open'`),
     foreignKey({
       name: 'receptions_vehicle_fk',
       columns: [t.tenantId, t.vehicleId],
@@ -840,6 +849,11 @@ export const receptions = pgTable(
       columns: [t.tenantId, t.receivedByMembershipId],
       foreignColumns: [memberships.tenantId, memberships.id],
     }),
+    foreignKey({
+      name: 'receptions_privacy_consent_fk',
+      columns: [t.tenantId, t.privacyConsentId],
+      foreignColumns: [privacyConsents.tenantId, privacyConsents.id],
+    }),
     enumCheck('receptions_status_check', t.status, ['open', 'closed', 'cancelled']),
     rawCheck('receptions_mileage_check', '"mileage_km" >= 0'),
     rawCheck('receptions_fuel_check', '"fuel_level_pct" BETWEEN 0 AND 100'),
@@ -857,6 +871,7 @@ export const receptions = pgTable(
     index('receptions_appointment_idx').on(t.tenantId, t.appointmentId),
     index('receptions_location_idx').on(t.tenantId, t.locationId),
     index('receptions_received_by_idx').on(t.tenantId, t.receivedByMembershipId),
+    index('receptions_privacy_consent_idx').on(t.tenantId, t.privacyConsentId),
   ],
 );
 
@@ -1003,6 +1018,9 @@ export const orderStatusHistory = pgTable(
     index('osh_changed_by_idx').on(t.tenantId, t.changedByMembershipId),
     enumCheck('osh_from_status_check', t.fromStatus, SERVICE_ORDER_STATUSES),
     enumCheck('osh_to_status_check', t.toStatus, SERVICE_ORDER_STATUSES),
+    uniqueIndex('osh_one_initial_reception_uq')
+      .on(t.tenantId, t.orderId)
+      .where(sql`from_status IS NULL AND to_status = 'reception'`),
     index('osh_order_changed_idx').on(t.tenantId, t.orderId, t.changedAt.desc()),
   ],
 );
@@ -2291,12 +2309,19 @@ export const signatures = pgTable(
     signedByName: varchar('signed_by_name', { length: 200 }).notNull(),
     signedByDocument: varchar('signed_by_document', { length: 60 }),
     signatureMediaId: uuid('signature_media_id').notNull(),
+    documentVersion: varchar('document_version', { length: 40 }).notNull(),
+    documentHash: varchar('document_hash', { length: 128 }).notNull(),
     signedAt: ts('signed_at').notNull(),
     ipAddress: inet('ip_address'),
     createdAt: createdAt(),
   },
   (t) => [
     unique('signatures_tenant_id_key').on(t.tenantId, t.id),
+    uniqueIndex('signatures_one_reception_uq')
+      .on(t.tenantId, t.receptionId)
+      .where(sql`reception_id IS NOT NULL`),
+    // A captured image is evidence for one signing event, never reusable.
+    uniqueIndex('signatures_one_media_uq').on(t.tenantId, t.signatureMediaId),
     foreignKey({
       name: 'signatures_reception_fk',
       columns: [t.tenantId, t.receptionId],
@@ -2316,6 +2341,10 @@ export const signatures = pgTable(
       'signatures_parent_xor_check',
       `("reception_id" IS NOT NULL AND "delivery_id" IS NULL)
        OR ("reception_id" IS NULL AND "delivery_id" IS NOT NULL)`,
+    ),
+    rawCheck(
+      'signatures_acceptance_evidence_check',
+      'length(btrim("document_version")) > 0 AND length(btrim("document_hash")) > 0',
     ),
     index('signatures_reception_idx').on(t.tenantId, t.receptionId),
     index('signatures_delivery_idx').on(t.tenantId, t.deliveryId),
@@ -2926,6 +2955,17 @@ export const privacyConsents = pgTable(
     purposeCode: varchar('purpose_code', { length: 80 }).notNull(),
     privacyNoticeVersion: varchar('privacy_notice_version', { length: 40 }).notNull(),
     authorizationTextVersion: varchar('authorization_text_version', { length: 40 }).notNull(),
+    /**
+     * D-PRIV-02: SHA-256 hex lowercase de la representación canónica v1 del aviso
+     * + autorización + snapshot presentados. Calculado solo por el servidor.
+     */
+    authorizationTextHash: char('authorization_text_hash', { length: 64 }).notNull(),
+    /**
+     * D-PRIV-02/05: identidad del Responsable mostrada al titular
+     * (`legalName`, `address`, `phone`, `email`, `rightsChannel`). Server-owned e
+     * inmutable; nunca se reconstruye desde el estado actual del taller.
+     */
+    controllerNoticeSnapshot: jsonb('controller_notice_snapshot').notNull(),
     channel: varchar('channel', { length: 24 }).notNull(),
     status: varchar('status', { length: 16 }).notNull().default('granted'),
     capturedAt: ts('captured_at').notNull(),
@@ -2968,6 +3008,26 @@ export const privacyConsents = pgTable(
     rawCheck(
       'privacy_consents_revoked_check',
       `("status" = 'revoked') = ("revoked_at" IS NOT NULL)`,
+    ),
+    rawCheck(
+      'privacy_consents_authorization_text_hash_check',
+      `"authorization_text_hash" COLLATE "C" ~ '^[0-9a-f]{64}$'`,
+    ),
+    rawCheck(
+      'privacy_consents_controller_snapshot_check',
+      `jsonb_typeof("controller_notice_snapshot") = 'object'
+       AND "controller_notice_snapshot" ?& ARRAY['legalName','address','phone','email','rightsChannel']
+       AND ("controller_notice_snapshot" - ARRAY['legalName','address','phone','email','rightsChannel']) = '{}'::jsonb
+       AND jsonb_typeof("controller_notice_snapshot"->'legalName') = 'string'
+       AND jsonb_typeof("controller_notice_snapshot"->'address') = 'string'
+       AND jsonb_typeof("controller_notice_snapshot"->'rightsChannel') = 'string'
+       AND jsonb_typeof("controller_notice_snapshot"->'phone') IN ('string','null')
+       AND jsonb_typeof("controller_notice_snapshot"->'email') IN ('string','null')
+       AND (jsonb_typeof("controller_notice_snapshot"->'phone') = 'string'
+         OR jsonb_typeof("controller_notice_snapshot"->'email') = 'string')
+       AND length(btrim("controller_notice_snapshot"->>'legalName')) > 0
+       AND length(btrim("controller_notice_snapshot"->>'address')) > 0
+       AND length(btrim("controller_notice_snapshot"->>'rightsChannel')) > 0`,
     ),
     index('privacy_consents_lookup_idx').on(
       t.tenantId,

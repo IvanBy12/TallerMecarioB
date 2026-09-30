@@ -18,6 +18,7 @@ const path = require('node:path');
 const postgres = require('postgres');
 const { migrationState, seedTwoTenants, runCrmE2e, readDataSnapshot,
   assertLogPrivacy, completionEvents, assertExactCrmAudit } = require('./staging-crm-e2e.cjs');
+const { runReceptionE2e, readReceptionSnapshot } = require('./staging-reception-e2e.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const COMPOSE_FILE = path.join(REPO_ROOT, 'docker-compose.staging.yml');
@@ -84,6 +85,10 @@ async function main() {
     health_readiness: 'FAIL',
     smoke: 'FAIL',
     crm_e2e: 'FAIL',
+    reception_e2e: 'FAIL',
+    reception_rbac: 'FAIL',
+    reception_exactly_once: 'FAIL',
+    production_privacy_fail_closed: 'FAIL',
     tenant_isolation: 'FAIL',
     ownership_history: 'FAIL',
     audit: 'FAIL',
@@ -99,7 +104,7 @@ async function main() {
   const project = `tm-staging-${suffix}`;
   const imageGood = `tallermecario-api:${suffix}-good`;
   const imageBad = `tallermecario-api:${suffix}-bad`;
-  const envFile = path.join(REPO_ROOT, 'staging.env');
+  const envFile = path.join(os.tmpdir(), `tallermecario-staging-${suffix}.env`);
   const badOverrideFile = path.join(os.tmpdir(), `tallermecario-staging-bad-${suffix}.yml`);
 
   let stackUp = false;
@@ -182,17 +187,49 @@ async function main() {
     report.migration = 'PASS';
     const initialMigrationState = await migrationState(admin);
     report.migration_ledger = 'PASS';
-    process.stdout.write('MIGRATION_LEDGER_PASS 19/19; latest 0018; plate check valid; history guard enabled\n');
+    const { count, latestTag } = JSON.parse(initialMigrationState);
+    process.stdout.write(`MIGRATION_LEDGER_PASS ${count}/${count}; latest ${latestTag}; plate check valid; history guard enabled\n`);
     const rerun = compose(project, envFile, ['run', '--rm', 'migrate']);
     if (rerun.status !== 0) throw new Error('SECOND_STAGING_MIGRATION_FAILED');
     assert.equal(await migrationState(admin), initialMigrationState,
       'second migration must leave ledger and schema unchanged');
     report.migration_idempotency = 'PASS';
-    process.stdout.write('MIGRATION_IDEMPOTENCY_PASS 19/19; schema unchanged\n');
+    process.stdout.write(`MIGRATION_IDEMPOTENCY_PASS ${count}/${count}; latest ${latestTag}; schema unchanged\n`);
 
     const provision = compose(project, envFile, ['run', '--rm', 'provision-runtime-login']);
     if (provision.status !== 0) throw new Error('RUNTIME_LOGIN_PROVISION_FAILED');
     process.stdout.write('RUNTIME_LOGIN_PROVISION_PASS\n');
+
+    // Both deployed processes receive this exact URL. PostgreSQL sets each
+    // pool's fixed role at connection startup, including autocommit reads.
+    const runtimeUrl = new URL(adminUrl);
+    runtimeUrl.username = 'tallermecario_runtime';
+    runtimeUrl.password = runtimePassword;
+    const neutral = postgres(runtimeUrl.toString(), { max: 1, onnotice: () => {} });
+    const apiRole = postgres(runtimeUrl.toString(), { max: 1, onnotice: () => {},
+      connection: { role: 'tallermecario_api' } });
+    const workerRole = postgres(runtimeUrl.toString(), { max: 1, onnotice: () => {},
+      connection: { role: 'tallermecario_worker' } });
+    try {
+      const [base] = await neutral`SELECT session_user AS session_role,
+        current_user AS effective_role,
+        pg_catalog.has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage`;
+      assert.deepEqual({ ...base }, {
+        session_role: 'tallermecario_runtime', effective_role: 'tallermecario_runtime',
+        public_usage: false,
+      });
+      for (const [pool, expected] of [[apiRole, 'tallermecario_api'],
+        [workerRole, 'tallermecario_worker']]) {
+        const [identity] = await pool`SELECT session_user AS session_role,
+          current_user AS effective_role, r.rolbypassrls AS bypass
+          FROM pg_catalog.pg_roles r WHERE r.rolname = current_user`;
+        assert.deepEqual({ ...identity }, { session_role: 'tallermecario_runtime',
+          effective_role: expected, bypass: false });
+      }
+    } finally {
+      await Promise.all([neutral.end(), apiRole.end(), workerRole.end()]);
+    }
+    process.stdout.write('RUNTIME_ROLE_BOUNDARY_PASS\n');
 
     const apiUp = compose(project, envFile, ['up', '-d', 'api', 'worker']);
     if (apiUp.status !== 0) throw new Error('COMPOSE_API_UP_FAILED');
@@ -264,6 +301,35 @@ async function main() {
     report.log_privacy = 'PASS';
     process.stdout.write(`STAGING_LOG_PRIVACY_PASS ${e2e.requestCount} completion events; closed field contract\n`);
 
+    const receptionE2e = await runReceptionE2e(admin, baseUrl, identity, tenants, e2e.vehicleId);
+    report.reception_e2e = 'PASS';
+    report.reception_rbac = 'PASS';
+    report.reception_exactly_once = 'PASS';
+    report.production_privacy_fail_closed = 'PASS';
+    process.stdout.write(`RECEPTION_E2E_PASS ${receptionE2e.requestCount} deployed HTTP requests; TenantContext; RLS; OCC; signature; close; reads; RBAC\n`);
+    process.stdout.write('RECEPTION_CLOSE_EXACTLY_ONCE_PASS order=1 history=1 signature=1 close_audit=1 retry_snapshot_unchanged\n');
+    process.stdout.write('PRODUCTION_PRIVACY_FAIL_CLOSED_PASS RELEASE_INTEGRATION_DEPENDENCY\n');
+    const allRequests = baselineCompletions + e2e.requestCount + receptionE2e.requestCount;
+    const receptionLogs = await waitFor(async () => {
+      const logs = compose(project, envFile,
+        ['logs', '--no-color', '--no-log-prefix', 'api'], { capture: true });
+      if (logs.status !== 0) throw new Error('STAGING_LOG_CAPTURE_FAILED');
+      return completionEvents(logs.stdout).length >= allRequests ? logs : null;
+    }, { timeoutMs: 10000, intervalMs: 250, label: 'RECEPTION_COMPLETION_LOGS' });
+    assert.equal(assertLogPrivacy(receptionLogs.stdout, [...e2e.sentinels, ...receptionE2e.sentinels],
+      allRequests, [...e2e.errors, ...receptionE2e.errors]), allRequests);
+    const receptionCompletions = completionEvents(receptionLogs.stdout).slice(
+      baselineCompletions + e2e.requestCount);
+    for (const audit of JSON.parse(receptionE2e.snapshot).audits) {
+      assert.equal(receptionCompletions.filter((event) => event.request_id === audit.row.request_id
+        && event.tenant_id === tenants.a.tenantId && event.user_id === tenants.a.advisor.userId
+        && event.membership_id === tenants.a.advisor.membershipId
+        && [200, 201].includes(event.status_code)).length, 1);
+    }
+    process.stdout.write(`RECEPTION_LOG_PRIVACY_PASS ${receptionE2e.requestCount} completion events; closed allowlist; audit correlation\n`);
+    const crmSnapshotAfterReception = await readDataSnapshot(admin, e2e.vehicleId,
+      tenants.a.tenantId, tenants.b.tenantId);
+
     // ---- rollback/redeploy: deploy a broken config, prove it's detected
     // and rolled back to the known-good one ----
     const badOverride = [
@@ -271,7 +337,7 @@ async function main() {
       '  api:',
       `    image: ${imageBad}`,
       '    environment:',
-      "      DATABASE_URL: postgresql://tallermecario_staging_runtime:wrong-password@postgres:5432/tallermecario_staging",
+      "      DATABASE_URL: postgresql://tallermecario_runtime:wrong-password@postgres:5432/tallermecario_staging",
       '',
     ].join('\n');
     fs.writeFileSync(badOverrideFile, badOverride, 'utf8');
@@ -286,25 +352,14 @@ async function main() {
     ]);
     if (badDeploy.status !== 0) throw new Error('BAD_DEPLOY_COMMAND_FAILED');
 
-    let badDeployDetected = false;
-    try {
-      await waitFor(
-        async () => {
-          const result = await fetchJson(`${baseUrl}/health/ready`).catch(() => ({ status: 0 }));
-          return result.status === 503 && result.body?.checks?.database === false
-            && result.body?.status === 'not_ready' ? result : null;
-        },
-        { timeoutMs: 20000, intervalMs: 1000, label: 'BAD_DEPLOY_UNREADY' },
-      );
-      badDeployDetected = true;
-    } catch {
-      badDeployDetected = false;
-    }
-    if (!badDeployDetected) throw new Error('BAD_DEPLOY_WAS_NOT_DETECTED_AS_UNREADY');
-    const badLive = await fetchJson(`${baseUrl}/health/live`);
-    if (badLive.status !== 200 || badLive.body?.status !== 'live')
-      throw new Error('BAD_DEPLOY_LIVENESS_FAILED');
-    process.stdout.write('BAD_DEPLOY_CORRECTLY_DETECTED_AS_NOT_READY (database=false; live=200)\n');
+    await waitFor(async () => {
+      const logs = compose(project, envFile,
+        ['logs', '--no-color', '--no-log-prefix', 'api'], { capture: true });
+      return logs.status === 0 && logs.stdout.includes('DATABASE_RUNTIME_ROLE_INVALID');
+    }, { timeoutMs: 20000, intervalMs: 1000, label: 'BAD_DEPLOY_ROLE_REJECTED' });
+    const badReady = await fetchJson(`${baseUrl}/health/ready`).catch(() => ({ status: 0 }));
+    if (badReady.status === 200) throw new Error('BAD_DEPLOY_WAS_NOT_REJECTED');
+    process.stdout.write('BAD_DEPLOY_CORRECTLY_REJECTED_AT_STARTUP\n');
     report.bad_config = 'PASS';
 
     const rollback = compose(project, envFile, ['up', '-d', 'api']);
@@ -326,8 +381,26 @@ async function main() {
     assert.deepEqual(restoredHistory.body?.owners, e2e.history,
       'ownership history unchanged after bad config and recovery');
     assert.equal(await readDataSnapshot(admin, e2e.vehicleId,
-      tenants.a.tenantId, tenants.b.tenantId), e2e.snapshot,
+      tenants.a.tenantId, tenants.b.tenantId), crmSnapshotAfterReception,
     'CRM ownership, tenant counts and audit rows unchanged');
+    const recoveredReception = await fetchJson(`${baseUrl}${receptionE2e.route}`, {
+      headers: { authorization: `Bearer ${receptionE2e.recoveryToken}`,
+        'x-tenant-id': tenants.a.tenantId },
+    });
+    assert.equal(recoveredReception.status, 200);
+    assert.deepEqual(recoveredReception.body.reception, receptionE2e.detail);
+    assert.equal(await readReceptionSnapshot(admin, tenants.a.tenantId,
+      receptionE2e.receptionId, receptionE2e.vehicleId), receptionE2e.snapshot,
+    'reception, signature, service order, initial history, audit and vehicle unchanged after recovery');
+    const recoveryLogs = await waitFor(async () => {
+      const logs = compose(project, envFile,
+        ['logs', '--no-color', '--no-log-prefix', 'api'], { capture: true });
+      if (logs.status !== 0) throw new Error('STAGING_LOG_CAPTURE_FAILED');
+      return completionEvents(logs.stdout).some((event) =>
+        event.route === '/api/v1/receptions/:receptionId' && event.status_code === 200) ? logs : null;
+    }, { timeoutMs: 10000, intervalMs: 250, label: 'RECOVERY_RECEPTION_COMPLETION' });
+    assertLogPrivacy(recoveryLogs.stdout, [...e2e.sentinels, ...receptionE2e.sentinels], 2);
+    process.stdout.write('RECEPTION_ROLLBACK_DATA_PRESERVED_PASS\n');
     assert.equal(await migrationState(admin), initialMigrationState,
       'migration ledger and schema unchanged after recovery');
     report.rollback_data_preserved = 'PASS';
@@ -377,7 +450,7 @@ async function main() {
     if (process.env.GITHUB_STEP_SUMMARY) {
       const rows = Object.entries(report).map(([key, value]) => `| ${key} | ${value} |`).join('\n');
       fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-        `\n## S2-08 staging deploy drill\n\n| Gate | Result |\n| --- | --- |\n${rows}\n`, 'utf8');
+        `\n## Sprint 3 backend staging deploy drill\n\n| Gate | Result |\n| --- | --- |\n${rows}\n`, 'utf8');
     }
   }
 

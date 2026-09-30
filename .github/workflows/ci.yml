@@ -41,7 +41,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies
@@ -61,6 +61,12 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: R2 presigned PUT security (no R2 credentials)
+        run: npm run test:media:presign:ci
+
+      - name: Reception mutation harness portability (LF and CRLF)
+        run: npm run test:reception:harness
 
       - name: RBAC matrix and TenantContext core (S1-02, no database)
         run: |
@@ -127,8 +133,20 @@ jobs:
       - name: CRM migration upgrade (S2-01 to S2-03)
         run: npm run test:crm:upgrade:ci
 
+      - name: Reception PostgreSQL integrity (S3-02)
+        run: npm run test:reception:db:ci
+
+      - name: Reception migration upgrade (S3-02)
+        run: npm run test:reception:upgrade:ci
+
       - name: CRM customer, vehicle, and ownership API (S2-04 to S2-06)
         run: npm run test:crm:api:ci
+
+      - name: Reception create and edit API (S3-03 to S3-04)
+        run: npm run test:reception:api:ci
+
+      - name: Shared runtime database role boundary
+        run: npm run test:runtime:db:ci
 
       - name: Outbox worker regression
         run: npm run test:outbox:ci
@@ -146,7 +164,7 @@ jobs:
   # branch (S2-08 T9: dispatch is unavailable until ci.yml reaches main) and
   # explicit pre-release dispatch, after the regular validation job has passed.
   mutations:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/integration/sprint-2' || github.ref == 'refs/heads/task/s2-08-final-quality-gate'))
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (github.event_name == 'push' && (github.ref == 'refs/heads/integration/sprint-2' || github.ref == 'refs/heads/integration/sprint-3' || github.ref == 'refs/heads/codex/s3-02-postgres-invariants' || github.ref == 'refs/heads/task/s2-08-final-quality-gate' || github.ref == 'refs/heads/task/s3-backend-final-quality-gate'))
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -179,7 +197,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies
@@ -200,6 +218,9 @@ jobs:
 
       - name: CRM database mutations
         run: npm run test:crm:mutations:ci
+
+      - name: Reception complete mutation gate (S3-02 to S3-07)
+        run: npm run test:reception:mutations:ci
 
       - name: CRM customer API mutations
         run: npm run test:crm:api:mutations:ci
@@ -224,15 +245,15 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      # Sprint 2 extends the disposable Sprint 0 stack with a hermetic Clerk
-      # verifier, migration ledger/idempotency, deployed CRM E2E for two
-      # tenants, logging privacy and data-preserving bad-config recovery.
+      # Sprint 3: hermetic Clerk verification, current migration ledger,
+      # deployed CRM and reception HTTP E2E for two tenants, exactly-once close,
+      # production privacy fail-closed, logging privacy and data-preserving recovery.
       # The drill writes gate results to GITHUB_STEP_SUMMARY on pass or fail.
-      - name: Build, migrate, CRM E2E and rollback in disposable staging
+      - name: Build, migrate, CRM and reception HTTP E2E, rollback in disposable staging
         run: npm run staging:deploy-drill:ci

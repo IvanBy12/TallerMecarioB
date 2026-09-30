@@ -217,8 +217,31 @@ async function main() {
         { id: fixture.customerB, tenant_id: fixture.tenantB, first_name: 'Beatriz', last_name: 'Tenant-B', phone: '3000000002' },
       ])}`;
       await tx`INSERT INTO vehicles ${tx({ id: fixture.vehicleA, tenant_id: fixture.tenantA, plate: `BKP${fixture.vehicleA.slice(0, 5).toUpperCase()}`, vehicle_type: 'car', brand: 'Mazda', model: '3' })}`;
-      await tx`INSERT INTO receptions ${tx({ id: fixture.receptionA, tenant_id: fixture.tenantA, vehicle_id: fixture.vehicleA, customer_id: fixture.customerA, received_by_membership_id: fixture.membershipA, mileage_km: 42000 })}`;
+      // S3-04.5 made evidence mandatory. This is privileged TEST-ONLY data,
+      // independent of the deliberately unpublished production privacy catalog.
+      const privacy = require('../tests/privacy/fixtures.cjs');
+      const privacyConsentId = randomUUID();
+      await tx`INSERT INTO privacy_consents ${tx({ id: privacyConsentId, tenant_id: fixture.tenantA,
+        customer_id: fixture.customerA, purpose_code: 'service_provision',
+        privacy_notice_version: privacy.NOTICE_V1.version,
+        authorization_text_version: privacy.SERVICE_V1.version,
+        authorization_text_hash: privacy.FIXTURE_HASH, channel: 'in_person',
+        captured_at: new Date(), controller_notice_snapshot: tx.json(privacy.SNAPSHOT) })}`;
+      await tx`INSERT INTO receptions ${tx({ id: fixture.receptionA, tenant_id: fixture.tenantA, vehicle_id: fixture.vehicleA, customer_id: fixture.customerA, privacy_consent_id: privacyConsentId, received_by_membership_id: fixture.membershipA, mileage_km: 42000 })}`;
+      const signatureMediaId = randomUUID();
+      await tx`INSERT INTO media_assets ${tx({ id: signatureMediaId, tenant_id: fixture.tenantA,
+        bucket: 'backup-drill', object_key: signatureMediaId, media_type: 'signature',
+        mime_type: 'image/png', status: 'active', retention_class: 'operational',
+        retention_policy_version: 'v1' })}`;
+      await tx`INSERT INTO signatures ${tx({ id: randomUUID(), tenant_id: fixture.tenantA,
+        reception_id: fixture.receptionA, signed_by_name: 'Backup Drill Customer',
+        signature_media_id: signatureMediaId, signed_at: new Date(),
+        document_version: 'v1', document_hash: 'a'.repeat(64) })}`;
+      await tx`UPDATE receptions SET status='closed', closed_at=now() WHERE id=${fixture.receptionA}`;
       await tx`INSERT INTO service_orders ${tx({ id: fixture.orderA, tenant_id: fixture.tenantA, reception_id: fixture.receptionA, vehicle_id: fixture.vehicleA, customer_id: fixture.customerA, order_number: 900001, created_by_membership_id: fixture.membershipA })}`;
+      await tx`INSERT INTO order_status_history ${tx({ id: randomUUID(), tenant_id: fixture.tenantA,
+        order_id: fixture.orderA, from_status: null, to_status: 'reception',
+        request_id: randomUUID() })}`;
       await tx`
         INSERT INTO customer_payments (
           id, tenant_id, customer_id, payment_method, status, amount, currency,
@@ -253,7 +276,8 @@ async function main() {
 
     for (const table of [
       'workshops', 'workshop_locations', 'users', 'memberships', 'customers', 'vehicles',
-      'receptions', 'service_orders', 'customer_payments', 'outbox_events', 'audit_logs',
+      'privacy_consents', 'receptions', 'media_assets', 'signatures', 'service_orders', 'order_status_history',
+      'customer_payments', 'outbox_events', 'audit_logs',
     ]) {
       const [row] = await sourceAdmin.unsafe(`SELECT count(*)::int AS count FROM public.${table}`);
       sourceCounts[table] = row.count;

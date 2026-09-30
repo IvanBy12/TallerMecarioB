@@ -81,6 +81,14 @@ async function fixture(fn) {
   });
 }
 
+// S3-04.5 fixture: receptions require a service_provision consent row
+// (TEST-ONLY evidence values; CHECK constraints stay enforced in replica mode).
+async function serviceConsent(tx, tenantId, customerId) {
+  const consentId = id();
+  await tx`INSERT INTO privacy_consents ${tx({ id: consentId, tenant_id: tenantId, customer_id: customerId, purpose_code: 'service_provision', privacy_notice_version: 'test-notice-1', authorization_text_version: 'test-service-1', authorization_text_hash: 'f'.repeat(64), controller_notice_snapshot: tx.json({ legalName: 'TEST-ONLY', address: 'TEST-ONLY', phone: '+5700000000', email: null, rightsChannel: 'TEST-ONLY' }), channel: 'in_person', captured_at: new Date() })}`;
+  return consentId;
+}
+
 async function makeTenant({ members = 2, withOrder = false } = {}) {
   const t = { tenant: id(), location: id(), members: [] };
   await fixture(async (tx) => {
@@ -100,11 +108,16 @@ async function makeTenant({ members = 2, withOrder = false } = {}) {
       t.reception = id();
       t.order = id();
       await tx`INSERT INTO vehicles ${tx({ id: t.vehicle, tenant_id: t.tenant, plate: `P${t.vehicle.slice(0, 6).toUpperCase()}`, vehicle_type: 'car', brand: 'b', model: 'm' })}`;
-      await tx`INSERT INTO receptions ${tx({ id: t.reception, tenant_id: t.tenant, vehicle_id: t.vehicle, customer_id: t.customer, received_by_membership_id: t.members[0], mileage_km: 1 })}`;
+      t.consent = await serviceConsent(tx, t.tenant, t.customer);
+      await tx`INSERT INTO receptions ${tx({ id: t.reception, tenant_id: t.tenant, vehicle_id: t.vehicle, customer_id: t.customer, privacy_consent_id: t.consent, received_by_membership_id: t.members[0], mileage_km: 1, status: 'closed', closed_at: new Date() })}`;
+      const signatureMedia = id();
+      await tx`INSERT INTO media_assets ${tx({ id: signatureMedia, tenant_id: t.tenant, bucket: 'fixture', object_key: signatureMedia, media_type: 'signature', mime_type: 'image/png', status: 'active', retention_class: 'operational', retention_policy_version: 'v1' })}`;
+      await tx`INSERT INTO signatures ${tx({ id: id(), tenant_id: t.tenant, reception_id: t.reception, signed_by_name: 'Fixture', signature_media_id: signatureMedia, signed_at: new Date(), document_version: 'v1', document_hash: 'a'.repeat(64) })}`;
       await tx`INSERT INTO service_orders ${tx({ id: t.order, tenant_id: t.tenant, reception_id: t.reception, vehicle_id: t.vehicle, customer_id: t.customer, order_number: 1, created_by_membership_id: t.members[0] })}`;
+      await tx`INSERT INTO order_status_history ${tx({ id: id(), tenant_id: t.tenant, order_id: t.order, to_status: 'reception', request_id: id() })}`;
     }
   });
   return t;
 }
 
-module.exports = { admin, runtime, setupRoles, id, begin, commit, rollback, inTx, fixture, makeTenant };
+module.exports = { admin, runtime, setupRoles, id, begin, commit, rollback, inTx, fixture, makeTenant, serviceConsent };

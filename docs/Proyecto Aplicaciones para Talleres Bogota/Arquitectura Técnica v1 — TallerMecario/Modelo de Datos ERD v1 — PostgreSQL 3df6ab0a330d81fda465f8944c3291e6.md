@@ -506,7 +506,7 @@ tenant_id, reception_id, zone_code, damage_type, severity, description, created_
 
 ## signatures
 
-tenant_id, reception_id nullable, delivery_id nullable, signed_by_name, signed_by_document nullable, signature_media_id, signed_at, ip_address nullable, created_at.
+tenant_id, reception_id nullable, delivery_id nullable, signed_by_name, signed_by_document nullable, signature_media_id, document_version, document_hash, signed_at, ip_address nullable, created_at.
 
 Constraint XOR obligatorio:
 
@@ -519,6 +519,9 @@ CHECK (
 ```
 
 La firma debe pertenecer exactamente a una recepción **o** a una entrega; nunca a ambas ni a ninguna.
+Cada recepción tiene exactamente una firma; cada entrega debe tener exactamente
+una cuando se implemente su flujo. `UNIQUE(tenant_id,signature_media_id)` hace
+single-use a la media de firma: una captura no puede respaldar ambos actos.
 
 # 8. Órdenes de trabajo
 
