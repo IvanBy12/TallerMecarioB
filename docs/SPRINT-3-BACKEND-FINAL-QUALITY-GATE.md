@@ -14,8 +14,9 @@ This document does not close Sprint 3 as a whole or claim frontend completion.
 - An existing untracked `.claude/settings.local.json` was temporarily preserved
   outside the repository for the clean baseline, then restored and locally
   excluded through `.git/info/exclude`. It is neither deleted nor committed.
-- Final implementation SHA and remote run references: recorded in the final
-  evidence update after the implementation commit exists. The evidence-only
+- Final implementation SHA: `df40b2d223f4fa0a426eb5b8d67008c0064452e7`.
+  Final delivered SHA is the subsequent evidence-only commit, resolvable from
+  the branch and supplied verbatim in the handoff. The evidence-only
   commit is identified by `git log -1 --format=%H -- docs/SPRINT-3-BACKEND-FINAL-QUALITY-GATE.md`.
 
 ## 2. Scope
@@ -24,6 +25,9 @@ Changes are tests, mutation harnesses, CI, staging evidence, Node version
 configuration and this document. `src/`, schema, migrations and snapshots are
 unchanged. No reception, privacy, signature, close or RBAC semantics changed.
 No Sprint 4 work, frontend, cancellation or reopen implementation.
+Base and implementation have identical Git trees: `src` =
+`a8094775be861f5a6f908612a5635aa1239ce831`; `drizzle` =
+`445e9dc949cd18786098babc4e7a5eb58cea2ed2`.
 
 Two infrastructure defects were reproduced and corrected:
 
@@ -154,9 +158,14 @@ signed URLs are included here. Initial run: 6/6 PASS and FIXTURE_CLEANUP_PASS.
 Next run: 5/6, `CROSS_TENANT_INITIAL_PUT` had `UND_ERR_CONNECT_TIMEOUT (attempt 1/1)`.
 This was a transport failure, not a demonstrated domain or isolation defect.
 The runner cleaned its fixtures in finally; that failed run did not emit the
-overall success marker and is not counted as PASS. A new manual sequence with
-fresh fixtures is recorded in the final evidence update. PUT retries remain
-disabled; cleanup is restricted to keys created by each run.
+overall success marker and is not counted as PASS. A third manual run with
+fresh fixtures also returned 5/6: `SIGNATURE_REPLAY_SAME_PUT` encountered
+`UND_ERR_CONNECT_TIMEOUT (attempt 1/1)`. No green sequence of three was obtained.
+Independent residue check confirmed media disposable databases = 0 and media
+logins = 0. Both resolved IPv4 TCP paths were reachable during later diagnostics,
+which does not erase the real request failures. **EXTERNAL GATE FAILED / NOT
+CLOSED**; no domain defect is demonstrated, but green R2 evidence remains required.
+PUT retries remain disabled; cleanup is restricted to keys created by each run.
 
 ## 13. Local gates
 
@@ -200,11 +209,19 @@ is shared with the runners, and temporary mutation copies stay in OS temp.
 
 ## 15. Remote CI readiness
 
-Remote `validate`, `mutations` and `staging` must succeed on the final reviewed
-implementation SHA. CI includes the complete S3 query mutation gate and real
-deployed reception E2E. URLs/run IDs and actual job conclusions will be recorded
-in the evidence-only update; local PASS is not a remote PASS claim. No merge to
-main or integration has been performed by this task.
+Draft [PR #2](https://github.com/IvanBy12/TallerMecarioB/pull/2) targets main from
+the required task branch. [CI run #39 / 36748202170](https://github.com/IvanBy12/TallerMecarioB/actions/runs/36748202170)
+corresponds to implementation SHA `df40b2d223f4fa0a426eb5b8d67008c0064452e7`.
+Validate job `109999720048` = success. Staging job `110001019454` = success,
+including 23/23 through 0022, all 24 report fields, 16 deployed reception requests,
+exactly-once close, production privacy fail-closed and rollback/log privacy.
+Mutations job `110001019592` is still running as this evidence update is prepared;
+its final conclusion and the evidence-commit CI results are supplied in the
+final handoff before any remote-complete claim. The PR checks link always resolves
+the latest delivered SHA; this committed document records the preparation snapshot.
+CI calls the S3 aggregate once. No merge or push to integration/sprint-3 or main
+was performed; integration-push evidence requires later integration of this
+reviewed task branch and must not be inferred from the PR run.
 
 ## 16. DOC_CONFLICTS
 
@@ -232,8 +249,9 @@ a visible release dependency. No technical domain blocker was reproduced.
 
 ## 19. git diff --stat
 
-Final baseline-to-implementation statistics are recorded with the final evidence
-update. The diff must contain no source/schema/migration changes.
+Implementation versus base: **20 files, 794 insertions(+), 82 deletions(-)**.
+Final delivery adds only this evidence update. `git diff BASE HEAD --name-only --
+src drizzle` is empty; no source/schema/migration changes.
 
 ## 20. git status --short
 
@@ -242,6 +260,10 @@ coverage, temporary directories, R2 files and private keys are not committed.
 
 ## 21. Commit SHA / decision
 
-Implementation and evidence commit SHAs are supplied in the final handoff.
-Decision is pending final external evidence and remote CI. Only **TRACK A —
-BACKEND CLOSED** can be declared; this document never closes all of Sprint 3.
+Implementation SHA: `df40b2d223f4fa0a426eb5b8d67008c0064452e7`. The evidence commit
+SHA is supplied in the final handoff (a commit cannot embed its own hash).
+Formal closure is **NOT declared** while real R2 evidence is red. Hermetic
+backend gates are green; this document does not assert TRACK A — BACKEND CLOSED
+or close Sprint 3 as a whole. PR remains draft and no merge is authorized here.
+
+SPRINT 3 BACKEND FINAL GATE READY FOR REVIEW: NO
