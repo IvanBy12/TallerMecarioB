@@ -29,6 +29,7 @@ const { applyMutation } = require('./crm-api-mutations.cjs');
 const { applyVehicleMutation } = require('./vehicle-api-mutations.cjs');
 const { applyOwnershipMutation } = require('./ownership-api-mutations.cjs');
 const { applySignatureMutation } = require('./signature-api-mutations.cjs');
+const { applyCloseMutation } = require('./close-api-mutations.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -145,7 +146,10 @@ async function main() {
     await applyMutation('js', { compiledRoot });
     await applyVehicleMutation('js', { compiledRoot });
     await applyOwnershipMutation('js', { compiledRoot });
-    if (process.env.TEST_SUITE_DIR === 'reception-api') applySignatureMutation(compiledRoot);
+    if (process.env.TEST_SUITE_DIR === 'reception-api') {
+      applySignatureMutation(compiledRoot);
+      applyCloseMutation(compiledRoot);
+    }
     if (process.env.S208_LOG_MUTATION === 'request-url') {
       const file = join(compiledRoot, 'api', 'app.js');
       const source = readFileSync(file, 'utf8');

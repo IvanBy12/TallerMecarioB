@@ -271,6 +271,7 @@ test('RBAC and unauthenticated: route permission blocks technician before handle
   registerReceptionRoutes({ post(path, options) {
     const permissions = {
       '/api/v1/receptions': 'receptions.create',
+      '/api/v1/receptions/:receptionId/close': 'receptions.close',
       '/api/v1/receptions/:receptionId/signature': 'signatures.capture',
     };
     assert.equal(options.config.permission, permissions[path]);
