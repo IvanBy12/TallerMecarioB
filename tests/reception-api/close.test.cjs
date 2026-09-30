@@ -139,6 +139,76 @@ test('close persists exactly one order, history, mileage and audit; retry is rea
   assert.equal((await h.admin`SELECT id FROM public.order_status_history WHERE order_id=${o.id}`).length, 1);
 });
 
+test('close is strictly bodyless, including empty JSON values, with no rejection side effects', async () => {
+  const { a } = await h.twoTenants();
+  const f = await fixture(a);
+  const rejected = [
+    { body: {} }, { body: null }, { body: { status: 'closed' } },
+    { body: { orderNumber: '1' } }, { body: [] }, { body: '' },
+    { rawBody: '   ', headers: { 'content-type': 'application/json' } },
+    { rawBody: '   ', headers: { 'content-type': 'text/plain' } },
+  ];
+  for (const extra of rejected) {
+    const result = await close(a.owner, a.tenantId, f.reception, extra);
+    assert.equal(result.status, 400, JSON.stringify({ extra, response: result.json }));
+    const [reception] = await h.admin`SELECT status,closed_at FROM public.receptions
+      WHERE id=${f.reception}`;
+    assert.deepEqual([reception.status, reception.closed_at], ['open', null]);
+    assert.equal((await orders(f.reception)).length, 0);
+    assert.equal((await h.admin`SELECT h.id FROM public.order_status_history h
+      JOIN public.service_orders o ON o.id=h.order_id WHERE o.reception_id=${f.reception}`).length, 0);
+    assert.equal((await audits(f.reception)).length, 0);
+  }
+  const bodyless = await close(a.owner, a.tenantId, f.reception);
+  assert.equal(bodyless.status, 200, JSON.stringify(bodyless.json));
+});
+
+test('late retry returns an advanced persisted order without resetting state', async () => {
+  const { a } = await h.twoTenants();
+  const f = await fixture(a);
+  const first = await close(a.owner, a.tenantId, f.reception);
+  assert.equal(first.status, 200, JSON.stringify(first.json));
+  const orderId = first.json.serviceOrder.id;
+  await h.admin.begin(async (tx) => {
+    await tx`UPDATE public.service_orders SET status='diagnosis', version=2,
+      updated_at=GREATEST(now(),updated_at + interval '1 microsecond')
+      WHERE id=${orderId}`;
+    await tx`INSERT INTO public.order_status_history
+      (id,tenant_id,order_id,from_status,to_status,changed_by_membership_id,request_id)
+      VALUES (${randomUUID()},${a.tenantId},${orderId},'reception','diagnosis',
+        ${a.owner.membershipId},${randomUUID()})`;
+  });
+  const [receptionBefore] = await h.admin`SELECT *,xmin::text AS xmin FROM public.receptions
+    WHERE id=${f.reception}`;
+  const [vehicleBefore] = await h.admin`SELECT *,xmin::text AS xmin FROM public.vehicles
+    WHERE id=${f.vehicle}`;
+  const [orderBefore] = await h.admin`SELECT *,xmin::text AS xmin FROM public.service_orders
+    WHERE id=${orderId}`;
+  const historiesBefore = await h.admin`SELECT * FROM public.order_status_history
+    WHERE order_id=${orderId} ORDER BY changed_at,id`;
+  const auditsBefore = await audits(f.reception);
+  assert.equal(historiesBefore.length, 2);
+  assert.equal(auditsBefore.length, 1);
+
+  const retry = await close(a.advisor, a.tenantId, f.reception);
+  assert.equal(retry.status, 200, JSON.stringify(retry.json));
+  assert.equal(retry.json.serviceOrder.id, orderId);
+  assert.equal(retry.json.serviceOrder.orderNumber, first.json.serviceOrder.orderNumber);
+  assert.equal(retry.json.reception.closedAt, first.json.reception.closedAt);
+  assert.equal(retry.json.serviceOrder.openedAt, first.json.serviceOrder.openedAt);
+  assert.equal(retry.json.serviceOrder.status, 'diagnosis');
+  assert.equal(retry.json.serviceOrder.version, 2);
+  assert.deepEqual({ ...(await h.admin`SELECT *,xmin::text AS xmin FROM public.receptions
+    WHERE id=${f.reception}`)[0] }, { ...receptionBefore });
+  assert.deepEqual({ ...(await h.admin`SELECT *,xmin::text AS xmin FROM public.vehicles
+    WHERE id=${f.vehicle}`)[0] }, { ...vehicleBefore });
+  assert.deepEqual({ ...(await h.admin`SELECT *,xmin::text AS xmin FROM public.service_orders
+    WHERE id=${orderId}`)[0] }, { ...orderBefore });
+  assert.deepEqual(Array.from(await h.admin`SELECT * FROM public.order_status_history
+    WHERE order_id=${orderId} ORDER BY changed_at,id`), Array.from(historiesBefore));
+  assert.deepEqual(Array.from(await audits(f.reception)), Array.from(auditsBefore));
+});
+
 test('RBAC, anti-oracle, body, missing signature, and mileage conflict', async () => {
   const { a, b } = await h.twoTenants();
   const f = await fixture(a, { signed: false });

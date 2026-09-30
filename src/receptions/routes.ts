@@ -19,9 +19,7 @@ export function registerReceptionRoutes(app: FastifyInstance): void {
   app.post('/api/v1/receptions/:receptionId/close', {
     config: { permission: 'receptions.close' }, onRequest: [noStore],
   }, async (request, reply) => {
-    const body = request.body;
-    if (body !== undefined && body !== '' && (body === null || typeof body !== 'object'
-      || Array.isArray(body) || Object.keys(body).length !== 0))
+    if (request.body !== undefined)
       throw new ApiError(400, 'REQUEST_VALIDATION_FAILED', 'The request body must be empty.');
     const receptionId = parseCanonicalUuid((request.params as { receptionId?: unknown }).receptionId);
     if (!receptionId) throw new ApiError(404, 'RECEPTION_NOT_FOUND', 'The reception was not found.');

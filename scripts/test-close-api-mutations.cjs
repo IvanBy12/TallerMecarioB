@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 
 const cases = [
+  'bodyless_empty_object_allowed',
   'reception_lock_removed', 'signature_precheck_removed',
   'mileage_revalidation_removed', 'vehicle_mileage_update_skipped',
   'advisory_lock_removed', 'allocation_before_advisory',

@@ -3,7 +3,8 @@
 ## API contract
 
 `POST /api/v1/receptions/:receptionId/close` is a bodyless command. An absent
-body needs no Content-Type. A nonempty body returns 400
+body needs no Content-Type. Any present body, including `{}` or JSON `""`,
+returns 400
 `REQUEST_VALIDATION_FAILED`. The tenant and actor come from the authenticated
 TenantContext; the client supplies only the reception ID. Authorization uses
 `receptions.close`: owner, admin, and service advisor have a tenant grant;
@@ -70,7 +71,16 @@ check success, idempotency, authorization, tenant isolation, signature, stale
 mileage, media quarantine, consent revocation, allocation, rollback, and
 observable lock overlap for close/close, close/signature, close/PATCH, and
 close/CREATE. The existing direct DB suite covers the 0019 constraints. The
-close mutation runner injects ten defects into compiled code and requires the
+close mutation runner injects eleven defects into compiled code and requires the
 normal tests to detect each one. This feature ends with the order in
 `reception`; order queries, transitions, diagnosis, and later lifecycle work
 are outside S3-06.
+
+A controlled DB fixture advances an order to `diagnosis`, version 2, and adds
+its later history event. A close retry then returns that persisted order
+without changing its status, version, timestamps, mileage, history, or audit.
+
+DOC_CONFLICT-01 (INFO, pre-existing): S3 operational lifecycle is `open → closed`;
+`cancelled` remains a historical/schema value but is not an operational S3
+transition. Align the dictionary separately; this implementation does not add
+cancel or reopen behavior.

@@ -11,9 +11,14 @@ function replaceExact(source, anchor, replacement, name) {
 function applyCloseMutation(compiledRoot) {
   const name = process.env.S306_MUTATION;
   if (!name) return;
-  const file = join(compiledRoot, 'receptions', 'close.js');
+  const file = join(compiledRoot, 'receptions',
+    name === 'bodyless_empty_object_allowed' ? 'routes.js' : 'close.js');
   let source = readFileSync(file, 'utf8');
   const changes = {
+    bodyless_empty_object_allowed: () => {
+      source = replaceExact(source, 'if (request.body !== undefined)',
+        "if (request.body !== undefined && Object.keys(request.body ?? {}).length !== 0)", name);
+    },
     reception_lock_removed: () => {
       source = replaceExact(source, 'FOR NO KEY UPDATE OF r`;', '`;', name);
     },
