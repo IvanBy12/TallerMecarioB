@@ -11,26 +11,25 @@ const { PrivacyDocumentCatalog, PRODUCTION_PRIVACY_DOCUMENT_CATALOG, PRIVACY_PUR
 const { buildControllerNoticeSnapshot, parseControllerNoticeSnapshot,
   PRODUCTION_CONTROLLER_NOTICE_CONFIGURATION } = f.loadModule('privacy/controller-notice.js');
 
-/**
- * Known-hash pins for every PRODUCTION published version (sha256 of the exact
- * text). CANONICAL_PRIVACY_COPY_NOT_PUBLISHED: no version is published yet, so
- * this map is empty. Publishing a version requires adding its pin here.
- */
-const PRODUCTION_TEXT_PINS = {};
+const APPROVED_COPY = require('./production-copy.cjs');
+const PRODUCTION_TEXT_PINS = {
+  "notice:privacy_notice_es-CO_v1": "fd459b0980dd784c2db78c43c45ee752ac65b0ef4a8bb13f30695df87f474385",
+  "service_provision:service_provision_es-CO_v1": "61b3686e8d36f918feb011e501fee8776e736c6c30ab13d71a302d5a78d361f6"
+};
 
-test('production catalog publishes nothing and fails closed; every published text is pinned', () => {
+test('production publishes exactly the approved v1 bytes and independent SHA-256 pins', () => {
   const published = PRODUCTION_PRIVACY_DOCUMENT_CATALOG.published();
+  assert.deepEqual(published, APPROVED_COPY);
   const actual = {};
-  for (const n of published.notices) actual[`notice:${n.version}`] = createHash('sha256').update(n.text).digest('hex');
-  for (const a of published.authorizations)
-    actual[`${a.purposeCode}:${a.version}`] = createHash('sha256').update(a.text).digest('hex');
+  for (const n of published.notices) actual[`notice:${n.version}`] = createHash('sha256').update(n.text, 'utf8').digest('hex');
+  for (const a of published.authorizations) actual[`${a.purposeCode}:${a.version}`] = createHash('sha256').update(a.text, 'utf8').digest('hex');
   assert.deepEqual(actual, PRODUCTION_TEXT_PINS);
-  for (const purpose of PRIVACY_PURPOSE_CODES)
-    for (const document of [...f.DOCUMENTS.notices, ...f.DOCUMENTS.authorizations])
-      assert.equal(PRODUCTION_PRIVACY_DOCUMENT_CATALOG.resolve(purpose, document.version, document.version), null);
+  for (const purpose of PRIVACY_PURPOSE_CODES) {
+    if (purpose !== 'service_provision') assert.equal(PRODUCTION_PRIVACY_DOCUMENT_CATALOG.resolve(purpose,
+      'privacy_notice_es-CO_v1', 'service_provision_es-CO_v1'), null);
+  }
+  assert.equal(PRODUCTION_PRIVACY_DOCUMENT_CATALOG.noticeText('latest'), null);
   assert.equal(PRODUCTION_PRIVACY_DOCUMENT_CATALOG.noticeText('v1'), null);
-  assert.equal(PRODUCTION_CONTROLLER_NOTICE_CONFIGURATION.rightsChannel({ tenantId: 'x', legalName: 'L',
-    phone: '1', email: 'e@x.test' }), null);
 });
 
 test('catalog resolves exact versions only, never a fallback', () => {
@@ -77,6 +76,25 @@ test('snapshot is built server-side from workshop + primary location and fails c
   assert.equal(buildControllerNoticeSnapshot({ ...workshop, email: null }, { ...location, phone: null },
     f.RIGHTS_CHANNEL), null, 'no phone nor email');
   assert.equal(buildControllerNoticeSnapshot({ ...workshop, legalName: ' ' }, location, f.RIGHTS_CHANNEL), null);
+});
+
+test('production uses canonical workshop email and requires phone plus email without changing stored snapshot parsing', () => {
+  const config = PRODUCTION_CONTROLLER_NOTICE_CONFIGURATION;
+  const workshop = { tenantId: 't', legalName: 'Taller', phone: null, email: '  CONTACTO@TALLER.TEST  ' };
+  const location = { addressLine: 'Calle 1', city: 'Bogotá', department: 'Bogotá D.C.',
+    countryCode: 'CO', phone: '+5716000000' };
+  const build = (w, l) => buildControllerNoticeSnapshot(w, l, config.rightsChannel(w), config.requirePhoneAndEmail);
+  assert.equal(config.rightsChannel(workshop), 'Correo electrónico: contacto@taller.test');
+  assert.equal(build(workshop, location).email, 'contacto@taller.test');
+  assert.equal(build(workshop, { ...location, phone: null }), null);
+  for (const email of [null, '', '  ', 'invalid', 'a@b', 'a\u202e@b.test'])
+    assert.equal(build({ ...workshop, email }, location), null);
+  assert.equal(build(workshop, null), null);
+  assert.equal(build({ ...workshop, legalName: ' ' }, location), null);
+  for (const field of ['addressLine', 'city', 'department', 'countryCode'])
+    assert.equal(build(workshop, { ...location, [field]: ' ' }), null);
+  const historical = { ...f.SNAPSHOT, phone: null, email: 'historical@taller.test' };
+  assert.deepEqual(parseControllerNoticeSnapshot(historical), historical);
 });
 
 test('stored/bundle snapshot shape is strict', () => {

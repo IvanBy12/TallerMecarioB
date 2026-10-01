@@ -122,7 +122,8 @@ async function currentControllerNotice(context: TenantRequestContext,
     addressLine: row.address_line, city: row.city ?? '', department: row.department ?? '',
     countryCode: row.country_code ?? '', phone: row.location_phone,
   };
-  return buildControllerNoticeSnapshot(workshop, location, configuration.rightsChannel(workshop));
+  return buildControllerNoticeSnapshot(workshop, location, configuration.rightsChannel(workshop),
+    configuration.requirePhoneAndEmail);
 }
 
 async function persistPrivacyConsent(context: TenantRequestContext, input: CapturePrivacyConsentInput,

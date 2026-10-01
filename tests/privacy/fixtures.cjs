@@ -3,8 +3,7 @@
 /**
  * TEST-ONLY privacy fixtures. These strings are NOT legal copy, NOT a published
  * version and never reach the production catalog
- * (PRODUCTION_PRIVACY_DOCUMENT_CATALOG stays empty:
- * CANONICAL_PRIVACY_COPY_NOT_PUBLISHED). Versions use the "test-" prefix.
+ * Versions use the "test-" prefix independently of published production versions.
  */
 const { join, resolve } = require('node:path');
 
