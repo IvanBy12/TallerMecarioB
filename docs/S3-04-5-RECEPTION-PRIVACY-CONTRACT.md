@@ -170,17 +170,40 @@ ordering by mutating migration 0020 in disposable OS-temp copies. A mutant is
 disposable database and logins are cleaned up; `fail=N` in that mutant's test
 output is expected and is distinct from a normal-suite failure.
 
-Remaining documented gaps:
+## Production Privacy v1 publication (2026-09-30)
 
-- `CANONICAL_PRIVACY_COPY_NOT_PUBLISHED`: no approved literal v1 privacy notice
-  and purpose authorization are present. The production catalog publishes no
-  versions and returns `PRIVACY_DOCUMENT_VERSION_NOT_AVAILABLE` without INSERT.
-  Publishing requires the exact approved text and pinned known hashes.
-- `RIGHTS_CHANNEL_SOURCE_NOT_DEFINED`: the approved source for the controller's
-  rights channel is absent. Production capture also fails closed until it is
-  supplied through the existing model/configuration by a canonical decision.
-- ADR-005 still owns bundle validity/grace policy and offline sync contract.
-  No production offline route is registered.
+The user-approved canonical UTF-8/NFC/LF copy is now published in the
+server catalog, with exactly one notice (`privacy_notice_es-CO_v1`) and one
+`service_provision` authorization (`service_provision_es-CO_v1`). The literal
+texts have no trailing newline. Wording or whitespace changes require new
+versions; there is no latest/current fallback. No marketing, image use,
+reminders or WhatsApp authorization is published. TEST-ONLY fixtures retain
+their test-* versions and remain separate.
 
-S3-05 remains paused. This branch must not be merged until review and the
-canonical dependencies needed for live capture are supplied.
+For production online capture, the workshop is the controller and
+`workshops.email`, validated through the existing canonical email schema,
+is the rights-channel source: `Correo electrónico: <canonical email>`.
+Legal name, complete primary location/address, workshop or location phone,
+and valid email are required. Missing/blank/invalid email, missing phone,
+missing primary location or incomplete identity/address returns
+`PRIVACY_NOTICE_NOT_CONFIGURED`. Unpublished or wrong exact versions return
+`PRIVACY_DOCUMENT_VERSION_NOT_AVAILABLE`. Adult attestation must be true;
+client text/hash/snapshot/rights-channel/tenant/status fields remain rejected.
+The generic historical/offline snapshot still allows a single contact field.
+
+Production tests explicitly use `PRODUCTION_PRIVACY_CONSENT_DEPENDENCIES`: capture
+and stored versions/hash/snapshot, all fail-closed cases, purpose separation,
+phone fallback and reception creation referencing that exact consent. The E2E
+changes controller data after capture, creates the reception, reconstructs the
+hash from retained evidence, and verifies that PostgreSQL rejects evidence
+mutation. The hash algorithm, tenant predicates, RLS, audit writes, concurrency
+and all database guards remain unchanged; no migration or schema change.
+
+Independent SHA-256 pins (literal document UTF-8 bytes):
+
+- Notice: `fd459b0980dd784c2db78c43c45ee752ac65b0ef4a8bb13f30695df87f474385`.
+- Authorization: `61b3686e8d36f918feb011e501fee8776e736c6c30ab13d71a302d5a78d361f6`.
+
+Regression gate results for this publication are recorded in
+SPRINT-3-BACKEND-FINAL-QUALITY-GATE.md. ADR-005 still owns bundle validity/grace
+policy and the offline sync contract; no production offline route is registered.

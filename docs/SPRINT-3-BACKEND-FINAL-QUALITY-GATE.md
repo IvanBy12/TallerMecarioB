@@ -253,14 +253,21 @@ reviewed task branch and must not be inferred from the PR run.
 
 ## 17. Privacy release dependency
 
-**RELEASE / INTEGRATION DEPENDENCY, not a Track A backend bug:** production new
-reception flow remains fail-closed until canonical privacy notice, service_provision
-authorization text and canonical rights channel are published/configured.
-PRODUCTION_PRIVACY_CONSENT_DEPENDENCIES rejects unpublished versions with
-`PRIVACY_DOCUMENT_VERSION_NOT_AVAILABLE`; notice/rights-channel absence is also
-covered by existing `PRIVACY_NOTICE_NOT_CONFIGURED` tests. Track B and the later
-Sprint 3 full E2E must account for this dependency. No legal text was invented or
-published; existing TEST-ONLY fixtures do not enable production privacy capture.
+The former publication/configuration dependency is addressed on
+`fix/s3-production-privacy-v1`: exactly `privacy_notice_es-CO_v1` and
+`service_provision_es-CO_v1` are published with the user-approved literal copy.
+The workshop email is the canonical rights channel. Production capture requires
+legal name, complete primary address, phone and valid canonical email and
+continues to fail closed when those are incomplete or exact versions are
+unavailable. The generic retained snapshot contract remains backward-compatible.
+See S3-04-5-RECEPTION-PRIVACY-CONTRACT.md for exact-copy hashes and conditions.
+
+The new production-dependency API E2E captures consent and creates a reception
+referencing it, then verifies retained evidence and database immutability. No
+frontend, Sprint 4, migration, offline policy, RLS or hash algorithm changes.
+The historical gate results below apply to their recorded commits; publication
+regression results are recorded separately in section 22. This publication does
+not itself declare all Sprint 3 Track A or full frontend/backend E2E closed.
 
 ## 18. Accepted risks
 
@@ -303,9 +310,51 @@ The user supplied Claude's approval:
 
 **TRACK A — BACKEND CLOSED**. Final backend CI and mutation gates are green;
 R2 retains its approved non-blocking transport classification and mandatory
-follow-up. Privacy publication remains a RELEASE / INTEGRATION DEPENDENCY.
+follow-up. The historical privacy publication dependency is addressed by section 22;
+production still requires complete workshop controller configuration.
 **Sprint 3 as a whole is NOT closed: Track B Frontend/PWA remains pending**,
 along with Full Frontend + Backend E2E. No merge or main/integration change
 is part of this documentary closure.
 
 SPRINT 3 TRACK A BACKEND CLOSED: YES
+
+## 22. Production Privacy v1 regression evidence (2026-09-30)
+
+Branch: `fix/s3-production-privacy-v1`. Node: **22.23.3**.
+The supplied approved text is published in the exact two v1 versions.
+Rights channel = canonical workshop email; complete identity/address, phone
+and email remain mandatory for production online capture. Independent copy
+and SHA-256 tests pin the exact bytes; the evidence hash algorithm is unchanged.
+
+| Gate | Publication result |
+| --- | --- |
+| security:secret-scan | PASS |
+| npm audit --omit=dev | PASS, zero vulnerabilities (registry-access retry) |
+| typecheck / lint / build | PASS |
+| npm test | PASS |
+| privacy unit suites | PASS, 17/17; no skips/todos |
+| test:reception:api:ci | PASS, 90/90; no skips/todos; fixture cleanup PASS |
+| test:reception:db:ci | PASS, 23/23; teardown dbs=0/logins=0 |
+| test:reception:upgrade:ci | PASS; teardown dbs=0 |
+| test:reception:mutations:ci | PASS, 58 killed / 0 survived: DB 19, signature 6, close 11, queries 22; no invalid applications |
+| test:cross-tenant:final:ci | PASS, 25/25; fixture cleanup PASS |
+| test:api:security:ci | PASS, 12/12; fixture cleanup PASS |
+| test:runtime:db:ci | PASS, login provisioning and runtime database role boundary |
+
+Production capture cases A-J pass with the production dependencies: stored
+purpose/versions, lowercase 64-character server hash, canonical controller
+snapshot and rights channel; missing/invalid email, missing phone/location,
+wrong versions, absent adult attestation and client evidence are rejected.
+No optional purpose is implicitly granted. Primary-location phone fallback
+also passes. The production reception E2E succeeds after controller data
+changes and confirms its consent FK and unchanged historical evidence; direct
+hash/snapshot mutation is rejected by PostgreSQL. Hash reconstruction and
+every purpose/version/text/snapshot-field contribution are tested.
+
+Production code changes: `src/privacy/catalog.ts`,
+`src/privacy/controller-notice.ts`, `src/privacy/consent-service.ts`.
+Migration added: **NO**. Tenant-scoped SELECT/INSERT, composite constraints,
+RLS, evidence guards, audit and adult attestation remain in place. Frontend,
+Sprint 4 and production offline contracts remain outside this publication.
+Adversarial review and workshop-specific controller configuration remain
+release requirements; this section does not declare full Sprint 3 closure.

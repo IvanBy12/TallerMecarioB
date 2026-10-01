@@ -175,7 +175,7 @@ test('client cannot supply hash, snapshot, texts, bundle, tenant, status or time
   assert.equal((await consentRows(c)).length, 0);
 });
 
-test('fail closed: unpublished versions and the production catalog create nothing', async () => {
+test('fail closed: unpublished test versions create nothing in either catalog', async () => {
   const { a } = await h.twoTenants();
   const c = await customer(a.owner, a.tenantId);
   await p.configureNotice(a.tenantId);
@@ -187,7 +187,7 @@ test('fail closed: unpublished versions and the production catalog create nothin
     assert.equal(result.status, 409, JSON.stringify(payload));
     assert.equal(code(result), 'PRIVACY_DOCUMENT_VERSION_NOT_AVAILABLE');
   }
-  // CANONICAL_PRIVACY_COPY_NOT_PUBLISHED: production publishes no version at all.
+  // Production never accepts TEST-ONLY versions.
   const production = await p.capture(productionApp, a.owner, a.tenantId, c, p.captureBody());
   assert.equal(production.status, 409);
   assert.equal(code(production), 'PRIVACY_DOCUMENT_VERSION_NOT_AVAILABLE');

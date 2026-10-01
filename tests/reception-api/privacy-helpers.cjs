@@ -3,7 +3,7 @@
 /**
  * S3-04.5 reception API privacy helpers. Consents are captured through the real
  * POST /customers/:id/privacy-consents route with TEST-ONLY catalog fixtures
- * and a TEST-ONLY rights channel source (production has neither and fails closed).
+ * and a TEST-ONLY rights channel source, separate from production dependencies.
  */
 const { randomUUID } = require('node:crypto');
 const h = require('../crm-api/helpers.cjs');
