@@ -41,24 +41,35 @@ function probe(target, address, family, phase, timeoutMs) {
     }
     const options = { host: address, port: target.port, family };
     const onError = (error) => finish({ ok: false, code: safeCode(error) });
-    if (phase === 'TCP') {
-      socket = net.connect(options, () => finish({ ok: true }));
-      socket.on('error', onError);
-    } else if (phase === 'TLS') {
-      socket = tls.connect({ ...options, servername: target.hostname,
-        rejectUnauthorized: true }, () => finish({ ok: true }));
-      socket.on('error', onError);
-    } else {
-      request = https.request({ hostname: target.hostname, port: target.port,
-        servername: target.hostname, method: 'HEAD', path: '/', agent: false,
-        autoSelectFamily: false,
-        lookup: (_host, _options, callback) => callback(null, address, family) },
-      (response) => {
-        response.resume();
-        finish({ ok: true, status: response.statusCode });
-      });
-      request.on('error', onError);
-      request.end();
+    try {
+      if (phase === 'TCP') {
+        socket = net.connect(options, () => finish({ ok: true }));
+        socket.on('error', onError);
+      } else if (phase === 'TLS') {
+        socket = tls.connect({ ...options, servername: target.hostname,
+          rejectUnauthorized: true }, () => finish({ ok: true }));
+        socket.on('error', onError);
+      } else {
+        request = https.request({ hostname: target.hostname, port: target.port,
+          servername: target.hostname, method: 'HEAD', path: '/', agent: false,
+          autoSelectFamily: false,
+          lookup: (_host, _options, callback) => callback(null, address, family) },
+        (response) => {
+          response.on('error', onError);
+          response.resume();
+          finish({ ok: true, status: response.statusCode });
+        });
+        request.on('error', onError);
+        // Keep the underlying TLSSocket listener through request destruction.
+        request.on('socket', (connectedSocket) => {
+          socket = connectedSocket;
+          socket.on('error', onError);
+          if (finished) socket.destroy();
+        });
+        request.end();
+      }
+    } catch (error) {
+      onError(error);
     }
   });
 }
@@ -81,8 +92,19 @@ async function diagnoseNetwork(endpoint, { emit = (row) => process.stdout.write(
       // Bound cost; record address ordinals, never account hostname or IPs.
       for (const [index, entry] of addresses.slice(0, 2).entries()) {
         for (const phase of ['TCP', 'TLS', 'HTTP']) {
-          record({ sample, address: index + 1,
-            ...await connect(target, entry.address, family, phase, timeoutMs) });
+          let result;
+          try {
+            result = await connect(target, entry.address, family, phase, timeoutMs);
+          } catch (error) {
+            result = { ok: false, code: safeCode(error) };
+          }
+          // Whitelist fields, including when a test-injected probe throws.
+          const row = { sample, address: index + 1, phase, family, ok: result.ok === true };
+          if (!row.ok) row.code = safeCode(result);
+          if (Number.isFinite(result.ms)) row.ms = result.ms;
+          if (phase === 'HTTP' && Number.isInteger(result.status)) row.status = result.status;
+          record(row);
+          if (!row.ok) break;
         }
       }
     }
@@ -90,4 +112,23 @@ async function diagnoseNetwork(endpoint, { emit = (row) => process.stdout.write(
   return rows;
 }
 
-module.exports = { diagnoseNetwork, endpointTarget, probe, safeCode };
+function evaluateNetworkDiagnostic(rows) {
+  const samples = new Set();
+  const routes = new Map();
+  for (const row of rows) {
+    if (!Number.isInteger(row.sample) || row.sample < 1) continue;
+    samples.add(row.sample);
+    if (![4, 6].includes(row.family) || !Number.isInteger(row.address)) continue;
+    const key = `${row.sample}:${row.family}:${row.address}`;
+    if (!routes.has(key)) routes.set(key, { sample: row.sample, family: row.family, phases: new Set() });
+    if (row.ok === true) routes.get(key).phases.add(row.phase);
+  }
+  const usable = [...routes.values()].filter((route) =>
+    ['TCP', 'TLS', 'HTTP'].every((phase) => route.phases.has(phase)));
+  const usableSamples = new Set(usable.map((route) => route.sample)).size;
+  return { ok: samples.size > 0 && usableSamples === samples.size, samples: samples.size,
+    usableSamples, ipv4Usable: usable.some((route) => route.family === 4),
+    ipv6Usable: usable.some((route) => route.family === 6) };
+}
+
+module.exports = { diagnoseNetwork, endpointTarget, probe, safeCode, evaluateNetworkDiagnostic };
