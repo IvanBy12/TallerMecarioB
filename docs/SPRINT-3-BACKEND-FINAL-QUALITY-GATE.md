@@ -3,7 +3,14 @@
 Evidence date: 2026-09-30 (America/Bogota). Scope: Track A backend only.
 This document does not close Sprint 3 as a whole or claim frontend completion.
 
-## 1. Base / branch / commits
+Current authoritative closure policy (project owner): **Track A remains OPEN**
+until BOTH the R2 External Gate has its required stable external evidence AND
+Production Privacy v1 is approved and merged. This policy supersedes the earlier
+review that treated R2 transport instability as non-blocking for Track A.
+Earlier decisions and gate results below are historical evidence, not current
+closure authorization. Sections 12, 21 and 22 record the current pending gates.
+
+## 1. Historical base / branch / commits
 
 - Branch: `task/s3-backend-final-quality-gate`.
 - Base SHA: `7e1708c4c2e569a31d4805392cfaf7ca09580d67`, the current local
@@ -159,29 +166,50 @@ claim of continuous WAL/PITR infrastructure.
 
 ## 12. Real R2 evidence
 
-Separate external gate using configured test credentials; no credentials or
-signed URLs are included here. Initial run: 6/6 PASS and FIXTURE_CLEANUP_PASS.
-Run 2: 5/6 FAIL, `CROSS_TENANT_INITIAL_PUT` had `UND_ERR_CONNECT_TIMEOUT (attempt 1/1)` during PUT.
+### Historical local/manual external evidence
+
+Earlier separate external tests used configured test credentials; no credentials
+or signed URLs are included here. Historical manual run 1: 6/6 PASS and
+FIXTURE_CLEANUP_PASS. Historical manual run 2: 5/6 FAIL,
+`CROSS_TENANT_INITIAL_PUT` had `UND_ERR_CONNECT_TIMEOUT (attempt 1/1)` during PUT.
 This was a transport failure, not a demonstrated domain or isolation defect.
 The runner cleaned its fixtures in finally; that failed run did not emit the
 overall success marker and is not counted as PASS. A third manual run with
-fresh fixtures (run 3) also returned 5/6 FAIL: `SIGNATURE_REPLAY_SAME_PUT` encountered
+fresh fixtures (historical manual run 3) also returned 5/6 FAIL: `SIGNATURE_REPLAY_SAME_PUT` encountered
 `UND_ERR_CONNECT_TIMEOUT (attempt 1/1)` during PUT. No green sequence of three was obtained.
 Independent residue check confirmed media disposable databases = 0 and media
 logins = 0. Both resolved IPv4 TCP paths were reachable during later diagnostics,
 which does not erase the real request failures. The two failed runs are NOT PASS.
 
-Final approved classification:
-**EXTERNAL_TRANSPORT_FLAKY_NON_BLOCKING_FOR_TRACK_A**.
-No SigV4 defect, cross-tenant leak, media state defect or cleanup defect was
-demonstrated. There is no automatic PUT retry and no broad cleanup; cleanup is
+An earlier review accepted these failures as a non-blocking external transport
+risk for Track A. The project owner later strengthened the closure requirement;
+the current policy supersedes that earlier classification. Historically, no
+SigV4 defect, cross-tenant leak, media state defect or cleanup defect was
+demonstrated. There was no automatic PUT retry and no broad cleanup; cleanup was
 restricted to keys created by each run. Residual disposable DBs/logins = 0/0.
 
-Mandatory follow-up: obtain new stable green R2 evidence before Sprint 3 Full
-Frontend + Backend E2E and before production release. Track A closure does not
-waive this follow-up or turn the failed external runs into successful runs.
+### Current external workflow evidence
 
-## 13. Local gates
+The external workflow exists at `.github/workflows/r2-external.yml` and runs via
+`workflow_dispatch`. Current dispatch results supplied by the project owner:
+
+| External workflow run | Result |
+| --- | --- |
+| Run #1 | FAIL |
+| Run #2 | PASS |
+
+These dispatch runs are distinct from the historical manual runs above.
+The required evidence is **three independent consecutive workflow_dispatch
+runs PASS**. Run #2 is green, but the supplied sequence contains only one
+consecutive PASS after Run #1 failed. Three consecutive green dispatches are
+not established; R2 is **NOT formally closed**.
+
+Current classification: **R2_EXTERNAL_GATE_CLOSURE_BLOCKER**;
+**R2_EXTERNAL_EVIDENCE_PENDING**. Track A remains open until this evidence
+requirement and Production Privacy v1 approval and merge are both satisfied.
+Failed historical or current runs do not count as PASS.
+
+## 13. Historical local gates
 
 All accepted runs use Node v22.23.3 and PostgreSQL 18.4. DB commands load `.env`;
 CRM DB/upgrade/mutations and outbox now explicitly load it when present while CI
@@ -206,7 +234,7 @@ retains environment-provided configuration. No secret values are recorded.
 | test:db:backup-restore | PASS |
 | staging:deploy-drill | PASS, all 24 report fields |
 
-## 14. Mutation counts
+## 14. Historical mutation counts
 
 | Reception runner | Real killed / total |
 | --- | ---: |
@@ -224,7 +252,7 @@ is shared with the runners, and temporary mutation copies stay in OS temp.
 Final global CI mutation result: **180/180 killed** (including reception 58/58).
 Global survivors = 0; normal failures = 0; invalid/apply failures = 0.
 
-## 15. Remote CI final state
+## 15. Historical remote CI final state
 
 Draft [PR #2](https://github.com/IvanBy12/TallerMecarioB/pull/2) targets main from
 the required task branch. [CI run #41 / 36750508963](https://github.com/IvanBy12/TallerMecarioB/actions/runs/36750508963)
@@ -268,17 +296,21 @@ frontend, Sprint 4, migration, offline policy, RLS or hash algorithm changes.
 The historical gate results below apply to their recorded commits; publication
 regression results are recorded separately in section 22. This publication does
 not itself declare all Sprint 3 Track A or full frontend/backend E2E closed.
+Implementation completion does not satisfy the owner's privacy closure
+condition until Production Privacy v1 receives final approval and is merged.
 
 ## 18. Accepted risks
 
 RLS can mask removal of explicit tenant filters behaviorally; strict compiled
-SQL assertions and structural mutants provide additional evidence. External R2
-transport is classified EXTERNAL_TRANSPORT_FLAKY_NON_BLOCKING_FOR_TRACK_A, with
-stable green evidence mandatory before full E2E and production release. Existing
-backup RPO/RTO infrastructure limitations are unchanged. Privacy publication is
-a visible release dependency. No technical domain blocker was reproduced.
+SQL assertions and structural mutants provide additional evidence. Current R2
+classification is R2_EXTERNAL_GATE_CLOSURE_BLOCKER: stable external evidence
+is mandatory for Track A closure, full E2E and production release. Existing
+backup RPO/RTO infrastructure limitations are unchanged. Production Privacy v1
+implementation is complete, but final approval and merge remain required for
+Track A closure. The earlier tests reproduced no technical domain defect;
+that historical result does not waive either current closure requirement.
 
-## 19. git diff --stat
+## 19. Historical git diff --stat
 
 Implementation commit `df40b2d223f4fa0a426eb5b8d67008c0064452e7` versus base:
 **20 files, 794 insertions(+), 82 deletions(-)**.
@@ -304,23 +336,43 @@ Implementation SHA: `df40b2d223f4fa0a426eb5b8d67008c0064452e7`.
 Previous evidence SHA: `09e07ba63f4e73df3672ce9c0e285e572b53c410`.
 New final closure evidence SHA is supplied in the handoff after creation.
 
-The user supplied Claude's approval:
-**SPRINT 3 TRACK A BACKEND APPROVED FOR CLOSURE: YES**, with
-**0 BLOCKER, 0 HIGH and 0 MEDIUM**.
+Historical decision: an earlier Claude review reported 0 BLOCKER, 0 HIGH and
+0 MEDIUM and approved Track A closure while accepting R2 as a non-blocking
+external transport risk. That earlier decision is preserved as history and
+is superseded by the project owner's current closure policy.
 
-**TRACK A — BACKEND CLOSED**. Final backend CI and mutation gates are green;
-R2 retains its approved non-blocking transport classification and mandatory
-follow-up. The historical privacy publication dependency is addressed by section 22;
-production still requires complete workshop controller configuration.
+**TRACK A — BACKEND CLOSURE PENDING**. Production Privacy v1 implementation,
+local regression gates and remote CI #50 PASS; adversarial code/security review
+is clean, with final adversarial approval pending the M-1 documentary correction.
+Privacy approval and merge are required. R2 still needs three independent
+consecutive green external workflow_dispatch runs; Run #1 FAIL and Run #2 PASS
+do not satisfy that requirement. **Track A remains OPEN until BOTH gates are
+satisfied**, regardless of the earlier green backend CI and mutation evidence.
+Production still requires complete workshop controller configuration.
 **Sprint 3 as a whole is NOT closed: Track B Frontend/PWA remains pending**,
 along with Full Frontend + Backend E2E. No merge or main/integration change
 is part of this documentary closure.
 
-SPRINT 3 TRACK A BACKEND CLOSED: YES
+SPRINT 3 TRACK A BACKEND CLOSURE PENDING: YES
 
 ## 22. Production Privacy v1 regression evidence (2026-09-30)
 
 Branch: `fix/s3-production-privacy-v1`. Node: **22.23.3**.
+Implementation SHA: `92c3320402c3618228b4d3e7a8d73f85240d2a5d`.
+
+Current Production Privacy v1 status, supplied by the project owner:
+
+- Implementation: **PASS**.
+- Local regression gates: **PASS** (recorded below).
+- Remote CI #50: **PASS**.
+- Adversarial code/security review: **PASS**, clean.
+- Final adversarial approval: **PENDING only documentary correction M-1**;
+  this documentation fix is submitted for that final approval.
+- Approval and merge remain required under the current Track A closure policy.
+
+These results do not close Track A. R2 external closure evidence is still
+pending (section 12), and both requirements must be satisfied.
+
 The supplied approved text is published in the exact two v1 versions.
 Rights channel = canonical workshop email; complete identity/address, phone
 and email remain mandatory for production online capture. Independent copy
