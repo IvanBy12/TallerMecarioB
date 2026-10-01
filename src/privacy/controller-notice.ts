@@ -5,6 +5,7 @@
  * verbatim; historical evidence is never rebuilt from the current workshop.
  */
 import { canonicalizeText, CONTROLLER_NOTICE_FIELDS, type ControllerNoticeFields } from './canonical-text.js';
+import { canonicalEmailSchema } from '../identity/profile.js';
 
 export interface ControllerNoticeSnapshot extends ControllerNoticeFields {
   readonly legalName: string;
@@ -29,16 +30,19 @@ export interface ControllerNoticeLocation {
 }
 
 /**
- * DOC_GAP (RIGHTS_CHANNEL_SOURCE_NOT_DEFINED): the canonical model has no
- * column for the "canal para ejercer derechos". The source is injected; the
- * production configuration returns null, so capture fails closed with
- * PRIVACY_NOTICE_NOT_CONFIGURED instead of inventing a channel.
+ * Sprint 3 production uses the controller workshop's canonical email for
+ * rights requests and requires both email and phone for online capture.
  */
 export interface ControllerNoticeConfiguration {
   rightsChannel(workshop: Readonly<ControllerNoticeWorkshop>): string | null;
+  readonly requirePhoneAndEmail?: boolean;
 }
 export const PRODUCTION_CONTROLLER_NOTICE_CONFIGURATION: ControllerNoticeConfiguration = Object.freeze({
-  rightsChannel: () => null,
+  requirePhoneAndEmail: true,
+  rightsChannel: (workshop: Readonly<ControllerNoticeWorkshop>) => {
+    const email = canonicalEmailSchema.safeParse(workshop.email);
+    return email.success ? `Correo electrónico: ${email.data}` : null;
+  },
 });
 
 const MAX_FIELD_LENGTH = 1000;
@@ -54,13 +58,16 @@ function optional(value: unknown): string | null {
 
 /** Returns null when the workshop lacks a complete notice (fail closed). */
 export function buildControllerNoticeSnapshot(workshop: ControllerNoticeWorkshop,
-  location: ControllerNoticeLocation | null, rightsChannel: string | null): ControllerNoticeSnapshot | null {
+  location: ControllerNoticeLocation | null, rightsChannel: string | null,
+  requirePhoneAndEmail = false): ControllerNoticeSnapshot | null {
   if (!location) return null;
   const legalName = required(workshop.legalName);
   const parts = [location.addressLine, location.city, location.department, location.countryCode].map(required);
   const channel = optional(rightsChannel);
   const phone = optional(workshop.phone) ?? optional(location.phone);
-  const email = optional(workshop.email);
+  const parsedEmail = requirePhoneAndEmail ? canonicalEmailSchema.safeParse(workshop.email) : null;
+  const email = requirePhoneAndEmail ? (parsedEmail?.success ? parsedEmail.data : null) : optional(workshop.email);
+  if (requirePhoneAndEmail && (!phone || !email)) return null;
   if (!legalName || parts.some((part) => part === null) || !channel || (!phone && !email)) return null;
   return Object.freeze({ legalName, address: parts.join(', '), phone, email, rightsChannel: channel });
 }
