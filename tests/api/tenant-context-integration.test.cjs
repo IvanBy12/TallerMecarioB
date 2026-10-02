@@ -75,6 +75,7 @@ const U = {
   disabled: id(), inactive: id(), toctou: id(), ghost: id(),
   // GET /api/v1/me/context fixtures (memberships seeded by that describe block).
   ctxOwner: id(), ctxMulti: id(), ctxTech: id(), ctxNoRole: id(), ctxSuspended: id(),
+  ctxAdmin: id(), ctxAdvisor: id(), ctxRevoked: id(), ctxOwnerAdmin: id(), ctxSelector: id(),
 };
 const M = {
   ownerA: id(), ownerB: id(), multiA: id(), multiB: id(), techA: id(),
@@ -1263,8 +1264,11 @@ describe('GET /api/v1/me', () => {
 });
 
 describe('GET /api/v1/me/context', () => {
-  const W = { X: id(), Y: id() };
-  const MC = { ownerX: id(), multiX: id(), multiY: id(), techX: id(), noRoleX: id(), suspendedX: id() };
+  const W = { X: id(), Y: id(), Z: id() };
+  const MC = {
+    ownerX: id(), multiX: id(), multiY: id(), techX: id(), noRoleX: id(), suspendedX: id(),
+    adminX: id(), advisorX: id(), revokedX: id(), ownerAdminY: id(), selectorX: id(), selectorY: id(), selectorZ: id(),
+  };
   const WORKSHOP_ROWS = {
     X: {
       display_name: 'Taller Centro', timezone: 'America/Bogota', currency: 'COP', status: 'active',
@@ -1275,6 +1279,11 @@ describe('GET /api/v1/me/context', () => {
       display_name: 'Taller Norte', timezone: 'America/Lima', currency: 'USD', status: 'trialing',
       legal_name: 'LEGAL_SENTINEL_Y S.A.C.', tax_id: 'NIT_SENTINEL_Y', phone: '+51 900 SENTINEL_Y',
       email: 'sentinel-y@workshop-context.test',
+    },
+    Z: {
+      display_name: 'Taller Sur', timezone: 'America/Bogota', currency: 'COP', status: 'active',
+      legal_name: 'LEGAL_SENTINEL_Z S.A.S.', tax_id: 'NIT_SENTINEL_Z', phone: '+57 301 SENTINEL_Z',
+      email: 'sentinel-z@workshop-context.test',
     },
   };
   const SENSITIVE = Object.values(WORKSHOP_ROWS).flatMap((row) => [row.legal_name, row.tax_id, row.phone, row.email]);
@@ -1332,6 +1341,15 @@ describe('GET /api/v1/me/context', () => {
       techX: ['ctxTech', 'X', 'active', ['technician']],
       noRoleX: ['ctxNoRole', 'X', 'active', []],
       suspendedX: ['ctxSuspended', 'X', 'suspended', ['owner']],
+      adminX: ['ctxAdmin', 'X', 'active', ['admin']],
+      advisorX: ['ctxAdvisor', 'X', 'active', ['service_advisor']],
+      revokedX: ['ctxRevoked', 'X', 'revoked', ['technician']],
+      // Inserted admin first; the DB role list (byte order) is also admin, owner.
+      ownerAdminY: ['ctxOwnerAdmin', 'Y', 'active', ['admin', 'owner']],
+      // Selector user: two usable workshops and one active membership without workshop.read.
+      selectorX: ['ctxSelector', 'X', 'active', ['service_advisor']],
+      selectorY: ['ctxSelector', 'Y', 'active', ['technician']],
+      selectorZ: ['ctxSelector', 'Z', 'active', []],
     };
     await admin.begin(async (tx) => {
       await tx`SET LOCAL session_replication_role = replica`;
@@ -1345,6 +1363,7 @@ describe('GET /api/v1/me/context', () => {
           user_id: U[userKey],
           status,
           suspended_at: status === 'suspended' ? new Date() : null,
+          revoked_at: status === 'revoked' ? new Date() : null,
         })}`;
         for (const role of roles) {
           await tx`INSERT INTO membership_roles ${tx({
@@ -1530,6 +1549,106 @@ describe('GET /api/v1/me/context', () => {
       await admin`INSERT INTO public.role_permissions ${admin({ ...removed })}`;
     }
     await okContext(auth('ctxTech'));
+  });
+
+  test('admin-only and service_advisor-only memberships → 200 with their own effective grants', async () => {
+    for (const [userKey, membershipKey, role] of [['ctxAdmin', 'adminX', 'admin'], ['ctxAdvisor', 'advisorX', 'service_advisor']]) {
+      for (const headers of [auth(userKey), withTenant(userKey, W.X)]) {
+        const { context } = (await okContext(headers)).json();
+        assert.equal(context.tenantId, W.X);
+        assert.equal(context.membershipId, MC[membershipKey]);
+        assert.deepEqual(context.roles, [role]);
+        assert.deepEqual(context.permissions, expectedPermissions(role));
+        assert.deepEqual(permissionsByCode({ context })['workshop.read'], ['tenant']);
+      }
+    }
+  });
+
+  test('revoked membership → 403 on /me/context itself (no header and explicit header)', async () => {
+    assertError(await meContext(auth('ctxRevoked')), 403, 'ACTIVE_MEMBERSHIP_REQUIRED');
+    assertError(await meContext(withTenant('ctxRevoked', W.X)), 403, 'TENANT_ACCESS_DENIED');
+  });
+
+  test('roles use canonical ROLE_CODES order, not alphabetical nor DB/insertion order', async () => {
+    const { context } = (await okContext(auth('ctxOwnerAdmin'))).json();
+    assert.equal(context.tenantId, W.Y);
+    // Alphabetical, byte order and insertion order would all give ['admin', 'owner'].
+    assert.deepEqual(context.roles, ['owner', 'admin']);
+    assert.deepEqual(context.permissions, expectedPermissions('owner', 'admin'));
+  });
+
+  test('selector contract (Option A): /me lists the memberships, one /me/context per tenant names each one', async () => {
+    const me = await get('/api/v1/me', auth('ctxSelector'));
+    assert.equal(me.statusCode, 200, me.body);
+    const bootstrap = me.json();
+    assert.deepEqual(bootstrap.tenantSelection, { mode: 'required', tenantId: null });
+    assert.deepEqual(
+      [...bootstrap.memberships].sort((left, right) => (left.tenantId < right.tenantId ? -1 : 1)),
+      [
+        { membershipId: MC.selectorX, tenantId: W.X },
+        { membershipId: MC.selectorY, tenantId: W.Y },
+        { membershipId: MC.selectorZ, tenantId: W.Z },
+      ].sort((left, right) => (left.tenantId < right.tenantId ? -1 : 1)),
+    );
+    assert.equal(me.body.includes('Taller'), false, '/me exposes no workshop names');
+
+    // Concurrent fan-out, explicit X-Tenant-Id on every request.
+    const responses = await Promise.all(bootstrap.memberships.map((membership) =>
+      meContext(withTenant('ctxSelector', membership.tenantId))));
+    const byTenant = new Map(bootstrap.memberships.map((membership, index) => [membership.tenantId, responses[index]]));
+
+    const x = byTenant.get(W.X);
+    const y = byTenant.get(W.Y);
+    for (const response of [x, y]) {
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.headers['cache-control'], 'no-store');
+    }
+    assert.deepEqual(
+      { tenantId: x.json().context.tenantId, membershipId: x.json().context.membershipId, roles: x.json().context.roles },
+      { tenantId: W.X, membershipId: MC.selectorX, roles: ['service_advisor'] },
+    );
+    assert.equal(x.json().context.workshop.displayName, 'Taller Centro');
+    assert.deepEqual(
+      { tenantId: y.json().context.tenantId, membershipId: y.json().context.membershipId, roles: y.json().context.roles },
+      { tenantId: W.Y, membershipId: MC.selectorY, roles: ['technician'] },
+    );
+    assert.equal(y.json().context.workshop.displayName, 'Taller Norte');
+    assert.deepEqual(x.json().context.permissions, expectedPermissions('service_advisor'));
+    assert.deepEqual(y.json().context.permissions, expectedPermissions('technician'));
+
+    // No cross-context leak in either direction, and nothing about Z anywhere.
+    for (const [response, foreign] of [[x, [W.Y, MC.selectorY, 'Taller Norte']], [y, [W.X, MC.selectorX, 'Taller Centro']]]) {
+      for (const leak of [...foreign, W.Z, MC.selectorZ, 'Taller Sur']) {
+        assert.equal(response.body.includes(leak), false, `context leaked "${leak}"`);
+      }
+    }
+
+    // Active membership without workshop.read: not a selectable context, and the error names nothing.
+    const z = byTenant.get(W.Z);
+    assertError(z, 403, 'PERMISSION_DENIED');
+    for (const leak of [W.Z, MC.selectorZ, 'Taller Sur', 'Taller Centro', 'Taller Norte']) {
+      assert.equal(z.body.includes(leak), false, `error leaked "${leak}"`);
+    }
+  });
+
+  test('selector contract: TENANT_ACCESS_DENIED after /me means the bootstrap is stale; /me re-fetch drops it', async () => {
+    const before = (await get('/api/v1/me', auth('ctxSelector'))).json();
+    assert.ok(before.memberships.some((membership) => membership.tenantId === W.X));
+
+    await setMembershipStatus(MC.selectorX, 'suspended');
+    try {
+      assertError(await meContext(withTenant('ctxSelector', W.X)), 403, 'TENANT_ACCESS_DENIED');
+      const after = (await get('/api/v1/me', auth('ctxSelector'))).json();
+      assert.deepEqual(
+        after.memberships.map((membership) => membership.tenantId).sort(),
+        [W.Y, W.Z].sort(),
+      );
+      // The other memberships keep working; nothing global was selected.
+      assert.equal((await okContext(withTenant('ctxSelector', W.Y))).json().context.tenantId, W.Y);
+    } finally {
+      await setMembershipStatus(MC.selectorX, 'active');
+    }
+    assert.equal((await okContext(withTenant('ctxSelector', W.X))).json().context.membershipId, MC.selectorX);
   });
 
   test('rate limit → 429 RATE_LIMIT_EXCEEDED with Retry-After', async () => {
