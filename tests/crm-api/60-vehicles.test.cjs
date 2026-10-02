@@ -275,7 +275,7 @@ test('S2-05 technician detail: active lead/support only; released and QC-only re
       VALUES (${receptionId},${a.tenantId},${v.vehicleId},${ca},${consentId},${a.advisor.membershipId},0)`;
     await tx`INSERT INTO public.media_assets
       (id,tenant_id,bucket,object_key,media_type,mime_type,status,retention_class,retention_policy_version)
-      VALUES (${mediaId},${a.tenantId},'fixture',${mediaId},'signature','image/png','active','operational','v1')`;
+      VALUES (${mediaId},${a.tenantId},'fixture',${mediaId},'signature','image/png','active','authorization_evidence','v1')`;
     await tx`INSERT INTO public.signatures
       (id,tenant_id,reception_id,signed_by_name,signature_media_id,signed_at,document_version,document_hash)
       VALUES (${randomUUID()},${a.tenantId},${receptionId},'Fixture',${mediaId},now(),'v1',${'a'.repeat(64)})`;

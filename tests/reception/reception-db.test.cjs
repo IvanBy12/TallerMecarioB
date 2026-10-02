@@ -69,11 +69,12 @@ async function newVehicle(mileage = 0) {
   });
   return key;
 }
-async function media(c, tenant = a.tenant, type = 'signature', status = 'active') {
+async function media(c, tenant = a.tenant, type = 'signature', status = 'active',
+  retention = 'authorization_evidence') {
   const key = id();
   await c`INSERT INTO media_assets ${c({ id: key, tenant_id: tenant, bucket: 'test',
     object_key: key, media_type: type, mime_type: 'image/png', status,
-    retention_class: 'operational', retention_policy_version: 'v1' })}`;
+    retention_class: retention, retention_policy_version: 'v1' })}`;
   return key;
 }
 async function signature(c, receptionId, mediaId, extra = {}) {
@@ -257,6 +258,7 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
     SET status='closed', closed_at=now() WHERE id=${r}`),
   failure('23514', 'receptions_signature_required'));
   const good = await scoped(api, a.tenant, (c) => media(c));
+  const wrongRetention = await scoped(api, a.tenant, (c) => media(c, a.tenant, 'signature', 'active', 'operational'));
   const wrongType = await scoped(api, a.tenant, (c) => media(c, a.tenant, 'photo'));
   const pending = await scoped(api, a.tenant, (c) => media(c, a.tenant, 'signature', 'pending_upload'));
   const foreign = await scoped(api, b.tenant, (c) => media(c, b.tenant));
@@ -270,7 +272,7 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
     await c`UPDATE media_assets SET deleted_at=now(), purged_at=now() WHERE id=${key}`;
     return key;
   });
-  for (const [mediaId, constraint] of [[wrongType,'signatures_media_guard'],
+  for (const [mediaId, constraint] of [[wrongRetention,'signatures_media_guard'],[wrongType,'signatures_media_guard'],
     [pending,'signatures_media_guard'],[foreign,'signatures_media_guard'],
     [deleted,'signatures_media_guard'],[purged,'signatures_media_guard']]) {
     await assert.rejects(scoped(api, a.tenant, (c) => signature(c, r, mediaId)),
@@ -281,6 +283,8 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
   await assert.rejects(scoped(api, a.tenant, (c) => signature(c, r, good,
     { delivery_id: id() })), failure('23514', 'signatures_parent_xor_check'));
   const sig = await scoped(api, a.tenant, (c) => signature(c, r, good));
+  await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE media_assets
+    SET retention_class='operational' WHERE id=${good}`), failure('23514', 'signatures_media_guard'));
   await assert.rejects(scoped(api, a.tenant, (c) => signature(c, r, good)),
     failure('23505', 'signatures_one_reception_uq'));
   await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE signatures SET signed_by_name='X' WHERE id=${sig}`), failure('42501'));
@@ -296,6 +300,7 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
   await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE media_assets SET status='active' WHERE id=${good}`),
     failure('23514', 'signatures_media_guard'));
   for (const [column, value] of [
+    ['retention_class', 'operational'], ['status', 'pending_upload'], ['status', 'deleted'],
     ['object_key', id()], ['checksum_sha256', 'b'.repeat(64)], ['media_type', 'photo'],
     ['deleted_at', new Date()], ['purged_at', new Date()], ['bucket', 'other'],
     ['storage_provider', 'other'], ['mime_type', 'image/jpeg'], ['size_bytes', 12],

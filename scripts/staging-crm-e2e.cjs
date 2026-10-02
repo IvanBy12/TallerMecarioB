@@ -21,7 +21,6 @@ async function migrationState(admin) {
   const files = readMigrationFiles({ migrationsFolder: join(root, 'drizzle') });
   const count = journal.entries.length;
   assert.equal(files.length, count);
-  assert.match(journal.entries.at(-1).tag, /^0022_/u);
   const ledger = await admin`SELECT hash,created_at FROM drizzle.__drizzle_migrations ORDER BY id`;
   assert.equal(ledger.length, count);
   for (let i = 0; i < files.length; i += 1) {

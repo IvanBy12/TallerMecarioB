@@ -4,6 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const postgres = require('postgres');
+const { readMigrationFiles } = require('drizzle-orm/migrator');
+const { join } = require('node:path');
 
 const url = new URL(process.env.TEST_DATABASE_URL_ADMIN || 'postgresql://invalid');
 if (!['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname)
@@ -83,6 +85,13 @@ test.before(async () => {
   });
 });
 test.after(async () => { await Promise.all([api.end({ timeout: 5 }), worker.end({ timeout: 5 }), admin.end({ timeout: 5 })]); });
+
+test('DB-00 bootstrap: ledger includes every current migration with exact SQL hashes and timestamps', async () => {
+  const migrations = readMigrationFiles({ migrationsFolder: process.env.MIGRATIONS_FOLDER || join(__dirname, '../../drizzle') });
+  const ledger = await admin`SELECT hash,created_at FROM drizzle.__drizzle_migrations ORDER BY id`;
+  assert.deepEqual(ledger.map((row) => ({ hash: row.hash, timestamp: Number(row.created_at) })),
+    migrations.map((migration) => ({ hash: migration.hash, timestamp: migration.folderMillis })));
+});
 
 test('DB-01 catalog: CRM tables, tenant identities, composite FKs, CHECKs and indexes', async () => {
   const names = ['customers', 'vehicles', 'vehicle_owners'];

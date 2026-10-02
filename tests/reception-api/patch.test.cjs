@@ -76,7 +76,7 @@ async function closeFixture(tx, tenant, reception) {
   const orderId = randomUUID();
   await tx`INSERT INTO public.media_assets ${tx({ id: mediaId, tenant_id: tenant.tenantId,
     bucket: 'test', object_key: mediaId, media_type: 'signature', mime_type: 'image/png',
-    status: 'active', retention_class: 'operational', retention_policy_version: 'v1' })}`;
+    status: 'active', retention_class: 'authorization_evidence', retention_policy_version: 'v1' })}`;
   await tx`INSERT INTO public.signatures ${tx({ id: randomUUID(), tenant_id: tenant.tenantId,
     reception_id: reception.receptionId, signed_by_name: 'Customer', signature_media_id: mediaId,
     signed_at: new Date(), document_version: 'v1', document_hash: 'a'.repeat(64) })}`;

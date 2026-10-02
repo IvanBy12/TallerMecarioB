@@ -3,6 +3,7 @@ const { readFileSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 
 const MUTANTS = Object.freeze({
+  retention_guard: ["|| media.retention_class !== 'authorization_evidence'", '|| false'],
   open_guard: ["if (reception.status !== 'open')", 'if (false)'],
   version_guard: ['if (!document)', 'if (false)'],
   client_owned_fields: ['if (Object.keys(raw).some((key) => ![', 'if (false && Object.keys(raw).some((key) => !['],

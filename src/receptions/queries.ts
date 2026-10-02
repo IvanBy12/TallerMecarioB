@@ -12,6 +12,11 @@ interface ReceptionRow {
   status: 'open' | 'closed' | 'cancelled'; received_at: string; closed_at: string | null;
   created_at: string; updated_at: string;
 }
+interface SignatureSummary { signatureId: string; documentVersion: string; signedAt: string; }
+interface ServiceOrderSummary { id: string; orderNumber: string; status: string; }
+interface ReceptionDetailRow extends ReceptionRow {
+  signatures: SignatureSummary[]; service_orders: ServiceOrderSummary[];
+}
 interface CheckRow { id: string; code: string; label: string; status: string; notes: string | null; created_at: string; }
 interface DamageRow { id: string; zone_code: string; damage_type: string; severity: string;
   description: string | null; created_at: string; }
@@ -50,13 +55,22 @@ export async function getReception(context: TenantRequestContext, receptionId: s
   // The effective grant controls both the DB predicate and the response shape.
   const restricted = resourceAuthorization.grantedScopes.size > 0;
   if (restricted && !resourceAuthorization.grantedScopes.has('assigned')) throw notFound();
-  const [row] = await sql<ReceptionRow[]>`SELECT r.id, r.vehicle_id, r.customer_id,
+  const [row] = await sql<ReceptionDetailRow[]>`SELECT r.id, r.vehicle_id, r.customer_id,
       r.appointment_id, r.location_id, r.received_by_membership_id,
       r.mileage_km, r.fuel_level_pct, r.customer_notes, r.advisor_notes, r.status,
       pg_catalog.to_char(r.received_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS received_at,
       pg_catalog.to_char(r.closed_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS closed_at,
       pg_catalog.to_char(r.created_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS created_at,
-      pg_catalog.to_char(r.updated_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS updated_at
+      pg_catalog.to_char(r.updated_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS updated_at,
+      COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+        'signatureId', s.id, 'documentVersion', s.document_version,
+        'signedAt', pg_catalog.to_char(s.signed_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT})))
+        FROM public.signatures AS s
+        WHERE s.tenant_id = ${tenant.tenantId} AND s.reception_id = r.id), '[]'::jsonb) AS signatures,
+      COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+        'id', o.id, 'orderNumber', o.order_number::text, 'status', o.status))
+        FROM public.service_orders AS o
+        WHERE o.tenant_id = ${tenant.tenantId} AND o.reception_id = r.id), '[]'::jsonb) AS service_orders
     FROM public.receptions AS r
     WHERE r.tenant_id = ${tenant.tenantId} AND r.id = ${receptionId}
       ${restricted ? sql`AND EXISTS (
@@ -68,6 +82,15 @@ export async function getReception(context: TenantRequestContext, receptionId: s
           AND a.assignment_type IN ('lead_technician', 'support_technician')
       )` : sql``}`;
   if (!row) throw notFound();
+  // Reception and its evidence use one statement snapshot, including concurrent close.
+  // Aggregate every matching row: uniqueness violations must not select an arbitrary row.
+  if (row.signatures.length > 1 || row.service_orders.length > 1
+    || (row.status === 'open' && row.service_orders.length !== 0)
+    || (row.status === 'closed' && (row.signatures.length !== 1 || row.service_orders.length !== 1))
+    || (row.status !== 'open' && row.status !== 'closed'))
+    throw new Error('RECEPTION_READ_STATE_INCONSISTENT');
+  const signature = row.signatures[0] ?? null;
+  const serviceOrder = row.service_orders[0] ?? null;
   if (restricted) markResourceAuthorizationSatisfied(resourceAuthorization, 'assigned');
   const checks = await sql<CheckRow[]>`SELECT c.id, c.code, c.label, c.status, c.notes,
       pg_catalog.to_char(c.created_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS created_at
@@ -79,7 +102,7 @@ export async function getReception(context: TenantRequestContext, receptionId: s
     FROM public.vehicle_damages AS d
     WHERE d.tenant_id = ${tenant.tenantId} AND d.reception_id = ${receptionId}
     ORDER BY d.created_at ASC, d.id ASC`;
-  const children = { checklist: checks.map(checkDto), damages: damages.map(damageDto) };
+  const children = { signature, serviceOrder, checklist: checks.map(checkDto), damages: damages.map(damageDto) };
   if (restricted) return { receptionId: row.id, vehicleId: row.vehicle_id,
     mileageKm: row.mileage_km, fuelLevelPct: row.fuel_level_pct, status: row.status,
     receivedAt: row.received_at, closedAt: row.closed_at, ...children };

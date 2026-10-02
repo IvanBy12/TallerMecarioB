@@ -73,12 +73,13 @@ export async function captureReceptionSignature(context: TenantRequestContext, r
   if (!document) throw new ApiError(409, 'ACCEPTANCE_DOCUMENT_VERSION_MISMATCH',
     'The acceptance document version does not match.');
   // Reception precedes media in both application and 0019 trigger lock graphs.
-  const [media] = await sql<{ media_type: string; status: string; deleted_at: Date | null;
-    purged_at: Date | null }[]>`SELECT media_type, status, deleted_at, purged_at
+  const [media] = await sql<{ media_type: string; status: string; retention_class: string;
+    deleted_at: Date | null; purged_at: Date | null }[]>`SELECT media_type, status, retention_class, deleted_at, purged_at
     FROM public.media_assets WHERE tenant_id=${tenant.tenantId} AND id=${input.signatureMediaId}
     FOR SHARE`;
   if (!media) throw mediaNotFound();
   if (media.media_type !== 'signature' || media.status !== 'active'
+    || media.retention_class !== 'authorization_evidence'
     || media.deleted_at || media.purged_at) throw mediaNotEligible();
   const [row] = await sql<{ id: string; signed_at: string }[]>`INSERT INTO public.signatures
     (id, tenant_id, reception_id, signature_media_id, signed_by_name,

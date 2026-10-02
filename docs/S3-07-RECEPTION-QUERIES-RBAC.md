@@ -52,12 +52,12 @@ The detail response is `{ reception }`. A tenant-grant staff reception has:
 `receptionId`, `vehicleId`, `customerId`, `appointmentId`, `locationId`,
 `receivedByMembershipId`, `mileageKm`, `fuelLevelPct`, `customerNotes`,
 `advisorNotes`, `status`, `receivedAt`, `closedAt`, `createdAt`, `updatedAt`,
-`checklist`, `damages`.
+`checklist`, `damages`, `signature`, `serviceOrder`.
 
 An assigned-grant reception has only:
 
 `receptionId`, `vehicleId`, `mileageKm`, `fuelLevelPct`, `status`,
-`receivedAt`, `closedAt`, `checklist`, `damages`.
+`receivedAt`, `closedAt`, `checklist`, `damages`, `signature`, `serviceOrder`.
 
 Each checklist entry has `checkItemId`, `code`, `label`, `status`, `notes`,
 `createdAt`, ordered by code then ID ascending. Each damage entry has
@@ -67,23 +67,41 @@ and reception predicates.
 
 `receptions.read` does not grant `customers.read`, `vehicles.read`,
 `signatures.read`, or `orders.read`. No customer CRM fields, embedded vehicle,
-privacy consent or snapshot, signature, signer, media, service order, order
-number, or audit data appears in either response. The assigned DTO also omits
+privacy consent or snapshot, signer, media, full service-order record, or audit
+data appears in either response. The minimal summaries below are available
+after reception resource authorization. The assigned DTO also omits
 customer ID and notes. Existing separate permissions and endpoints remain the
 authority for those resources.
+
+Both detail variants require `signature` and `serviceOrder`:
+
+- `signature`: `null` or `{ signatureId, documentVersion, signedAt }` (UTC).
+  No signer identity, signature media ID, document hash, IP, acceptance text/hash,
+  bucket, object key or download URL is included.
+- `serviceOrder`: `null` or `{ id, orderNumber, status }`.
+  `orderNumber` is a decimal string selected with `order_number::text`, preserving
+  bigint values beyond JavaScript's safe integer range. No other order fields appear.
+
+An open unsigned reception has both values null; an open signed reception has
+only its signature; a closed reception has both summaries. An open reception
+with an order, a closed reception missing either row, or duplicate signature/order
+rows fails with the generic 500. Reads never fabricate or choose a latest row.
+Historical summaries remain available after security quarantine of signed media.
+The list and create/PATCH/close contracts are unchanged; no second read endpoint
+is introduced. Responses retain `Cache-Control: no-store`.
 
 ## Query bound, read-only behavior, and database
 
 List executes one parameterized reception query. Successful detail executes
-one reception query with the assignment `EXISTS` when required, one checklist
+one reception query with the assignment `EXISTS` when required and tenant-scoped
+signature/order aggregates in the same statement snapshot, one checklist
 query, and one damage query. An absent or unauthorized detail stops after the
 reception query. No per-child query, offset, write, success audit, row write
 lock, external I/O, or timestamp change is used. The tenant request transaction
 sets RLS context; every tenant-owned query also has an explicit tenant filter.
 
-Migration: **NO**. Existing tables, tenant foreign keys, FORCE RLS, assignment
-scope and indexes support these reads. Migrations 0000–0022 and Drizzle
-snapshots remain unchanged.
+The reads need no schema changes. Existing tables, tenant foreign keys, FORCE
+RLS, assignment scope and indexes support them. Migrations 0000–0022 remain unchanged.
 
 ## Verification
 
@@ -92,7 +110,7 @@ grants, assigned lead/support, released/QC/wrong-order exclusions, anti-oracle
 404s, exact DTO keys, stable child ordering, cross-tenant isolation, filters,
 strict query validation, keyset pagination including an intervening insert,
 and the real request lifecycle tripwire. The S3-07 mutation runner injects
-12 high-value defects into compiled output and requires each to fail the
+24 high-value defects into compiled output and requires each to fail the
 reception API tests. The explicit tenant predicates are also checked in the
 compiled SQL source because FORCE RLS independently masks their removal in
 behavioral cross-tenant tests. Gate results are recorded in the handoff.
