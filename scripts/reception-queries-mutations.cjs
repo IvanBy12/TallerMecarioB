@@ -12,6 +12,7 @@ const MUTATION_NAMES = Object.freeze([
   'remove_checks_tenant', 'remove_damages_tenant',
   'remove_cursor_validation', 'remove_cursor_encoding', 'remove_cursor_keys',
   'remove_cursor_version', 'remove_cursor_canonical_uuid',
+  'remove_signature_summary_tenant', 'remove_order_summary_tenant',
 ]);
 
 function applyReceptionQueriesMutation(compiledRoot) {
@@ -46,6 +47,10 @@ function applyReceptionQueriesMutation(compiledRoot) {
       'WHERE so.reception_id = r.id'),
     remove_assignment_join_tenant: () => replace('ON a.tenant_id = so.tenant_id AND a.order_id = so.id',
       'ON a.order_id = so.id'),
+    remove_signature_summary_tenant: () => replace('WHERE s.tenant_id = ${tenant.tenantId} AND s.reception_id = r.id',
+      'WHERE s.reception_id = r.id'),
+    remove_order_summary_tenant: () => replace('WHERE o.tenant_id = ${tenant.tenantId} AND o.reception_id = r.id',
+      'WHERE o.reception_id = r.id'),
     remove_checks_tenant: () => replace('WHERE c.tenant_id = ${tenant.tenantId} AND c.reception_id = ${receptionId}',
       'WHERE c.reception_id = ${receptionId}'),
     remove_damages_tenant: () => replace('WHERE d.tenant_id = ${tenant.tenantId} AND d.reception_id = ${receptionId}',

@@ -9,7 +9,7 @@ const privacy = require('../tests/privacy/fixtures.cjs');
 
 const staffFields = ['receptionId', 'vehicleId', 'customerId', 'appointmentId', 'locationId',
   'receivedByMembershipId', 'mileageKm', 'fuelLevelPct', 'customerNotes', 'advisorNotes',
-  'status', 'receivedAt', 'closedAt', 'createdAt', 'updatedAt', 'checklist', 'damages'].sort();
+  'status', 'receivedAt', 'closedAt', 'createdAt', 'updatedAt', 'checklist', 'damages', 'signature', 'serviceOrder'].sort();
 const listFields = ['receptionId', 'vehicleId', 'customerId', 'mileageKm', 'fuelLevelPct',
   'status', 'receivedAt', 'closedAt', 'updatedAt'].sort();
 
@@ -133,6 +133,11 @@ async function runReceptionE2e(admin, baseUrl, identity, tenants, vehicleId, fet
   const detail = (await request(a.advisor, a.tenantId, 'GET', route, undefined, 200)).reception;
   assert.deepEqual(Object.keys(detail).sort(), staffFields);
   assert.equal(detail.status, 'closed');
+  assert.deepEqual(detail.signature, { signatureId: signed.signatureId,
+    documentVersion: signed.documentVersion, signedAt: detail.signature.signedAt });
+  assert.equal(Date.parse(detail.signature.signedAt), Date.parse(signed.signedAt));
+  assert.deepEqual(detail.serviceOrder, { id: closed.serviceOrder.id,
+    orderNumber: closed.serviceOrder.orderNumber, status: closed.serviceOrder.status });
   assert.equal(detail.customerNotes, customerNotes);
   assert.equal(detail.advisorNotes, patchedNotes);
   assert.equal(detail.mileageKm, 2345);
