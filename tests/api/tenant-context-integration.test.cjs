@@ -36,6 +36,7 @@ const {
 const { getResourceAuthorizationStatus } = require(join(root, 'authz', 'resource-authorization.js'));
 const { TenantContextDbError } = require(join(root, 'tenancy', 'tenant-context-db.js'));
 const { registerMediaRoutes } = require(join(root, 'media', 'routes.js'));
+const { listRolePermissionRows, PERMISSION_CODES } = require(join(root, 'authz', 'rbac-matrix.js'));
 
 const adminUrl = process.env.TEST_DATABASE_URL_ADMIN;
 const runtimeLogin = process.env.TEST_RUNTIME_LOGIN;
@@ -72,6 +73,9 @@ const T = { A: id(), B: id(), C: id() };
 const U = {
   ownerA: id(), ownerB: id(), multi: id(), tech: id(), none: id(),
   disabled: id(), inactive: id(), toctou: id(), ghost: id(),
+  // GET /api/v1/me/context fixtures (memberships seeded by that describe block).
+  ctxOwner: id(), ctxMulti: id(), ctxTech: id(), ctxNoRole: id(), ctxSuspended: id(),
+  ctxAdmin: id(), ctxAdvisor: id(), ctxRevoked: id(), ctxOwnerAdmin: id(), ctxSelector: id(),
 };
 const M = {
   ownerA: id(), ownerB: id(), multiA: id(), multiB: id(), techA: id(),
@@ -1256,6 +1260,428 @@ describe('GET /api/v1/me', () => {
         (SELECT count(*)::int FROM public.memberships WHERE user_id = ${U.none}) AS memberships
     `;
     assert.deepEqual({ ...counts }, { users: 0, memberships: 0 });
+  });
+});
+
+describe('GET /api/v1/me/context', () => {
+  const W = { X: id(), Y: id(), Z: id() };
+  const MC = {
+    ownerX: id(), multiX: id(), multiY: id(), techX: id(), noRoleX: id(), suspendedX: id(),
+    adminX: id(), advisorX: id(), revokedX: id(), ownerAdminY: id(), selectorX: id(), selectorY: id(), selectorZ: id(),
+  };
+  const WORKSHOP_ROWS = {
+    X: {
+      display_name: 'Taller Centro', timezone: 'America/Bogota', currency: 'COP', status: 'active',
+      legal_name: 'LEGAL_SENTINEL_X S.A.S.', tax_id: 'NIT_SENTINEL_X', phone: '+57 300 SENTINEL_X',
+      email: 'sentinel-x@workshop-context.test',
+    },
+    Y: {
+      display_name: 'Taller Norte', timezone: 'America/Lima', currency: 'USD', status: 'trialing',
+      legal_name: 'LEGAL_SENTINEL_Y S.A.C.', tax_id: 'NIT_SENTINEL_Y', phone: '+51 900 SENTINEL_Y',
+      email: 'sentinel-y@workshop-context.test',
+    },
+    Z: {
+      display_name: 'Taller Sur', timezone: 'America/Bogota', currency: 'COP', status: 'active',
+      legal_name: 'LEGAL_SENTINEL_Z S.A.S.', tax_id: 'NIT_SENTINEL_Z', phone: '+57 301 SENTINEL_Z',
+      email: 'sentinel-z@workshop-context.test',
+    },
+  };
+  const SENSITIVE = Object.values(WORKSHOP_ROWS).flatMap((row) => [row.legal_name, row.tax_id, row.phone, row.email]);
+  const meContext = (headers) => app.inject({ method: 'GET', url: '/api/v1/me/context', headers });
+  const permissionsByCode = (body) => Object.fromEntries(body.context.permissions.map((entry) => [entry.code, entry.scopes]));
+
+  /** Effective scopes straight from RBAC_MATRIX_V1: tenant dominates, else the restricted union. */
+  function expectedPermissions(...roles) {
+    const scopes = new Map();
+    for (const row of listRolePermissionRows()) {
+      if (!roles.includes(row.roleCode)) continue;
+      scopes.set(row.permissionCode, [...(scopes.get(row.permissionCode) ?? []), row.resourceScope]);
+    }
+    return [...scopes.entries()]
+      .map(([code, list]) => ({
+        code,
+        scopes: list.includes('tenant') ? ['tenant'] : ['assigned', 'quality_control'].filter((scope) => list.includes(scope)),
+      }))
+      .sort((left, right) => (left.code < right.code ? -1 : 1));
+  }
+
+  async function okContext(headers) {
+    const response = await meContext(headers);
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.headers['cache-control'], 'no-store');
+    assert.match(response.headers['content-type'], /^application\/json/);
+    return response;
+  }
+
+  async function withScope(roleCode, permissionCode, scope, fn) {
+    const [{ resource_scope: original }] = await admin`
+      SELECT rp.resource_scope FROM public.role_permissions AS rp
+      JOIN public.permissions AS p ON p.id = rp.permission_id
+      WHERE rp.role_id = ${roleId[roleCode]} AND p.code = ${permissionCode}
+    `;
+    const set = (value) => admin`
+      UPDATE public.role_permissions AS rp SET resource_scope = ${value}
+      FROM public.permissions AS p
+      WHERE p.id = rp.permission_id AND rp.role_id = ${roleId[roleCode]} AND p.code = ${permissionCode}
+    `;
+    await set(scope);
+    try {
+      await fn();
+    } finally {
+      await set(original);
+    }
+  }
+
+  before(async () => {
+    // membership key: [user key, workshop key, status, roles]
+    const memberships = {
+      ownerX: ['ctxOwner', 'X', 'active', ['owner']],
+      multiX: ['ctxMulti', 'X', 'active', ['technician', 'service_advisor']],
+      multiY: ['ctxMulti', 'Y', 'active', ['owner']],
+      techX: ['ctxTech', 'X', 'active', ['technician']],
+      noRoleX: ['ctxNoRole', 'X', 'active', []],
+      suspendedX: ['ctxSuspended', 'X', 'suspended', ['owner']],
+      adminX: ['ctxAdmin', 'X', 'active', ['admin']],
+      advisorX: ['ctxAdvisor', 'X', 'active', ['service_advisor']],
+      revokedX: ['ctxRevoked', 'X', 'revoked', ['technician']],
+      // Inserted admin first; the DB role list (byte order) is also admin, owner.
+      ownerAdminY: ['ctxOwnerAdmin', 'Y', 'active', ['admin', 'owner']],
+      // Selector user: two usable workshops and one active membership without workshop.read.
+      selectorX: ['ctxSelector', 'X', 'active', ['service_advisor']],
+      selectorY: ['ctxSelector', 'Y', 'active', ['technician']],
+      selectorZ: ['ctxSelector', 'Z', 'active', []],
+    };
+    await admin.begin(async (tx) => {
+      await tx`SET LOCAL session_replication_role = replica`;
+      for (const key of Object.keys(W)) {
+        await tx`INSERT INTO workshops ${tx({ id: W[key], slug: `ctx-${W[key]}`, ...WORKSHOP_ROWS[key] })}`;
+      }
+      for (const [key, [userKey, workshopKey, status, roles]] of Object.entries(memberships)) {
+        await tx`INSERT INTO memberships ${tx({
+          id: MC[key],
+          tenant_id: W[workshopKey],
+          user_id: U[userKey],
+          status,
+          suspended_at: status === 'suspended' ? new Date() : null,
+          revoked_at: status === 'revoked' ? new Date() : null,
+        })}`;
+        for (const role of roles) {
+          await tx`INSERT INTO membership_roles ${tx({
+            tenant_id: W[workshopKey], membership_id: MC[key], role_id: roleId[role], assigned_by_membership_id: MC[key],
+          })}`;
+        }
+      }
+    });
+  });
+
+  test('valid context, 1 role: exact shape, workshop of the tenant, roles and tenant permissions', async () => {
+    const mark = checkpoint(main);
+    const response = await okContext(auth('ctxOwner'));
+    const body = response.json();
+    assert.deepEqual(Object.keys(body), ['context']);
+    assert.deepEqual(Object.keys(body.context), ['tenantId', 'membershipId', 'userId', 'workshop', 'roles', 'permissions']);
+    assert.equal(body.context.tenantId, W.X);
+    assert.equal(body.context.membershipId, MC.ownerX);
+    assert.equal(body.context.userId, U.ctxOwner);
+    assert.deepEqual(body.context.workshop, { displayName: 'Taller Centro', timezone: 'America/Bogota', currency: 'COP' });
+    assert.deepEqual(body.context.roles, ['owner']);
+    assert.equal(body.context.permissions.length, PERMISSION_CODES.length);
+    assert.deepEqual(body.context.permissions, expectedPermissions('owner'));
+    assert.deepEqual(permissionsByCode(body)['receptions.read'], ['tenant']);
+
+    // Same answer with the explicit header (single membership).
+    assert.deepEqual((await okContext(withTenant('ctxOwner', W.X))).json(), body);
+
+    // One tenant transaction; the workshop read ran inside it, after RBAC load.
+    const { pool, transactions } = since(main, mark);
+    assert.deepEqual(pool, ['discover', 'discover']);
+    assert.equal(transactions.length, 2);
+    for (const tx of transactions) {
+      assert.equal(tx.releases, 1);
+      assert.deepEqual(kinds(tx), ['BEGIN', 'validate', 'bind', 'load', 'other', 'COMMIT']);
+      assert.match(tx.statements[4].text, /FROM public\.workshops AS w/);
+    }
+  });
+
+  test('roles/permissions are the TenantContext the pipeline built (same request shape as other tenant routes)', async () => {
+    const context = await okContext(withTenant('ctxMulti', W.X));
+    const probe = await get('/api/v1/__it/context', withTenant('ctxMulti', W.X));
+    assert.equal(probe.statusCode, 200, probe.body);
+    assert.deepEqual(context.json().context.roles, probe.json().context.roles);
+    assert.equal(context.json().context.permissions.length, probe.json().context.permissionCount);
+    assert.equal(context.json().context.membershipId, probe.json().context.membershipId);
+  });
+
+  test('multiple roles: canonical role order and the effective union of their grants', async () => {
+    const body = (await okContext(withTenant('ctxMulti', W.X))).json();
+    assert.equal(body.context.membershipId, MC.multiX);
+    assert.deepEqual(body.context.roles, ['service_advisor', 'technician']);
+    assert.deepEqual(body.context.permissions, expectedPermissions('service_advisor', 'technician'));
+    const technician = expectedPermissions('technician').map((entry) => entry.code);
+    const advisor = expectedPermissions('service_advisor').map((entry) => entry.code);
+    assert.deepEqual(
+      body.context.permissions.map((entry) => entry.code),
+      [...new Set([...technician, ...advisor])].sort(),
+    );
+    assert.equal('roles.assign_admin' in permissionsByCode(body), false, 'no role grants it → absent');
+  });
+
+  test('tenant dominates restricted scopes of another active role', async () => {
+    const technicianOnly = permissionsByCode((await okContext(auth('ctxTech'))).json());
+    const combined = permissionsByCode((await okContext(withTenant('ctxMulti', W.X))).json());
+    for (const code of ['vehicles.read', 'receptions.read', 'orders.read', 'quality_checks.perform']) {
+      assert.notDeepEqual(technicianOnly[code], ['tenant'], code);
+      assert.deepEqual(combined[code], ['tenant'], code);
+    }
+  });
+
+  test('only assigned (technician): assigned / quality_control scopes, never widened to tenant', async () => {
+    const body = (await okContext(auth('ctxTech'))).json();
+    assert.deepEqual(body.context.roles, ['technician']);
+    assert.deepEqual(body.context.permissions, expectedPermissions('technician'));
+    const scopes = permissionsByCode(body);
+    for (const code of ['vehicles.read', 'receptions.read', 'orders.read', 'media.upload']) {
+      assert.deepEqual(scopes[code], ['assigned'], code);
+    }
+    assert.deepEqual(scopes['quality_checks.perform'], ['quality_control']);
+    assert.deepEqual(scopes['workshop.read'], ['tenant']);
+  });
+
+  test('assigned + quality_control on the same permission → both, canonical order', async () => {
+    // No baseline role pair yields A+Q on one permission: drift the disposable catalog.
+    await withScope('service_advisor', 'orders.read', 'quality_control', async () => {
+      const scopes = permissionsByCode((await okContext(withTenant('ctxMulti', W.X))).json());
+      assert.deepEqual(scopes['orders.read'], ['assigned', 'quality_control']);
+    });
+    const restored = permissionsByCode((await okContext(withTenant('ctxMulti', W.X))).json());
+    assert.deepEqual(restored['orders.read'], ['tenant'], 'catalog restored');
+  });
+
+  test('workshop of the selected tenant only (multi-membership user switches by X-Tenant-Id)', async () => {
+    const x = (await okContext(withTenant('ctxMulti', W.X))).json().context;
+    const y = (await okContext(withTenant('ctxMulti', W.Y))).json().context;
+    assert.deepEqual(x.workshop, { displayName: 'Taller Centro', timezone: 'America/Bogota', currency: 'COP' });
+    assert.deepEqual({ tenantId: y.tenantId, membershipId: y.membershipId, roles: y.roles }, {
+      tenantId: W.Y, membershipId: MC.multiY, roles: ['owner'],
+    });
+    assert.deepEqual(y.workshop, { displayName: 'Taller Norte', timezone: 'America/Lima', currency: 'USD' });
+    assert.equal(x.userId, y.userId);
+  });
+
+  test('no sensitive or internal workshop fields in the body or the query', async () => {
+    const mark = checkpoint(main);
+    for (const headers of [auth('ctxOwner'), withTenant('ctxMulti', W.Y)]) {
+      const response = await okContext(headers);
+      const { context } = response.json();
+      assert.deepEqual(Object.keys(context.workshop), ['displayName', 'timezone', 'currency']);
+      for (const leak of [...SENSITIVE, 'ctx-', 'trialing', 'SENTINEL']) {
+        assert.equal(response.body.includes(leak), false, `body leaked "${leak}"`);
+      }
+      // Permission codes legitimately contain words like "legal"; field names are checked outside them.
+      const withoutPermissions = JSON.stringify({ ...context, permissions: [] }).toLowerCase();
+      for (const field of ['legal', 'tax', 'nit', 'phone', 'email', 'status', 'slug', 'requestid', 'created', 'updated']) {
+        assert.equal(withoutPermissions.includes(field), false, `context leaked "${field}"`);
+      }
+    }
+    for (const tx of since(main, mark).transactions) {
+      const workshopQuery = tx.statements.find((entry) => entry.text.includes('FROM public.workshops AS w'));
+      assert.deepEqual(Object.keys(workshopQuery.rows[0]).sort(), ['currency', 'display_name', 'timezone']);
+    }
+  });
+
+  test('cache-control: no-store and a deterministic body across requests', async () => {
+    for (const headers of [auth('ctxOwner'), auth('ctxTech'), withTenant('ctxMulti', W.X)]) {
+      const first = await okContext(headers);
+      const second = await okContext(headers);
+      assert.equal(second.body, first.body);
+      const codes = first.json().context.permissions.map((entry) => entry.code);
+      assert.deepEqual(codes, [...codes].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
+    }
+  });
+
+  test('without X-Tenant-Id: N memberships → 409, 0 memberships → 403, no auth → 401', async () => {
+    assertError(await meContext(auth('ctxMulti')), 409, 'TENANT_SELECTION_REQUIRED');
+    assertError(await meContext(auth('none')), 403, 'ACTIVE_MEMBERSHIP_REQUIRED');
+    assertError(await meContext({}), 401, 'AUTHENTICATION_REQUIRED');
+    assertError(await meContext({ authorization: 'Bearer invalid-token' }), 401, 'AUTHENTICATION_REQUIRED');
+  });
+
+  test('malformed X-Tenant-Id → 400 TENANT_SELECTION_INVALID', async () => {
+    for (const value of ['not-a-uuid', ` ${W.X}`, `${W.X},${W.Y}`, '']) {
+      assertError(await meContext(withTenant('ctxOwner', value)), 400, 'TENANT_SELECTION_INVALID');
+    }
+  });
+
+  test('tenant of another membership / unknown tenant → 403 TENANT_ACCESS_DENIED, no fallback', async () => {
+    assertError(await meContext(withTenant('ctxOwner', W.Y)), 403, 'TENANT_ACCESS_DENIED');
+    assertError(await meContext(withTenant('ctxOwner', T.A)), 403, 'TENANT_ACCESS_DENIED');
+    assertError(await meContext(withTenant('ctxOwner', id())), 403, 'TENANT_ACCESS_DENIED');
+    assertError(await meContext(withTenant('ctxMulti', T.B)), 403, 'TENANT_ACCESS_DENIED');
+  });
+
+  test('inactive membership → 403 (ACTIVE_MEMBERSHIP_REQUIRED / TENANT_ACCESS_DENIED), also after suspension', async () => {
+    assertError(await meContext(auth('ctxSuspended')), 403, 'ACTIVE_MEMBERSHIP_REQUIRED');
+    assertError(await meContext(withTenant('ctxSuspended', W.X)), 403, 'TENANT_ACCESS_DENIED');
+
+    // A previously working membership (not the workshop's last owner) suspended from another session.
+    await okContext(auth('ctxTech'));
+    await setMembershipStatus(MC.techX, 'suspended');
+    try {
+      assertError(await meContext(auth('ctxTech')), 403, 'ACTIVE_MEMBERSHIP_REQUIRED');
+      assertError(await meContext(withTenant('ctxTech', W.X)), 403, 'TENANT_ACCESS_DENIED');
+    } finally {
+      await setMembershipStatus(MC.techX, 'active');
+    }
+    await okContext(auth('ctxTech'));
+  });
+
+  test('missing workshop.read → 403 PERMISSION_DENIED (no roles, or a role without that grant)', async () => {
+    assertError(await meContext(auth('ctxNoRole')), 403, 'PERMISSION_DENIED');
+
+    const [{ id: workshopRead }] = await admin`SELECT id FROM public.permissions WHERE code = 'workshop.read'`;
+    const [removed] = await admin`
+      DELETE FROM public.role_permissions WHERE role_id = ${roleId.technician} AND permission_id = ${workshopRead}
+      RETURNING role_id, permission_id, resource_scope
+    `;
+    try {
+      assertError(await meContext(auth('ctxTech')), 403, 'PERMISSION_DENIED');
+    } finally {
+      await admin`INSERT INTO public.role_permissions ${admin({ ...removed })}`;
+    }
+    await okContext(auth('ctxTech'));
+  });
+
+  test('admin-only and service_advisor-only memberships → 200 with their own effective grants', async () => {
+    for (const [userKey, membershipKey, role] of [['ctxAdmin', 'adminX', 'admin'], ['ctxAdvisor', 'advisorX', 'service_advisor']]) {
+      for (const headers of [auth(userKey), withTenant(userKey, W.X)]) {
+        const { context } = (await okContext(headers)).json();
+        assert.equal(context.tenantId, W.X);
+        assert.equal(context.membershipId, MC[membershipKey]);
+        assert.deepEqual(context.roles, [role]);
+        assert.deepEqual(context.permissions, expectedPermissions(role));
+        assert.deepEqual(permissionsByCode({ context })['workshop.read'], ['tenant']);
+      }
+    }
+  });
+
+  test('revoked membership → 403 on /me/context itself (no header and explicit header)', async () => {
+    assertError(await meContext(auth('ctxRevoked')), 403, 'ACTIVE_MEMBERSHIP_REQUIRED');
+    assertError(await meContext(withTenant('ctxRevoked', W.X)), 403, 'TENANT_ACCESS_DENIED');
+  });
+
+  test('roles use canonical ROLE_CODES order, not alphabetical nor DB/insertion order', async () => {
+    const { context } = (await okContext(auth('ctxOwnerAdmin'))).json();
+    assert.equal(context.tenantId, W.Y);
+    // Alphabetical, byte order and insertion order would all give ['admin', 'owner'].
+    assert.deepEqual(context.roles, ['owner', 'admin']);
+    assert.deepEqual(context.permissions, expectedPermissions('owner', 'admin'));
+  });
+
+  test('selector contract (Option A): /me lists the memberships, one /me/context per tenant names each one', async () => {
+    const me = await get('/api/v1/me', auth('ctxSelector'));
+    assert.equal(me.statusCode, 200, me.body);
+    const bootstrap = me.json();
+    assert.deepEqual(bootstrap.tenantSelection, { mode: 'required', tenantId: null });
+    assert.deepEqual(
+      [...bootstrap.memberships].sort((left, right) => (left.tenantId < right.tenantId ? -1 : 1)),
+      [
+        { membershipId: MC.selectorX, tenantId: W.X },
+        { membershipId: MC.selectorY, tenantId: W.Y },
+        { membershipId: MC.selectorZ, tenantId: W.Z },
+      ].sort((left, right) => (left.tenantId < right.tenantId ? -1 : 1)),
+    );
+    assert.equal(me.body.includes('Taller'), false, '/me exposes no workshop names');
+
+    // Concurrent fan-out, explicit X-Tenant-Id on every request.
+    const responses = await Promise.all(bootstrap.memberships.map((membership) =>
+      meContext(withTenant('ctxSelector', membership.tenantId))));
+    const byTenant = new Map(bootstrap.memberships.map((membership, index) => [membership.tenantId, responses[index]]));
+
+    const x = byTenant.get(W.X);
+    const y = byTenant.get(W.Y);
+    for (const response of [x, y]) {
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.headers['cache-control'], 'no-store');
+    }
+    assert.deepEqual(
+      { tenantId: x.json().context.tenantId, membershipId: x.json().context.membershipId, roles: x.json().context.roles },
+      { tenantId: W.X, membershipId: MC.selectorX, roles: ['service_advisor'] },
+    );
+    assert.equal(x.json().context.workshop.displayName, 'Taller Centro');
+    assert.deepEqual(
+      { tenantId: y.json().context.tenantId, membershipId: y.json().context.membershipId, roles: y.json().context.roles },
+      { tenantId: W.Y, membershipId: MC.selectorY, roles: ['technician'] },
+    );
+    assert.equal(y.json().context.workshop.displayName, 'Taller Norte');
+    assert.deepEqual(x.json().context.permissions, expectedPermissions('service_advisor'));
+    assert.deepEqual(y.json().context.permissions, expectedPermissions('technician'));
+
+    // No cross-context leak in either direction, and nothing about Z anywhere.
+    for (const [response, foreign] of [[x, [W.Y, MC.selectorY, 'Taller Norte']], [y, [W.X, MC.selectorX, 'Taller Centro']]]) {
+      for (const leak of [...foreign, W.Z, MC.selectorZ, 'Taller Sur']) {
+        assert.equal(response.body.includes(leak), false, `context leaked "${leak}"`);
+      }
+    }
+
+    // Active membership without workshop.read: not a selectable context, and the error names nothing.
+    const z = byTenant.get(W.Z);
+    assertError(z, 403, 'PERMISSION_DENIED');
+    for (const leak of [W.Z, MC.selectorZ, 'Taller Sur', 'Taller Centro', 'Taller Norte']) {
+      assert.equal(z.body.includes(leak), false, `error leaked "${leak}"`);
+    }
+  });
+
+  test('selector contract: TENANT_ACCESS_DENIED after /me means the bootstrap is stale; /me re-fetch drops it', async () => {
+    const before = (await get('/api/v1/me', auth('ctxSelector'))).json();
+    assert.ok(before.memberships.some((membership) => membership.tenantId === W.X));
+
+    await setMembershipStatus(MC.selectorX, 'suspended');
+    try {
+      assertError(await meContext(withTenant('ctxSelector', W.X)), 403, 'TENANT_ACCESS_DENIED');
+      const after = (await get('/api/v1/me', auth('ctxSelector'))).json();
+      assert.deepEqual(
+        after.memberships.map((membership) => membership.tenantId).sort(),
+        [W.Y, W.Z].sort(),
+      );
+      // The other memberships keep working; nothing global was selected.
+      assert.equal((await okContext(withTenant('ctxSelector', W.Y))).json().context.tenantId, W.Y);
+    } finally {
+      await setMembershipStatus(MC.selectorX, 'active');
+    }
+    assert.equal((await okContext(withTenant('ctxSelector', W.X))).json().context.membershipId, MC.selectorX);
+  });
+
+  test('rate limit → 429 RATE_LIMIT_EXCEEDED with Retry-After', async () => {
+    const limited = await buildApi({ database: main.sql, identityProvider, rateLimit: { max: 2, timeWindow: '1 minute' } });
+    try {
+      const responses = [];
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        responses.push(await limited.inject({ method: 'GET', url: '/api/v1/me/context', headers: auth('ctxOwner') }));
+      }
+      assert.equal(responses[0].statusCode, 200, responses[0].body);
+      const rejected = responses.find((response) => response.statusCode === 429);
+      assert.ok(rejected, 'a 429 is returned once the limit is exceeded');
+      assertError(rejected, 429, 'RATE_LIMIT_EXCEEDED');
+      assert.ok(rejected.headers['retry-after']);
+    } finally {
+      await limited.close();
+    }
+  });
+
+  test('built into buildApi (the production server needs no extra wiring); /api/v1/me unchanged', async () => {
+    const bare = await buildApi({ database: main.sql, identityProvider });
+    try {
+      const response = await bare.inject({ method: 'GET', url: '/api/v1/me/context', headers: auth('ctxOwner') });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.json().context.tenantId, W.X);
+
+      const me = await bare.inject({ method: 'GET', url: '/api/v1/me', headers: auth('ctxMulti') });
+      assert.equal(me.statusCode, 200, me.body);
+      assert.deepEqual(Object.keys(me.json()), ['user', 'memberships', 'tenantSelection']);
+      assert.deepEqual(me.json().tenantSelection, { mode: 'required', tenantId: null });
+    } finally {
+      await bare.close();
+    }
   });
 });
 

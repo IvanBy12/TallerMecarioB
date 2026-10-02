@@ -30,6 +30,7 @@ try {
       'tests/tenancy/tenant-selection.test.cjs',
       'tests/authz/authorization-core.test.cjs',
       'tests/authz/resource-authorization.test.cjs',
+      'tests/api/me-context-permissions.test.cjs',
     ],
     { ...process.env, TEST_AUTHZ_MODULE_ROOT: compiledRoot, NODE_PATH: resolve('node_modules') },
   );

@@ -19,6 +19,7 @@ import { uuidV7 } from '../platform/uuid-v7.js';
 import { ApiError, mapDomainError } from './errors.js';
 import { checkDatabaseReady } from './health.js';
 import { registerMeRoute } from './me.js';
+import { registerMeContextRoute } from './me-context.js';
 import {
   recordVerifiedIdentity,
   setIdentityOnlyRequestContext,
@@ -480,6 +481,11 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
       database: options.database,
       authenticate: (request) => authenticate(options.identityProvider, request),
     });
+
+    // GET /api/v1/me/context (frontend G5): built in like /api/v1/me, so every
+    // buildApi caller -- the production server included -- exposes it.
+    // Registered after the lifecycle so its onRoute permission guard applies.
+    registerMeContextRoute(protectedApp);
 
     if (options.registerRoutes) await options.registerRoutes(protectedApp);
   });
