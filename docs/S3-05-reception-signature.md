@@ -42,19 +42,27 @@ Within the tenant request transaction, the service locks its reception with
 `FOR NO KEY UPDATE`, requires `open`, resolves the document version, locks
 the media row with `FOR SHARE`, validates it, inserts a signature and a
 minimal `reception.signed` success audit, then commits. The media must belong
-to the same tenant, have `media_type=signature`, `status=active`, and have no
-deletion or purge marker. Quarantined, pending, deleted and foreign media are
-rejected. Missing and foreign media share a safe 404. The 0019 trigger repeats
-the reception/media guards. Exactly one signature belongs to a reception;
-exactly one belongs to a delivery when that flow is implemented. A signature
+to the same tenant, have `media_type=signature`, `status=active`,
+`retention_class=authorization_evidence`, and have no deletion or purge marker.
+Quarantined, pending, deleted and foreign media are rejected. Missing and foreign
+media share a safe 404. Migration 0023 preserves the 0019 reception/media guards
+and adds the same reception-specific retention check. Incompatible media returns the existing
+`409 SIGNATURE_MEDIA_NOT_ELIGIBLE` (`23514 signatures_media_guard` in PostgreSQL).
+The shared upload/signature media type imposes no global retention restriction.
+Exactly one signature belongs to a reception; exactly one belongs to a delivery
+when that flow is implemented. A signature
 media asset can back only one signing act within its tenant, whether reception
 or delivery. The 0021 `signatures_one_media_uq` enforces this single use.
 
 The lock order is reception → media, including the 0019 trigger. A concurrent
 quarantine update waits on the media lock; after a committed signature, 0022
 allows `active → quarantined` while the signed-media trigger continues to
-protect the object identity, deletion and purge markers. Normal download URL
-generation rejects quarantined media. If quarantine commits first, signature
+protect the object identity, deletion and purge markers. Migration 0023 also
+freezes `retention_class` once media backs any signature. Changing the class
+is forbidden, including during quarantine; `quarantined → active` and other
+status transitions remain forbidden. Historical signatures and reception detail
+summaries survive quarantine. Normal download URL generation rejects quarantined
+media. If quarantine commits first, signature
 validation fails. A future close must start with the
 same reception lock; if close commits first, capture returns
 `409 RECEPTION_NOT_EDITABLE`. S3-05 leaves receptions open and does not create
@@ -66,6 +74,11 @@ with one row and one success audit. The API role cannot update, delete or
 truncate signatures; the append-only trigger also rejects updates/deletes.
 Composite tenant FKs and FORCE RLS enforce tenant isolation. A failed insert
 or audit rolls the whole transaction back.
+
+The 0023 preflight examines reception signatures across all tenants under
+exclusive locks and restores FORCE RLS before installing guards. Incompatible
+historical classes fail with `23514 reception_signature_retention_preflight`;
+no evidence is rewritten. Existing grants and delivery eligibility are preserved.
 
 ## Scope
 

@@ -35,6 +35,10 @@ const privacyPreflightStatements = readFileSync('drizzle/0020_s3_04_5_reception_
   .split('--> statement-breakpoint').slice(0, 6).map((s) => s.trim())
   .map((s) => s.replace('SET ROLE tallermecario_schema_owner;',
     'SET LOCAL ROLE tallermecario_schema_owner;'));
+const retentionPreflightStatements = readFileSync('drizzle/0023_s3_reception_signature_retention.sql', 'utf8')
+  .split('--> statement-breakpoint').slice(0, 8).map((s) => s.trim())
+  .map((s) => s.replace('SET ROLE tallermecario_schema_owner;',
+    'SET LOCAL ROLE tallermecario_schema_owner;'));
 async function preflightError(sql, statements = preflightStatements) {
   try {
     await sql.begin(async (tx) => {
@@ -125,7 +129,7 @@ async function seedPrivacy(sql, kind) {
   return tenant;
 }
 /** 0020-shaped evidence, including a deliberate legacy reuse only in the duplicate case. */
-async function seedSingleUse(sql, duplicate) {
+async function seedSingleUse(sql, duplicate, retention = 'authorization_evidence') {
   const tenant = await seedPrivacy(sql, 'clean');
   const [vehicle] = await sql`SELECT id FROM vehicles WHERE tenant_id=${tenant}`;
   const [customer] = await sql`SELECT id FROM customers WHERE tenant_id=${tenant}`;
@@ -135,7 +139,7 @@ async function seedSingleUse(sql, duplicate) {
     await tx`SET LOCAL session_replication_role = replica`;
     await tx`INSERT INTO media_assets
       (id,tenant_id,bucket,object_key,media_type,mime_type,status,retention_class,retention_policy_version)
-      VALUES (${media},${tenant},'fixture',${media},'signature','image/png','active','operational','v1')`;
+      VALUES (${media},${tenant},'fixture',${media},'signature','image/png','active',${retention},'v1')`;
     for (let i = 0; i < (duplicate ? 2 : 1); i += 1) {
       const reception = randomUUID();
       const signedVehicle = i === 0 ? vehicle.id : randomUUID();
@@ -187,11 +191,12 @@ async function main() {
   const maintenance = postgres(source.toString(), { max: 1, prepare: false, onnotice: () => {} });
   const original = new Set((await maintenance`SELECT rolname FROM pg_roles WHERE rolname = ANY(${ROLES})`).map((r) => r.rolname));
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json','utf8'));
-  assert.equal(journal.entries.length, 23);
+  assert.equal(journal.entries.length, 24);
   // 0019 cases upgrade to a 0019 head: their valid fixture holds a legacy
   // reception, which 0020 deliberately refuses (fail closed, covered below).
   const head19 = mkdtempSync(join(tmpdir(), 'tm-reception-head19-'));
   const head20 = mkdtempSync(join(tmpdir(), 'tm-reception-head20-'));
+  const head22 = mkdtempSync(join(tmpdir(), 'tm-reception-head22-'));
   const temp = mkdtempSync(join(tmpdir(), 'tm-reception-upgrade-'));
   const cases = [
     ['valid', null, null],
@@ -218,6 +223,10 @@ async function main() {
   const singleUseNames = [false, true].map((duplicate) =>
     `tm_test_recup_s${duplicate ? 'dup' : 'clean'}_${randomUUID().replaceAll('-', '').slice(0, 10)}`);
   names.push(...singleUseNames);
+  const retentionCases = ['clean', 'valid', 'wrong', 'quarantined', 'delivery'];
+  const retentionNames = retentionCases.map((kind) =>
+    `tm_test_recup_r${kind}_${randomUUID().replaceAll('-', '').slice(0, 10)}`);
+  names.push(...retentionNames);
   const created = [];
   let failure;
   try {
@@ -230,6 +239,9 @@ async function main() {
     cpSync('drizzle', head20, { recursive: true });
     writeFileSync(join(head20, 'meta', '_journal.json'),
       JSON.stringify({ ...journal, entries: journal.entries.slice(0, 21) }));
+    cpSync('drizzle', head22, { recursive: true });
+    writeFileSync(join(head22, 'meta', '_journal.json'),
+      JSON.stringify({ ...journal, entries: journal.entries.slice(0, 23) }));
     for (const [index, [kind, expectedCode, expectedConstraint]] of cases.entries()) {
       const name = names[index];
       await maintenance.unsafe(`CREATE DATABASE ${name}`); created.push(name);
@@ -301,7 +313,7 @@ async function main() {
         if (!expectedConstraint) {
           assert.equal(diagnostic, null, 'clean preflight');
           assert.equal(upgraded.status, 0, upgraded.stderr);
-          assert.equal(await ledger(sql), 23);
+          assert.equal(await ledger(sql), 24);
           await forced();
           assert.deepEqual(await privacySnapshot(sql, tenant), before);
           const schemaAfter = await privacySchema(sql);
@@ -311,7 +323,7 @@ async function main() {
             'privacy_consents_evidence_truncate_trg', 'receptions_guard_10_current_owner_trg',
             'receptions_guard_20_privacy_consent_trg']);
           assert.equal(migrate(target.toString(), 'drizzle').status, 0);
-          assert.equal(await ledger(sql), 23);
+          assert.equal(await ledger(sql), 24);
           assert.deepEqual(await privacySchema(sql), schemaAfter, 'rerun is a no-op');
           process.stdout.write(`UPGRADE_PRIVACY_${kind.toUpperCase()}_PASS 0019 -> 0020; data unchanged; rerun no-op\n`);
         } else {
@@ -361,14 +373,81 @@ async function main() {
           process.stdout.write('UPGRADE_SINGLE_USE_DUPLICATE_FAIL_CLOSED_PASS ledger=21; rows intact; rollback complete\n');
         } else {
           assert.equal(upgrade.status, 0, upgrade.stderr);
-          assert.equal(await ledger(sql), 23);
+          assert.equal(await ledger(sql), 24);
           const [state] = await sql`SELECT to_regclass('public.signatures_one_media_uq') IS NOT NULL AS indexed`;
           assert.equal(state.indexed, true);
           assert.deepEqual(await dataSnapshot(sql, tenant), before);
           assert.equal(migrate(target.toString(), 'drizzle').status, 0);
-          assert.equal(await ledger(sql), 23);
+          assert.equal(await ledger(sql), 24);
           process.stdout.write('UPGRADE_SINGLE_USE_CLEAN_PASS 0020 -> 0022; rows intact; rerun no-op\n');
         }
+      } finally { await sql.end({ timeout: 5 }); }
+    }
+    // 0022 -> 0023: inspect all tenants, fail without rewriting evidence, preserve quarantine.
+    for (const [index, kind] of retentionCases.entries()) {
+      const name = retentionNames[index];
+      await maintenance.unsafe(`CREATE DATABASE ${name}`); created.push(name);
+      const target = new URL(source); target.pathname = `/${name}`;
+      const sql = postgres(target.toString(), { max: 2, prepare: false, onnotice: () => {} });
+      try {
+        const baseline = migrate(target.toString(), head22);
+        assert.equal(baseline.status, 0, baseline.stderr);
+        assert.equal(await ledger(sql), 23);
+        const tenants = [];
+        if (kind !== 'clean') {
+          // A valid first tenant must never hide incompatible evidence in a second tenant.
+          const valid = await seedSingleUse(sql, false); tenants.push(valid.tenant);
+          const fixture = await seedSingleUse(sql, false,
+            ['wrong', 'delivery'].includes(kind) ? 'operational' : 'authorization_evidence');
+          tenants.push(fixture.tenant);
+          if (kind === 'quarantined') await sql`UPDATE media_assets SET status='quarantined' WHERE id=${fixture.media}`;
+          if (kind === 'delivery') await sql.begin(async (tx) => {
+            await tx`SET LOCAL session_replication_role = replica`;
+            await tx`UPDATE signatures SET reception_id=NULL,delivery_id=${randomUUID()}
+              WHERE tenant_id=${fixture.tenant}`;
+          });
+        }
+        const snapshots = async () => Promise.all(tenants.map((tenant) => dataSnapshot(sql, tenant)));
+        const before = await snapshots();
+        const schema = async () => {
+          const functions = await sql`SELECT proname,pg_get_functiondef(oid) AS definition FROM pg_proc
+            WHERE pronamespace='app'::regnamespace
+              AND proname IN ('enforce_reception_signature','enforce_signed_media_active') ORDER BY proname`;
+          const trigger = await sql`SELECT pg_get_triggerdef(oid) AS definition FROM pg_trigger
+            WHERE tgrelid='public.media_assets'::regclass AND tgname='media_signed_active_trg'`;
+          const rls = await sql`SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class
+            WHERE oid IN ('public.signatures'::regclass,'public.media_assets'::regclass) ORDER BY relname`;
+          const grants = await sql`SELECT grantee,table_name,privilege_type FROM information_schema.role_table_grants
+            WHERE table_schema='public' AND table_name IN ('signatures','media_assets')
+              ORDER BY grantee,table_name,privilege_type`;
+          return { functions: [...functions], trigger: [...trigger], rls: [...rls], grants: [...grants] };
+        };
+        const beforeSchema = await schema();
+        const diagnostic = await preflightError(sql, retentionPreflightStatements);
+        assert.deepEqual(await schema(), beforeSchema, 'diagnostic restores FORCE RLS');
+        const upgraded = migrate(target.toString(), 'drizzle');
+        if (kind === 'wrong') {
+          assert.equal(diagnostic?.code, '23514');
+          assert.equal(diagnostic?.constraint_name, 'reception_signature_retention_preflight');
+          assert.notEqual(upgraded.status, 0, 'wrong historical retention must fail');
+          assert.equal(await ledger(sql), 23);
+          assert.deepEqual(await schema(), beforeSchema, 'full rollback of guards, trigger, RLS and grants');
+          assert.notEqual(migrate(target.toString(), 'drizzle').status, 0, 'rerun fails deterministically');
+          assert.equal(await ledger(sql), 23);
+        } else {
+          assert.equal(diagnostic, null);
+          assert.equal(upgraded.status, 0, upgraded.stderr);
+          assert.equal(await ledger(sql), 24);
+          const afterSchema = await schema();
+          assert.deepEqual(afterSchema.rls, beforeSchema.rls);
+          assert.ok(afterSchema.rls.every((r) => r.relrowsecurity && r.relforcerowsecurity));
+          assert.deepEqual(afterSchema.grants, beforeSchema.grants);
+          assert.match(afterSchema.trigger[0].definition, /retention_class/u);
+          assert.equal(migrate(target.toString(), 'drizzle').status, 0, 'rerun no-op');
+          assert.deepEqual(await schema(), afterSchema);
+        }
+        assert.deepEqual(await snapshots(), before, 'all historical evidence remains byte-for-byte unchanged');
+        process.stdout.write(`UPGRADE_RETENTION_${kind.toUpperCase()}_PASS ledger=${kind === 'wrong' ? 23 : 24}; evidence unchanged\n`);
       } finally { await sql.end({ timeout: 5 }); }
     }
   } catch (e) { failure = e; }
@@ -386,6 +465,7 @@ async function main() {
     rmSync(temp, { recursive: true, force: true });
     rmSync(head19, { recursive: true, force: true });
     rmSync(head20, { recursive: true, force: true });
+    rmSync(head22, { recursive: true, force: true });
     process.stdout.write(`RECEPTION_UPGRADE_TEARDOWN dbs=${left.n}\n`);
     await maintenance.end({ timeout: 5 });
     if (cleanupError || left.n !== 0) failure ||= new Error('RECEPTION_UPGRADE_TEARDOWN_FAILED');

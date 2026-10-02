@@ -162,6 +162,13 @@
       "when": 1790812800000,
       "tag": "0022_s3_05_signed_media_quarantine",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1790899200000,
+      "tag": "0023_s3_reception_signature_retention",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,8 @@
 'use strict';
 
 const { randomUUID, createHash } = require('node:crypto');
+const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
 const { test, before, after } = require('node:test');
 const h = require('../crm-api/helpers.cjs');
 const { assert } = h;
@@ -61,12 +63,12 @@ async function fixture(tenant) {
   });
   return { customer, vehicle, consent, reception };
 }
-async function media(tenantId, type = 'signature', status = 'active') {
+async function media(tenantId, type = 'signature', status = 'active', retention = 'authorization_evidence') {
   const id = randomUUID();
   await h.admin`INSERT INTO public.media_assets
     (id,tenant_id,bucket,object_key,media_type,mime_type,status,retention_class,retention_policy_version)
     VALUES (${id},${tenantId},'test',${id},${type},'image/png',${status},
-      'authorization_evidence','v1')`;
+      ${retention},'v1')`;
   return id;
 }
 const body = (signatureMediaId, extra = {}) => ({ signatureMediaId, signedByName: '  María Gómez  ',
@@ -181,6 +183,7 @@ test('media eligibility and foreign media fail without signature or success audi
   const candidates = [
     [randomUUID(), 404, 'SIGNATURE_MEDIA_NOT_FOUND'],
     [await media(b.tenantId), 404, 'SIGNATURE_MEDIA_NOT_FOUND'],
+    [await media(a.tenantId, 'signature', 'active', 'operational'), 409, 'SIGNATURE_MEDIA_NOT_ELIGIBLE'],
     [await media(a.tenantId, 'photo'), 409, 'SIGNATURE_MEDIA_NOT_ELIGIBLE'],
     [await media(a.tenantId, 'signature', 'pending_upload'), 409, 'SIGNATURE_MEDIA_NOT_ELIGIBLE'],
     [await media(a.tenantId, 'signature', 'quarantined'), 409, 'SIGNATURE_MEDIA_NOT_ELIGIBLE'],
@@ -341,4 +344,12 @@ test('audit failure rolls back signature and retry succeeds', async () => {
   assert.equal((await signatures(reception)).length, 0);
   assert.equal((await audits(reception)).length, 0);
   assert.equal((await capture(a.owner, a.tenantId, reception, body(m))).status, 201);
+});
+
+// PostgreSQL independently masks an omitted service check; keep the application
+// guard explicit as well as testing the API outcome and direct DB invariant.
+test('capture explicitly checks reception retention before inserting evidence', () => {
+  const source = readFileSync(join(process.env.TEST_MODULE_ROOT, 'receptions/signature.js'), 'utf8');
+  assert.match(source, /SELECT media_type, status, retention_class, deleted_at, purged_at/u);
+  assert.match(source, /media\.retention_class !== 'authorization_evidence'/u);
 });
