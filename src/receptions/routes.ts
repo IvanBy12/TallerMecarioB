@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ApiError, getTenantRequestContext } from '../api/app.js';
 import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
 import { RECEPTION_ACCEPTANCE_VERSION, receptionAcceptanceDocument } from './acceptance-document.js';
+import { writeChecklist, writeDamages } from './inspection.js';
+import { INSPECTION_BODY_LIMIT, parseChecklist, parseDamages } from './inspection-validation.js';
 import { closeReception, mapCloseDbError } from './close.js';
 import { getReception, listReceptions } from './queries.js';
 import { parseListReceptionsQuery } from './queries-validation.js';
@@ -19,6 +21,21 @@ async function requireJson(request: FastifyRequest): Promise<void> {
     throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json.');
 }
 export function registerReceptionRoutes(app: FastifyInstance): void {
+  for (const kind of ['checklist', 'damages'] as const) {
+    app.patch('/api/v1/receptions/:receptionId/' + kind, {
+      bodyLimit: INSPECTION_BODY_LIMIT, config: { permission: 'receptions.update_open' },
+      onRequest: [noStore, requireJson],
+    }, async (request, reply) => {
+      const receptionId = parseCanonicalUuid((request.params as { receptionId?: unknown }).receptionId);
+      if (!receptionId) throw new ApiError(404, 'RECEPTION_NOT_FOUND', 'The reception was not found.');
+      const context = getTenantRequestContext(request);
+      const meta = { requestId: request.id, ipAddress: request.ip };
+      const reception = kind === 'checklist'
+        ? await writeChecklist(context, receptionId, parseChecklist(request.body), meta)
+        : await writeDamages(context, receptionId, parseDamages(request.body), meta);
+      return reply.send({ reception });
+    });
+  }
   // The sole published acceptance text; the signature echoes its documentVersion.
   // The hash stays server-owned evidence and is not part of the response.
   app.get('/api/v1/reception-acceptance-document', {

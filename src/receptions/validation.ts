@@ -5,7 +5,7 @@ import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
 
 export const RECEPTION_BODY_LIMIT = 16 * 1024;
 const NOTES_MAX = 2000;
-const VERSION_TOKEN_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u;
+export const VERSION_TOKEN_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u;
 export const EDITABLE_FIELDS = [
   ['appointmentId', 'appointment_id'], ['locationId', 'location_id'],
   ['mileageKm', 'mileage_km'], ['fuelLevelPct', 'fuel_level_pct'],

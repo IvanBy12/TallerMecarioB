@@ -32,6 +32,7 @@ const { applySignatureMutation } = require('./signature-api-mutations.cjs');
 const { applyCloseMutation } = require('./close-api-mutations.cjs');
 const { applyReceptionQueriesMutation } = require('./reception-queries-mutations.cjs');
 const { applyReceptionContractMutation } = require('./reception-contract-mutations.cjs');
+const { applyInspectionMutation } = require('./inspection-mutations.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -153,6 +154,7 @@ async function main() {
       applyCloseMutation(compiledRoot);
       applyReceptionQueriesMutation(compiledRoot);
       applyReceptionContractMutation(compiledRoot);
+      applyInspectionMutation(compiledRoot);
     }
     if (process.env.S208_LOG_MUTATION === 'request-url') {
       const file = join(compiledRoot, 'api', 'app.js');

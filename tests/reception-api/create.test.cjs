@@ -285,7 +285,8 @@ test('RBAC and unauthenticated: route permission blocks technician before handle
     };
     assert.equal(options.config.permission, permissions[path]);
   }, patch(path, options) {
-    assert.equal(path, '/api/v1/receptions/:receptionId');
+    assert.ok(['/api/v1/receptions/:receptionId', '/api/v1/receptions/:receptionId/checklist',
+      '/api/v1/receptions/:receptionId/damages'].includes(path), path);
     assert.deepEqual(options.config, { permission: 'receptions.update_open' });
   } });
   for (const actor of [a.owner, a.admin, a.advisor]) {

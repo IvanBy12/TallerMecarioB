@@ -6,7 +6,7 @@
 - **Pruebas:** `tests/reception-api/contract.test.cjs` (este contrato de punta a punta, con dependencias de privacidad de producción) más las suites por ticket: `create`, `patch`, `queries`, `signature`, `close`, `privacy-consent`, `production-privacy` (`tests/reception-api/`), `tests/reception/*` (BD) y los runners de mutación (`npm run test:reception:mutations`).
 - **Fuentes canónicas:** Arquitectura Técnica v1 §13 (convenciones, envelope de error); Diccionario 01 §15–18 y Diccionario 04/05 §1.1 (RECEPTION-CONSENT-01, D-PRIV-01…05, D-SIG-01); RBAC — Matriz v1 §6/§13; docs de ticket `docs/S3-04-5-…`, `S3-04-…`, `S3-05-…`, `S3-06-…`, `S3-07-…`.
 
-Este documento consolida el contrato HTTP actual. Las decisiones de privacidad de producción y los contratos actuales S3-05/S3-07 son autoritativos; las descripciones históricas se reconciliaron con ellos. Los endpoints marcados **NUEVO** cierran los huecos de lectura del slice (§10). No se modifican esquema, migraciones, `/me/context`, captura, cierre ni autorización de recursos.
+Este documento consolida el contrato HTTP actual. Las decisiones de privacidad de producción y los contratos actuales S3-05/S3-07 son autoritativos; las descripciones históricas se reconciliaron con ellos. Los endpoints marcados **NUEVO** cierran los huecos de lectura del slice (§10). S3 Final Gaps añade escritura de inspección (§5.10) y registra Media/R2 productivo; sin cambios de esquema, migraciones, `/me/context`, cierre ni autorización de recursos.
 
 ---
 
@@ -24,8 +24,10 @@ Este documento consolida el contrato HTTP actual. Las decisiones de privacidad d
 | 8 | `GET /api/v1/reception-acceptance-document` | `signatures.capture` (tenant) | 200 | **NUEVO** |
 | 9 | `POST /api/v1/receptions/:receptionId/signature` | `signatures.capture` (tenant) | 201 | existente (S3-05) |
 | 10 | `POST /api/v1/receptions/:receptionId/close` | `receptions.close` (tenant) | 200 | existente (S3-06) |
+| 11 | `PATCH /api/v1/receptions/:receptionId/checklist` | `receptions.update_open` (tenant) | 200 | S3 Final Gaps §5.10 |
+| 12 | `PATCH /api/v1/receptions/:receptionId/damages` | `receptions.update_open` (tenant) | 200 | S3 Final Gaps §5.10 |
 
-**No existen** (y no deben simularse en el frontend): cancelar recepción, reabrir, borrar o reemplazar recepción, revocar consentimiento, leer firma, crear/editar checklist o daños, bundle offline de aviso, `Idempotency-Key`. Ver §9 y §11. Un path inexistente responde 404 con el body por defecto de Fastify (no el envelope estable).
+**No existen** (y no deben simularse en el frontend): cancelar recepción, reabrir, borrar o reemplazar recepción, revocar consentimiento, leer firma, bundle offline de aviso, `Idempotency-Key`. Ver §9 y §11. Un path inexistente responde 404 con el body por defecto de Fastify (no el envelope estable).
 
 ## 2. Convenciones comunes
 
@@ -49,7 +51,7 @@ Este documento consolida el contrato HTTP actual. Las decisiones de privacidad d
    3. Si está vacío: `GET /api/v1/privacy-notice?purposeCode=service_provision`, **mostrar** `privacyNoticeText`, `authorizationText` y el bloque `controller`, obtener la declaración de mayoría de edad, y `POST /api/v1/customers/:customerId/privacy-consents` reenviando **exactamente** `privacyNoticeVersion` y `authorizationTextVersion` recibidos. Usar `privacyConsent.privacyConsentId` de la respuesta 201.
    4. Las finalidades opcionales (`marketing`, `image_use`, `appointment_reminders`, `service_notifications_whatsapp`) no tienen textos publicados (409 en el paso 3) y nunca condicionan la recepción.
 3. **Crear recepción:** `POST /api/v1/receptions` con `vehicleId`, `customerId`, `privacyConsentId`, `mileageKm` (+ opcionales).
-4. **Editar mientras está abierta:** `PATCH /api/v1/receptions/:receptionId` con `expectedUpdatedAt` = último `updatedAt` recibido.
+4. **Editar mientras está abierta:** `PATCH /api/v1/receptions/:receptionId` y batches `PATCH …/checklist` / `PATCH …/damages` (§5.10), con `expectedUpdatedAt` = último `updatedAt` recibido.
 5. **Firma de aceptación:** `GET /api/v1/reception-acceptance-document`, mostrar `text`, subir la imagen de firma como media `signature` (rutas productivas registradas; gate externo pendiente, §11) y `POST …/signature` con el `documentVersion` mostrado.
 6. **Cerrar:** `POST /api/v1/receptions/:receptionId/close` (sin body) → recepción `closed` + orden de servicio `reception`.
 
@@ -181,7 +183,7 @@ Sólo scope tenant (owner/admin/asesor); un técnico recibe 403 aunque tenga asi
 `200 { "reception": … }`:
 - **Scope tenant:** todos los campos de `ReceptionDto` (con `status` `open|closed` y `closedAt` según corresponda) + `checklist` + `damages` + `signature` + `serviceOrder`.
 - **Scope assigned** (técnico líder/soporte con asignación activa a la orden de esa recepción): sólo `receptionId`, `vehicleId`, `mileageKm`, `fuelLevelPct`, `status`, `receivedAt`, `closedAt`, `checklist`, `damages`, `signature`, `serviceOrder`.
-- `checklist[]`: `checkItemId`, `code`, `label`, `status` (`ok|issue|not_checked|not_applicable`), `notes`, `createdAt`; orden code, id. `damages[]`: `damageId`, `zoneCode`, `damageType`, `severity` (`minor|moderate|severe`), `description`, `createdAt`; orden creación, id. **No existen endpoints de escritura** para ambos (§11-B3): vía API llegan vacíos.
+- `checklist[]`: `checkItemId`, `code`, `label`, `status` (`ok|issue|not_checked|not_applicable`), `notes`, `createdAt`; orden code, id. `damages[]`: `damageId`, `zoneCode`, `damageType`, `severity` (`minor|moderate|severe`), `description`, `createdAt`; orden creación, id. Escritura de ambos mediante §5.10; GET conserva las vistas tenant/assigned y sus DTOs.
 
 Ambas vistas incluyen `signature`: null o `{ signatureId, documentVersion, signedAt }`, y `serviceOrder`: null o `{ id, orderNumber, status }`. `orderNumber` es string decimal exacto (PostgreSQL `order_number::text`), incluso fuera del rango seguro de JS. Abierta sin firma: ambos null; abierta firmada: sólo firma; cerrada: ambos. No se incluyen identidad del firmante, media de firma, hashes ni detalles adicionales de la orden. Estados inconsistentes fallan con 500 `INTERNAL_ERROR` sin filtrar el diagnóstico interno; véase S3-07.
 
@@ -230,6 +232,20 @@ Errores: 400; 404 `RECEPTION_NOT_FOUND`; 409 `RECEPTION_SIGNATURE_REQUIRED`; 409
 
 Decisión canónica vigente (DOC_CONFLICT-01, aceptada en S3-06/S3-07 y en el gate final de Sprint 3): el ciclo operativo de S3 es `open → closed`. `cancelled` existe sólo como valor histórico del esquema. No hay endpoint, permiso (`receptions.cancel` no existe en la matriz RBAC) ni filtro de listado para cancelación; tampoco reapertura (`receptions.reopen` existe en RBAC pero sin comando). Una recepción abierta por error se corrige con PATCH o se cierra; la lógica de anulación queda para una decisión de producto futura (§11-B2).
 
+### 5.10 Escritura de inspección — contrato congelado S3 Final Gaps
+
+- `PATCH /api/v1/receptions/:receptionId/checklist`:
+  `{ "expectedUpdatedAt": "YYYY-MM-DDTHH:MM:SS.ffffffZ", "items": [{ "code": "lights", "label": "Luces", "status": "ok", "notes": null }] }`.
+  Batch 1…100. Cada item requiere exactamente code/label/status/notes; status `ok|issue|not_checked|not_applicable`. Upsert por `(tenant_id,reception_id,code)` conserva id/createdAt; códigos omitidos se conservan. Code repetido en batch → 400. Code sensible a mayúsculas tras NFC/trim; no se renombra ni elimina.
+- `PATCH /api/v1/receptions/:receptionId/damages`:
+  `{ "expectedUpdatedAt": "YYYY-MM-DDTHH:MM:SS.ffffffZ", "damages": [{ "operation": "create", "zoneCode": "front", "damageType": "scratch", "severity": "minor", "description": null }, { "operation": "update", "damageId": "uuid", "zoneCode": "rear", "damageType": "dent", "severity": "moderate", "description": "Observación" }] }`.
+  Batch 1…100. create requiere exactamente operation/zoneCode/damageType/severity/description, sin ID cliente; update añade damageId obligatorio. No elimina/reemplaza filas: IDs y createdAt conservados. Severity `minor|moderate|severe`. damageId duplicado → 400. ID inexistente/de otra recepción/tenant → 404 `DAMAGE_NOT_FOUND`, mismo mensaje y rollback completo.
+- Límites: body ≤64 KiB; code/zoneCode/damageType ≤64 code points, label ≤160 (schema); notas/descripción nullable ≤2000 (límite HTTP como notas de recepción). Unicode válido, NFC, CRLF/CR→LF, trim; sin TAB/controles C0-C1/bidi. Identificadores/label vacíos rechazados; notas/descripción vacías → null. Sin catálogo de códigos inventado. Todas las propiedades son obligatorias; keys extra, enums/UUIDs inválidos, batches vacíos/excesivos → 400 `REQUEST_VALIDATION_FAILED`.
+- Permiso tenant `receptions.update_open` para owner/admin/service_advisor; technician assigned → 403 `PERMISSION_DENIED` antes del body. Tenant/actor server-owned.
+- Una transacción TenantContext: padre tenant-scoped `FOR NO KEY UPDATE` → open → comparación textual expectedUpdatedAt → hijos → updatedAt estrictamente creciente en PostgreSQL → auditoría → commit. Cada batch aceptado consume versión incluso si repite valores; repetir token → 409 `RESOURCE_VERSION_CONFLICT`. Frente a close, gana quien obtiene el lock primero; escritura posterior al close → 409 `RECEPTION_NOT_EDITABLE` antes del token. Trigger 0019 preservado.
+- Éxito 200 `{ "reception": ReceptionDetailDto }`: mismo detalle tenant §5.4, arrays completos y nuevo updatedAt; GET refleja lo confirmado. 404 `RECEPTION_NOT_FOUND` ajeno/inexistente/malformado indistinguible. Envelope/no-store/413/415/JSON malformado según §2.
+- Auditoría atómica `reception.checklist_updated` / `reception.damages_updated`, entidad reception, actor/request/IP como PATCH, metadata sólo count. Sin notas/descripción/PII, secretos ni URLs. Rollback sin auditoría de éxito.
+
 ## 6. Idempotencia y política de reintentos
 
 No se usa `Idempotency-Key` en ninguno de estos endpoints (el header se ignora; probado). Cada comando se protege con su clave natural, y una respuesta perdida se recupera así:
@@ -239,6 +255,7 @@ No se usa `Idempotency-Key` en ninguno de estos endpoints (el header se ignora; 
 | §4.3 captura | Seguro | 409 `PRIVACY_CONSENT_ALREADY_GRANTED` | §4.1 devuelve el mismo `privacyConsentId` |
 | §5.2 create | Seguro (mismo vehículo) | 409 `RECEPTION_ALREADY_OPEN` | `GET /receptions?vehicleId=…&status=open` → la recepción creada |
 | §5.5 PATCH | Seguro (OCC) | 409 `RESOURCE_VERSION_CONFLICT` | `GET /receptions/:id`; si los valores ya están aplicados, terminado; si no, reintentar con el `updatedAt` nuevo |
+| §5.10 inspección | Seguro (OCC, reenviar exactamente el mismo batch/token) | 409 `RESOURCE_VERSION_CONFLICT` | GET devuelve arrays e IDs confirmados; reconciliar antes de generar otro create de daño con token nuevo |
 | §5.7 firma | Seguro | 409 `RECEPTION_ALREADY_SIGNED` | Consultar el resumen de firma en §5.4 y continuar con el cierre |
 | §5.8 close | **Idempotente** | 200 con el **mismo** body (orden, número y timestamps idénticos; sin nueva auditoría) | — |
 | GETs | Seguros | — | — |
@@ -289,7 +306,7 @@ T = scope tenant; A = scope assigned. `receptions.read` no otorga `customers.rea
 
 - **B1 — Wiring Media/R2 resuelto:** el entrypoint productivo registra exactamente `registerMediaRoutes` y exige las cinco variables R2 antes de abrir el pool; una configuración incompleta falla con `R2_CONFIGURATION_MISSING`. Endpoints: `POST /api/v1/media/upload-sessions`, `POST /api/v1/media/upload-sessions/:id/complete`, `GET /api/v1/media/:id/download-url`. Se conservan RBAC tenant, RLS, rate limit de upload, URLs firmadas y PUT write-once `If-None-Match: *`. **R2 External Gate permanece OPEN**: faltan tres ejecuciones externas consecutivas sobre el SHA final; resolver el wiring no cierra ese gate ni Sprint 3.
 - **B2 — Cancelación/anulación:** si S3-B08 la necesita, requiere decisión de producto + permiso RBAC nuevo + transición en el trigger de ciclo de vida (migración). Hoy no existe (§5.9).
-- **B3 — Checklist y daños:** el detalle los devuelve pero no hay endpoints de escritura en S3 Track A. Si S3-B08 los captura, falta su contrato.
+- **B3 — Checklist y daños resuelto en backend:** contrato §5.10 y rutas batch con IDs estables, OCC, RBAC tenant y auditoría atómica. Frontend checklist/daños, E2E mobile frontend+backend y cierre documental siguen pendientes; no se declara Sprint 3 PASSED.
 - No bloqueantes para el slice: revocación por HTTP (sin permiso canónico), bundle/sincronización offline (ADR-005), lectura independiente de la firma. El detalle de recepción ya incluye su resumen mínimo (§5.4).
 
 ## 12. Preservación de evidencia y reconciliación
