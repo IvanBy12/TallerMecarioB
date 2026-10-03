@@ -57,7 +57,7 @@ const ALLOWLIST_MATCHES = new Set([
   'docker-compose.staging.yml:25',
   'docker-compose.staging.yml:34',
   'docker-compose.staging.yml:44',
-  'docker-compose.staging.yml:64',
+  'docker-compose.staging.yml:70',
 ]);
 
 const SKIP_EXTENSIONS = new Set([

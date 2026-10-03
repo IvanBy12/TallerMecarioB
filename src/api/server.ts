@@ -1,4 +1,4 @@
-import { buildApi, getTenantRequestContext } from './app.js';
+import { buildApi, getTenantRequestContext, type BuildApiOptions } from './app.js';
 import { runtimeDatabase } from '../platform/runtime-database.js';
 import type {
   IdentityProvider,
@@ -24,6 +24,8 @@ import { registerCustomerRoutes } from '../customers/routes.js';
 import { registerVehicleRoutes } from '../vehicles/routes.js';
 import { registerReceptionRoutes } from '../receptions/routes.js';
 import { registerPrivacyConsentRoutes } from '../privacy/routes.js';
+import { loadR2ConfigFromEnv, type R2Config } from '../media/r2.js';
+import { registerMediaRoutes } from '../media/routes.js';
 
 /**
  * Used ONLY when no Clerk variable is configured at all (e.g. the local
@@ -48,21 +50,19 @@ function parseCorsAllowedOrigins(): string[] {
   return raw.split(',').map((origin) => origin.trim()).filter(Boolean);
 }
 
-async function main(): Promise<void> {
+export async function buildProductionApi(
+  options: Pick<BuildApiOptions, 'database' | 'identityProvider' | 'rateLimit' | 'logStream'>,
+  r2: R2Config = loadR2ConfigFromEnv(),
+) {
+  const { database } = options;
   const wompi = loadWompiConfig();
   const clerk = clerkConfigured()
     ? { config: loadClerkAuthenticationConfig(), webhookSigningSecret: loadClerkWebhookSigningSecret() }
     : null;
   // S1-04: any invitation variable present => token secret + accept URL + sender are mandatory.
   const invitationConfig = invitationsConfigured() ? loadInvitationApiConfig() : null;
-  const port =Number(process.env.PORT ?? 3000);
-  const host = process.env.HOST ?? '0.0.0.0';
-
-  const database = await runtimeDatabase('api', Number(process.env.DB_POOL_MAX ?? 10));
-
-  const app = await buildApi({
-    database,
-    identityProvider: clerk ? new ClerkIdentityProvider(clerk.config) : new UnimplementedIdentityProvider(),
+  return buildApi({
+    ...options,
     corsAllowedOrigins: parseCorsAllowedOrigins(),
     registerPublicRoutes(server) {
       if (wompi.enabled) {
@@ -93,6 +93,7 @@ async function main(): Promise<void> {
       // Privacy reads and capture share the production catalog and controller configuration.
       registerPrivacyConsentRoutes(server);
       registerReceptionRoutes(server);
+      registerMediaRoutes(server, r2);
       // Deploy-smoke-test only: proves the full protected-route pipeline
       // (rate limit -> auth -> TenantContext transaction -> RBAC) is wired
       // end to end in the deployed artifact. Not a product endpoint.
@@ -103,6 +104,18 @@ async function main(): Promise<void> {
     },
   });
 
+}
+
+async function main(): Promise<void> {
+  // R2 is mandatory: reject incomplete configuration before opening a DB pool.
+  const r2 = loadR2ConfigFromEnv();
+  const database = await runtimeDatabase('api', Number(process.env.DB_POOL_MAX ?? 10));
+  const clerk = clerkConfigured() ? loadClerkAuthenticationConfig() : null;
+  const app = await buildProductionApi({ database,
+    identityProvider: clerk ? new ClerkIdentityProvider(clerk) : new UnimplementedIdentityProvider(),
+  }, r2);
+  const port = Number(process.env.PORT ?? 3000);
+  const host = process.env.HOST ?? '0.0.0.0';
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
@@ -122,7 +135,7 @@ async function main(): Promise<void> {
   process.stdout.write(`api listening on ${host}:${port}\n`);
 }
 
-main().catch((error) => {
+if (require.main === module) main().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
 });

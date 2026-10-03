@@ -51,6 +51,12 @@ services:
       CLERK_PUBLISHABLE_KEY: ${STAGING_CLERK_PUBLISHABLE_KEY}
       CLERK_WEBHOOK_SIGNING_SECRET: ${STAGING_CLERK_WEBHOOK_SIGNING_SECRET}
       CLERK_AUTHORIZED_PARTIES: ${STAGING_CLERK_AUTHORIZED_PARTIES}
+      # Synthetic, non-routable R2 for the hermetic deploy drill; no real credentials.
+      R2_ENDPOINT: https://r2.invalid
+      R2_REGION: auto
+      R2_BUCKET: staging-hermetic
+      R2_ACCESS_KEY_ID: ${STAGING_R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${STAGING_R2_SECRET_ACCESS_KEY}
     ports:
       - "${STAGING_API_HOST_PORT}:3000"
     depends_on:

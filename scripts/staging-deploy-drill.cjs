@@ -140,6 +140,8 @@ async function main() {
       `STAGING_RUNTIME_DB_PASSWORD=${runtimePassword}`,
       `STAGING_API_IMAGE=${imageGood}`,
       `STAGING_API_HOST_PORT=${apiHostPort}`,
+      `STAGING_R2_ACCESS_KEY_ID=synthetic-${randomUUID()}`,
+      `STAGING_R2_SECRET_ACCESS_KEY=synthetic-${randomUUID()}`,
       `STAGING_CLERK_JWT_KEY=${publicPem}`,
       `STAGING_CLERK_ISSUER_URL=${identity.issuer}`,
       `STAGING_CLERK_SECRET_KEY=${identity.secretKey}`,

@@ -50,7 +50,7 @@ Este documento consolida el contrato HTTP actual. Las decisiones de privacidad d
    4. Las finalidades opcionales (`marketing`, `image_use`, `appointment_reminders`, `service_notifications_whatsapp`) no tienen textos publicados (409 en el paso 3) y nunca condicionan la recepción.
 3. **Crear recepción:** `POST /api/v1/receptions` con `vehicleId`, `customerId`, `privacyConsentId`, `mileageKm` (+ opcionales).
 4. **Editar mientras está abierta:** `PATCH /api/v1/receptions/:receptionId` con `expectedUpdatedAt` = último `updatedAt` recibido.
-5. **Firma de aceptación:** `GET /api/v1/reception-acceptance-document`, mostrar `text`, subir la imagen de firma como media `signature` (**bloqueado en producción**, §11-B1) y `POST …/signature` con el `documentVersion` mostrado.
+5. **Firma de aceptación:** `GET /api/v1/reception-acceptance-document`, mostrar `text`, subir la imagen de firma como media `signature` (rutas productivas registradas; gate externo pendiente, §11) y `POST …/signature` con el `documentVersion` mostrado.
 6. **Cerrar:** `POST /api/v1/receptions/:receptionId/close` (sin body) → recepción `closed` + orden de servicio `reception`.
 
 ## 4. Privacidad y consentimiento
@@ -287,7 +287,7 @@ T = scope tenant; A = scope assigned. `receptions.read` no otorga `customers.rea
 
 ## 11. Decisiones o dependencias todavía bloqueantes
 
-- **B1 — Media/R2 en producción (BLOQUEA firma y cierre en producción):** `registerMediaRoutes` no está registrado en `src/api/server.ts` y el R2 External Gate sigue abierto (`SPRINT-3-BACKEND-FINAL-QUALITY-GATE.md`). Sin upload de media `signature` no hay firma y el cierre responde 409 `RECEPTION_SIGNATURE_REQUIRED`. El contrato de upload-session/complete/download no forma parte de este documento. Las pruebas usan media insertada por fixture.
+- **B1 — Wiring Media/R2 resuelto:** el entrypoint productivo registra exactamente `registerMediaRoutes` y exige las cinco variables R2 antes de abrir el pool; una configuración incompleta falla con `R2_CONFIGURATION_MISSING`. Endpoints: `POST /api/v1/media/upload-sessions`, `POST /api/v1/media/upload-sessions/:id/complete`, `GET /api/v1/media/:id/download-url`. Se conservan RBAC tenant, RLS, rate limit de upload, URLs firmadas y PUT write-once `If-None-Match: *`. **R2 External Gate permanece OPEN**: faltan tres ejecuciones externas consecutivas sobre el SHA final; resolver el wiring no cierra ese gate ni Sprint 3.
 - **B2 — Cancelación/anulación:** si S3-B08 la necesita, requiere decisión de producto + permiso RBAC nuevo + transición en el trigger de ciclo de vida (migración). Hoy no existe (§5.9).
 - **B3 — Checklist y daños:** el detalle los devuelve pero no hay endpoints de escritura en S3 Track A. Si S3-B08 los captura, falta su contrato.
 - No bloqueantes para el slice: revocación por HTTP (sin permiso canónico), bundle/sincronización offline (ADR-005), lectura independiente de la firma. El detalle de recepción ya incluye su resumen mínimo (§5.4).
