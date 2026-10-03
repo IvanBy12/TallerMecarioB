@@ -2,10 +2,12 @@
 const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { join } = require('node:path');
+const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
+const { tmpdir } = require('node:os');
 const { Writable } = require('node:stream');
 const { test, after } = require('node:test');
 const h = require('../crm-api/helpers.cjs');
-const { buildProductionApi } = h.load('api/server.js');
+const { buildProductionApi, loadProductionApiConfig } = h.load('api/server.js');
 const { ClerkIdentityProvider } = h.load('identity/clerk/clerk-identity-provider.js');
 const { assert } = h;
 after(() => h.closeAll());
@@ -23,13 +25,63 @@ test('production entrypoint fails closed for missing or every partial R2 configu
     assert.equal(child.stdout, '');
   }
 });
+test('real entrypoint validates every integration before calling runtimeDatabase or opening a pool', () => {
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (/^(R2_|WOMPI_|CLERK_|NEXT_PUBLIC_CLERK_|MEMBERSHIP_INVITATION_|RESEND_|DATABASE_URL$)/u.test(name)) delete env[name];
+  }
+  const clerk = h.clerkAuthenticationConfig();
+  const clerkEnv = { CLERK_SECRET_KEY: clerk.secretKey, CLERK_PUBLISHABLE_KEY: clerk.publishableKey,
+    CLERK_JWT_KEY: clerk.jwtKey, CLERK_AUTHORIZED_PARTIES: clerk.authorizedParties.join(','),
+    CLERK_WEBHOOK_SIGNING_SECRET: h.newWebhookSecret() };
+  const invitationEnv = { MEMBERSHIP_INVITATION_TOKEN_SECRET: Buffer.from(randomUUID()).toString('base64'),
+    MEMBERSHIP_INVITATION_ACCEPT_URL: 'https://app.invalid/invite',
+    MEMBERSHIP_INVITATION_EMAIL_FROM: 'invites@example.test' };
+  const cases = [
+    ...Object.keys(synthetic).map((name) => [{ ...synthetic, [name]: ' ' }, 'R2_CONFIGURATION_MISSING']),
+    ...['not-a-url', 'http://r2.invalid'].map((endpoint) =>
+      [{ ...synthetic, R2_ENDPOINT: endpoint }, 'R2_CONFIGURATION_MISSING']),
+    [{ ...synthetic, WOMPI_ENABLED: 'invalid' }, 'WOMPI_ENABLED_INVALID'],
+    [{ ...synthetic, WOMPI_ENABLED: 'true' }, 'WOMPI_PUBLIC_KEY_REQUIRED'],
+    [{ ...synthetic, CLERK_SECRET_KEY: 'invalid' },
+      'CLERK_CONFIGURATION_INVALID CLERK_SECRET_KEY: has an unexpected format'],
+    ...['CLERK_JWT_KEY', 'CLERK_AUTHORIZED_PARTIES', 'CLERK_WEBHOOK_SIGNING_SECRET'].map((name) =>
+      [{ ...synthetic, ...clerkEnv, [name]: '' }, 'CLERK_CONFIGURATION_INVALID ' + name + ': is required']),
+    ...Object.keys(invitationEnv).map((name) => [{ ...synthetic, ...invitationEnv, [name]: '' },
+      'MEMBERSHIP_INVITATION_CONFIGURATION_INVALID ' + name + ': is required']),
+  ];
+  const directory = mkdtempSync(join(tmpdir(), 'tallermecario-startup-'));
+  const preload = join(directory, 'pool-trap.cjs');
+  // Instrument the DB boundary in the actual server.js process. A call fails the assertion,
+  // even if production code swallowed a DB error and later reported a config error.
+  writeFileSync(preload, 'require(' + JSON.stringify(join(process.env.TEST_MODULE_ROOT,
+    'platform/runtime-database.js')) + ').runtimeDatabase = async () => {'
+    + 'process.stderr.write("DATABASE_POOL_OPENED\\n");'
+    + 'throw new Error("DATABASE_CONFIGURATION_REQUIRED"); };');
+  const run = (override) => spawnSync(process.execPath,
+    ['--require', preload, join(process.env.TEST_MODULE_ROOT, 'api/server.js')],
+    { env: { ...env, ...override }, encoding: 'utf8', timeout: 5000 });
+  try {
+    for (const [override, expected] of cases) {
+      const child = run(override);
+      assert.equal(child.status, 1);
+      assert.equal(child.stderr.trim(), expected);
+      assert.equal(child.stdout, '');
+    }
+    const valid = run({ ...synthetic, ...clerkEnv, ...invitationEnv });
+    assert.equal(valid.status, 1);
+    assert.equal(valid.stderr.trim(), 'DATABASE_POOL_OPENED\nDATABASE_CONFIGURATION_REQUIRED',
+      'valid environment reaches the instrumented DB boundary exactly once');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('production route composition registers all media paths, preserves RBAC, tenant boundary and log privacy', async () => {
-  Object.assign(process.env, synthetic);
+  const config = loadProductionApiConfig({ ...process.env, ...synthetic });
   const chunks = [];
   const logStream = new Writable({ write(chunk, _enc, done) { chunks.push(chunk.toString()); done(); } });
   const app = await buildProductionApi({ database: h.apiPool,
     identityProvider: new ClerkIdentityProvider(h.clerkAuthenticationConfig(), { usersApi: h.clerkUsers }),
-    logStream, rateLimit: { max: 100000, timeWindow: '1 minute' } });
+    logStream, rateLimit: { max: 100000, timeWindow: '1 minute' } }, config);
   try {
     await app.ready();
     for (const [method, url] of [['POST', '/api/v1/media/upload-sessions'],

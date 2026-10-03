@@ -24,7 +24,7 @@ import { registerCustomerRoutes } from '../customers/routes.js';
 import { registerVehicleRoutes } from '../vehicles/routes.js';
 import { registerReceptionRoutes } from '../receptions/routes.js';
 import { registerPrivacyConsentRoutes } from '../privacy/routes.js';
-import { loadR2ConfigFromEnv, type R2Config } from '../media/r2.js';
+import { loadR2ConfigFromEnv } from '../media/r2.js';
 import { registerMediaRoutes } from '../media/routes.js';
 
 /**
@@ -44,26 +44,35 @@ class UnimplementedIdentityProvider implements IdentityProvider {
   }
 }
 
-function parseCorsAllowedOrigins(): string[] {
-  const raw = process.env.CORS_ALLOWED_ORIGINS;
+function parseCorsAllowedOrigins(env: NodeJS.ProcessEnv): string[] {
+  const raw = env.CORS_ALLOWED_ORIGINS;
   if (!raw) return [];
   return raw.split(',').map((origin) => origin.trim()).filter(Boolean);
 }
 
-export async function buildProductionApi(
-  options: Pick<BuildApiOptions, 'database' | 'identityProvider' | 'rateLimit' | 'logStream'>,
-  r2: R2Config = loadR2ConfigFromEnv(),
-) {
-  const { database } = options;
-  const wompi = loadWompiConfig();
-  const clerk = clerkConfigured()
-    ? { config: loadClerkAuthenticationConfig(), webhookSigningSecret: loadClerkWebhookSigningSecret() }
+/** Environment-only configuration, validated once before any PostgreSQL pool opens. */
+export function loadProductionApiConfig(env: NodeJS.ProcessEnv = process.env) {
+  const r2 = loadR2ConfigFromEnv(env);
+  const wompi = loadWompiConfig(env);
+  const clerk = clerkConfigured(env)
+    ? { config: loadClerkAuthenticationConfig(env), webhookSigningSecret: loadClerkWebhookSigningSecret(env) }
     : null;
   // S1-04: any invitation variable present => token secret + accept URL + sender are mandatory.
-  const invitationConfig = invitationsConfigured() ? loadInvitationApiConfig() : null;
+  const invitationConfig = invitationsConfigured(env) ? loadInvitationApiConfig(env) : null;
+  return { r2, wompi, clerk, invitationConfig, corsAllowedOrigins: parseCorsAllowedOrigins(env) };
+}
+
+export type ProductionApiConfig = ReturnType<typeof loadProductionApiConfig>;
+
+export async function buildProductionApi(
+  options: Pick<BuildApiOptions, 'database' | 'identityProvider' | 'rateLimit' | 'logStream'>,
+  config: ProductionApiConfig,
+) {
+  const { database } = options;
+  const { r2, wompi, clerk, invitationConfig, corsAllowedOrigins } = config;
   return buildApi({
     ...options,
-    corsAllowedOrigins: parseCorsAllowedOrigins(),
+    corsAllowedOrigins,
     registerPublicRoutes(server) {
       if (wompi.enabled) {
         registerWompiWebhookRoute(server, {
@@ -107,13 +116,12 @@ export async function buildProductionApi(
 }
 
 async function main(): Promise<void> {
-  // R2 is mandatory: reject incomplete configuration before opening a DB pool.
-  const r2 = loadR2ConfigFromEnv();
+  const config = loadProductionApiConfig();
   const database = await runtimeDatabase('api', Number(process.env.DB_POOL_MAX ?? 10));
-  const clerk = clerkConfigured() ? loadClerkAuthenticationConfig() : null;
+  const clerk = config.clerk?.config;
   const app = await buildProductionApi({ database,
     identityProvider: clerk ? new ClerkIdentityProvider(clerk) : new UnimplementedIdentityProvider(),
-  }, r2);
+  }, config);
   const port = Number(process.env.PORT ?? 3000);
   const host = process.env.HOST ?? '0.0.0.0';
   let shuttingDown = false;
