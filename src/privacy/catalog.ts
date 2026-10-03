@@ -108,6 +108,22 @@ function assertPublishable(version: string, text: string): void {
     throw new PrivacyCatalogDefinitionError('text is not canonical');
 }
 
+/**
+ * The exact versions presented for NEW online captures (the "aviso vigente" of
+ * Diccionario 05 §1.1 step 3). An explicit pointer, never inferred from the
+ * catalog's contents: publishing v2 means adding it to the catalog AND moving
+ * this pointer. Older published versions stay capturable as exact evidence.
+ */
+export interface PrivacyDocumentPresentation {
+  readonly privacyNoticeVersion: string;
+  readonly authorizationTextVersions: Readonly<Partial<Record<PrivacyPurposeCode, string>>>;
+}
+
+export const PRODUCTION_PRIVACY_DOCUMENT_PRESENTATION: PrivacyDocumentPresentation = Object.freeze({
+  privacyNoticeVersion: 'privacy_notice_es-CO_v1',
+  authorizationTextVersions: Object.freeze({ service_provision: 'service_provision_es-CO_v1' }),
+});
+
 /** Approved Sprint 3 v1 copy; any text change requires a new version. */
 export const PRODUCTION_PRIVACY_DOCUMENT_CATALOG = new PrivacyDocumentCatalog({
   "notices": [

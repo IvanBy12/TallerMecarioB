@@ -207,3 +207,13 @@ Independent SHA-256 pins (literal document UTF-8 bytes):
 Regression gate results for this publication are recorded in
 SPRINT-3-BACKEND-FINAL-QUALITY-GATE.md. ADR-005 still owns bundle validity/grace
 policy and the offline sync contract; no production offline route is registered.
+
+## HTTP presentation and returning-customer reads (2026-10-02)
+
+See [reception-contract.md](api/reception-contract.md) for the reconciled HTTP
+contract. GET /privacy-notice uses an explicit production version pointer,
+the existing catalog and the same currentControllerNotice builder as capture.
+GET /customers/:customerId/privacy-consents requires status=granted and lists
+only granted, unrevoked evidence under privacy_consents.read and TenantContext.
+Both are no-store, pure reads; evidence capture, hashing, RLS and constraints
+remain unchanged. No migration is required.

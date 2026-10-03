@@ -270,10 +270,13 @@ test('RBAC and unauthenticated: route permission blocks technician before handle
   const { a } = await h.twoTenants();
   const { c, v, pc } = await scenario(a);
   registerReceptionRoutes({ get(path, options) {
-    assert.ok(['/api/v1/receptions', '/api/v1/receptions/:receptionId'].includes(path));
-    assert.deepEqual(options.config, path.endsWith(':receptionId')
-      ? { permission: 'receptions.read', permissionScope: 'resource' }
-      : { permission: 'receptions.read' });
+    const configs = {
+      '/api/v1/reception-acceptance-document': { permission: 'signatures.capture' },
+      '/api/v1/receptions': { permission: 'receptions.read' },
+      '/api/v1/receptions/:receptionId': { permission: 'receptions.read', permissionScope: 'resource' },
+    };
+    assert.ok(Object.hasOwn(configs, path), path);
+    assert.deepEqual(options.config, configs[path]);
   }, post(path, options) {
     const permissions = {
       '/api/v1/receptions': 'receptions.create',
