@@ -84,6 +84,7 @@ async function main() {
     health_ready: 'FAIL',
     health_readiness: 'FAIL',
     smoke: 'FAIL',
+    production_media_auth: 'FAIL',
     crm_e2e: 'FAIL',
     reception_e2e: 'FAIL',
     reception_rbac: 'FAIL',
@@ -140,6 +141,8 @@ async function main() {
       `STAGING_RUNTIME_DB_PASSWORD=${runtimePassword}`,
       `STAGING_API_IMAGE=${imageGood}`,
       `STAGING_API_HOST_PORT=${apiHostPort}`,
+      `STAGING_R2_ACCESS_KEY_ID=synthetic-${randomUUID()}`,
+      `STAGING_R2_SECRET_ACCESS_KEY=synthetic-${randomUUID()}`,
       `STAGING_CLERK_JWT_KEY=${publicPem}`,
       `STAGING_CLERK_ISSUER_URL=${identity.issuer}`,
       `STAGING_CLERK_SECRET_KEY=${identity.secretKey}`,
@@ -263,6 +266,15 @@ async function main() {
     if (whoami.status !== 401 || whoami.body?.error?.code !== 'AUTHENTICATION_REQUIRED') {
       throw new Error('SMOKE_PROTECTED_ROUTE_DID_NOT_401');
     }
+    const media = await fetchJson(`${baseUrl}/api/v1/media/upload-sessions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.notEqual(media.status, 404, 'real server.js must register the media upload route');
+    assert.notEqual(media.status, 500, 'media auth must not fail with an internal server error');
+    assert.equal(media.status, 401, 'unauthenticated media upload must return 401');
+    assert.equal(media.body?.error?.code, 'AUTHENTICATION_REQUIRED');
+    process.stdout.write('PRODUCTION_MEDIA_AUTH_PASS server.js POST /api/v1/media/upload-sessions 401 AUTHENTICATION_REQUIRED (no R2 PUT)\n');
+    report.production_media_auth = 'PASS';
     const nosniff = whoami.headers.get('x-content-type-options');
     if (nosniff !== 'nosniff') throw new Error('SMOKE_SECURITY_HEADERS_MISSING');
     process.stdout.write('SMOKE_PASS (live, protected route 401s, security headers present)\n');
@@ -278,7 +290,9 @@ async function main() {
         ['logs', '--no-color', '--no-log-prefix', 'api'], { capture: true });
       if (logs.status !== 0) throw new Error('STAGING_LOG_CAPTURE_FAILED');
       return completionEvents(logs.stdout).some((line) =>
-        line.request_id === whoami.body.error.request_id) ? logs : null;
+        line.request_id === whoami.body.error.request_id)
+        && completionEvents(logs.stdout).some((line) =>
+          line.request_id === media.body.error.request_id) ? logs : null;
     }, { timeoutMs: 10000, intervalMs: 250, label: 'SMOKE_COMPLETION_LOG' });
     const baselineCompletions = assertLogPrivacy(baselineLogs.stdout, [], 0);
     const e2e = await runCrmE2e(admin, baseUrl, identity, tenants, fetch,

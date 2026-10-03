@@ -1,4 +1,4 @@
-import { buildApi, getTenantRequestContext } from './app.js';
+import { buildApi, getTenantRequestContext, type BuildApiOptions } from './app.js';
 import { runtimeDatabase } from '../platform/runtime-database.js';
 import type {
   IdentityProvider,
@@ -24,6 +24,8 @@ import { registerCustomerRoutes } from '../customers/routes.js';
 import { registerVehicleRoutes } from '../vehicles/routes.js';
 import { registerReceptionRoutes } from '../receptions/routes.js';
 import { registerPrivacyConsentRoutes } from '../privacy/routes.js';
+import { loadR2ConfigFromEnv } from '../media/r2.js';
+import { registerMediaRoutes } from '../media/routes.js';
 
 /**
  * Used ONLY when no Clerk variable is configured at all (e.g. the local
@@ -42,28 +44,35 @@ class UnimplementedIdentityProvider implements IdentityProvider {
   }
 }
 
-function parseCorsAllowedOrigins(): string[] {
-  const raw = process.env.CORS_ALLOWED_ORIGINS;
+function parseCorsAllowedOrigins(env: NodeJS.ProcessEnv): string[] {
+  const raw = env.CORS_ALLOWED_ORIGINS;
   if (!raw) return [];
   return raw.split(',').map((origin) => origin.trim()).filter(Boolean);
 }
 
-async function main(): Promise<void> {
-  const wompi = loadWompiConfig();
-  const clerk = clerkConfigured()
-    ? { config: loadClerkAuthenticationConfig(), webhookSigningSecret: loadClerkWebhookSigningSecret() }
+/** Environment-only configuration, validated once before any PostgreSQL pool opens. */
+export function loadProductionApiConfig(env: NodeJS.ProcessEnv = process.env) {
+  const r2 = loadR2ConfigFromEnv(env);
+  const wompi = loadWompiConfig(env);
+  const clerk = clerkConfigured(env)
+    ? { config: loadClerkAuthenticationConfig(env), webhookSigningSecret: loadClerkWebhookSigningSecret(env) }
     : null;
   // S1-04: any invitation variable present => token secret + accept URL + sender are mandatory.
-  const invitationConfig = invitationsConfigured() ? loadInvitationApiConfig() : null;
-  const port =Number(process.env.PORT ?? 3000);
-  const host = process.env.HOST ?? '0.0.0.0';
+  const invitationConfig = invitationsConfigured(env) ? loadInvitationApiConfig(env) : null;
+  return { r2, wompi, clerk, invitationConfig, corsAllowedOrigins: parseCorsAllowedOrigins(env) };
+}
 
-  const database = await runtimeDatabase('api', Number(process.env.DB_POOL_MAX ?? 10));
+export type ProductionApiConfig = ReturnType<typeof loadProductionApiConfig>;
 
-  const app = await buildApi({
-    database,
-    identityProvider: clerk ? new ClerkIdentityProvider(clerk.config) : new UnimplementedIdentityProvider(),
-    corsAllowedOrigins: parseCorsAllowedOrigins(),
+export async function buildProductionApi(
+  options: Pick<BuildApiOptions, 'database' | 'identityProvider' | 'rateLimit' | 'logStream'>,
+  config: ProductionApiConfig,
+) {
+  const { database } = options;
+  const { r2, wompi, clerk, invitationConfig, corsAllowedOrigins } = config;
+  return buildApi({
+    ...options,
+    corsAllowedOrigins,
     registerPublicRoutes(server) {
       if (wompi.enabled) {
         registerWompiWebhookRoute(server, {
@@ -93,6 +102,7 @@ async function main(): Promise<void> {
       // Privacy reads and capture share the production catalog and controller configuration.
       registerPrivacyConsentRoutes(server);
       registerReceptionRoutes(server);
+      registerMediaRoutes(server, r2);
       // Deploy-smoke-test only: proves the full protected-route pipeline
       // (rate limit -> auth -> TenantContext transaction -> RBAC) is wired
       // end to end in the deployed artifact. Not a product endpoint.
@@ -103,6 +113,17 @@ async function main(): Promise<void> {
     },
   });
 
+}
+
+async function main(): Promise<void> {
+  const config = loadProductionApiConfig();
+  const database = await runtimeDatabase('api', Number(process.env.DB_POOL_MAX ?? 10));
+  const clerk = config.clerk?.config;
+  const app = await buildProductionApi({ database,
+    identityProvider: clerk ? new ClerkIdentityProvider(clerk) : new UnimplementedIdentityProvider(),
+  }, config);
+  const port = Number(process.env.PORT ?? 3000);
+  const host = process.env.HOST ?? '0.0.0.0';
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
@@ -122,7 +143,7 @@ async function main(): Promise<void> {
   process.stdout.write(`api listening on ${host}:${port}\n`);
 }
 
-main().catch((error) => {
+if (require.main === module) main().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
 });

@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { createHash, createHmac } = require('node:crypto');
 const test = require('node:test');
-const { presignR2Url, writeOnceUploadHeaders } = require('../../dist/media/r2.js');
+const { loadR2ConfigFromEnv, presignR2Url, writeOnceUploadHeaders } = require('../../dist/media/r2.js');
 
 const config = {
   endpoint: 'https://example.r2.cloudflarestorage.com', region: 'auto', bucket: 'media-test',
@@ -56,4 +56,36 @@ test('every generic PUT is conditional; other methods are unaffected', () => {
   const get = new URL(presignR2Url(config, { method: 'GET', objectKey: 'x',
     expiresInSeconds: 60, now }));
   assert.equal(get.searchParams.get('X-Amz-SignedHeaders'), 'host');
+});
+
+const environment = { R2_ENDPOINT: config.endpoint, R2_REGION: config.region, R2_BUCKET: config.bucket,
+  R2_ACCESS_KEY_ID: config.accessKeyId, R2_SECRET_ACCESS_KEY: config.secretAccessKey };
+
+test('R2 config rejects absent, empty and whitespace-only values without fallback or value disclosure', () => {
+  for (const name of Object.keys(environment)) {
+    for (const value of [undefined, '', ' ', '\t\n']) {
+      assert.throws(() => loadR2ConfigFromEnv({ ...environment, [name]: value }),
+        { message: 'R2_CONFIGURATION_MISSING' });
+    }
+  }
+});
+
+test('R2 config rejects malformed and non-HTTPS endpoints with the same secret-safe error', () => {
+  for (const endpoint of ['not-a-url', 'http://r2.invalid', 'ftp://r2.invalid']) {
+    assert.throws(() => loadR2ConfigFromEnv({ ...environment, R2_ENDPOINT: endpoint }),
+      { message: 'R2_CONFIGURATION_MISSING' });
+  }
+  assert.deepEqual(loadR2ConfigFromEnv(environment), config);
+  assert.equal(loadR2ConfigFromEnv({ ...environment, R2_ENDPOINT: config.endpoint + '/' }).endpoint,
+    config.endpoint);
+});
+
+test('R2 validation preserves nonblank credential values exactly', () => {
+  const padded = { ...environment, R2_ACCESS_KEY_ID: ' key-with-spaces ',
+    R2_SECRET_ACCESS_KEY: ' secret-with-spaces ', R2_BUCKET: ' bucket ', R2_REGION: ' auto ' };
+  const loaded = loadR2ConfigFromEnv(padded);
+  assert.equal(loaded.accessKeyId, padded.R2_ACCESS_KEY_ID);
+  assert.equal(loaded.secretAccessKey, padded.R2_SECRET_ACCESS_KEY);
+  assert.equal(loaded.bucket, padded.R2_BUCKET);
+  assert.equal(loaded.region, padded.R2_REGION);
 });

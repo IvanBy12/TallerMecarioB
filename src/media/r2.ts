@@ -23,7 +23,13 @@ export function loadR2ConfigFromEnv(env: NodeJS.ProcessEnv = process.env): R2Con
   const bucket = env.R2_BUCKET;
   const accessKeyId = env.R2_ACCESS_KEY_ID;
   const secretAccessKey = env.R2_SECRET_ACCESS_KEY;
-  if (!endpoint || !region || !bucket || !accessKeyId || !secretAccessKey) {
+  if (!endpoint?.trim() || !region?.trim() || !bucket?.trim()
+    || !accessKeyId?.trim() || !secretAccessKey?.trim()) {
+    throw new Error('R2_CONFIGURATION_MISSING');
+  }
+  try {
+    if (new URL(endpoint).protocol !== 'https:') throw new Error();
+  } catch {
     throw new Error('R2_CONFIGURATION_MISSING');
   }
   return { endpoint: endpoint.replace(/\/$/, ''), region, bucket, accessKeyId, secretAccessKey };

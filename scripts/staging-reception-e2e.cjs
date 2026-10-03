@@ -28,7 +28,11 @@ async function readReceptionSnapshot(admin, tenantId, receptionId, vehicleId) {
     WHERE tenant_id=${tenantId} AND entity_id=${receptionId} ORDER BY id`;
   const vehicles = await admin`SELECT to_jsonb(v) AS row FROM public.vehicles v
     WHERE tenant_id=${tenantId} AND id=${vehicleId} ORDER BY id`;
-  return JSON.stringify({ receptions, signatures, orders, history, audits, vehicles });
+  const checklist = await admin`SELECT to_jsonb(c) AS row FROM public.reception_check_items c
+    WHERE tenant_id=${tenantId} AND reception_id=${receptionId} ORDER BY code, id`;
+  const damages = await admin`SELECT to_jsonb(d) AS row FROM public.vehicle_damages d
+    WHERE tenant_id=${tenantId} AND reception_id=${receptionId} ORDER BY id`;
+  return JSON.stringify({ receptions, signatures, orders, history, audits, vehicles, checklist, damages });
 }
 
 async function runReceptionE2e(admin, baseUrl, identity, tenants, vehicleId, fetcher = fetch) {
@@ -117,6 +121,30 @@ async function runReceptionE2e(admin, baseUrl, identity, tenants, vehicleId, fet
   assert.equal(patched.mileageKm, 2345);
   assert.equal(patched.advisorNotes, patchedNotes);
   await request(a.advisor, a.tenantId, 'PATCH', route, patchBody, 409, 'RESOURCE_VERSION_CONFLICT');
+  const inspectionNote = 'StagePrivateS3InspectionNotes';
+  sentinels.push(inspectionNote);
+  let inspection = patched;
+  const checkEntry = { code: 'lights', label: 'Luces', status: 'ok', notes: inspectionNote };
+  const damageEntry = { operation: 'create', zoneCode: 'front', damageType: 'scratch', severity: 'minor', description: inspectionNote };
+  const checkBody = { expectedUpdatedAt: inspection.updatedAt, items: [checkEntry] };
+  await request(b.advisor, b.tenantId, 'PATCH', `${route}/checklist`, checkBody, 404, 'RECEPTION_NOT_FOUND');
+  await request(a.technician, a.tenantId, 'PATCH', `${route}/checklist`, checkBody, 403, 'PERMISSION_DENIED');
+  inspection = (await request(a.advisor, a.tenantId, 'PATCH', `${route}/checklist`, checkBody, 200)).reception;
+  const checkId = inspection.checklist[0].checkItemId;
+  inspection = (await request(a.advisor, a.tenantId, 'PATCH', `${route}/checklist`,
+    { expectedUpdatedAt: inspection.updatedAt, items: [{ ...checkEntry, status: 'issue' }] }, 200)).reception;
+  assert.equal(inspection.checklist[0].checkItemId, checkId);
+  await request(a.advisor, a.tenantId, 'PATCH', `${route}/checklist`, checkBody, 409, 'RESOURCE_VERSION_CONFLICT');
+  const damageBody = { expectedUpdatedAt: inspection.updatedAt, damages: [damageEntry] };
+  await request(b.advisor, b.tenantId, 'PATCH', `${route}/damages`, damageBody, 404, 'RECEPTION_NOT_FOUND');
+  await request(a.technician, a.tenantId, 'PATCH', `${route}/damages`, damageBody, 403, 'PERMISSION_DENIED');
+  inspection = (await request(a.advisor, a.tenantId, 'PATCH', `${route}/damages`, damageBody, 200)).reception;
+  const damageId = inspection.damages[0].damageId;
+  inspection = (await request(a.advisor, a.tenantId, 'PATCH', `${route}/damages`,
+    { expectedUpdatedAt: inspection.updatedAt, damages: [{ ...damageEntry, operation: 'update', damageId, severity: 'severe' }] }, 200)).reception;
+  assert.equal(inspection.damages[0].damageId, damageId);
+  assert.ok(inspection.updatedAt > patched.updatedAt);
+  await request(a.advisor, a.tenantId, 'PATCH', `${route}/damages`, damageBody, 409, 'RESOURCE_VERSION_CONFLICT');
   const signed = (await request(a.advisor, a.tenantId, 'POST', `${route}/signature`, {
     signatureMediaId: mediaId, signedByName: signer, signedByDocument: document,
     documentVersion: 'reception_acceptance_es-CO_v1',
@@ -142,6 +170,12 @@ async function runReceptionE2e(admin, baseUrl, identity, tenants, vehicleId, fet
   assert.equal(detail.advisorNotes, patchedNotes);
   assert.equal(detail.mileageKm, 2345);
   assert.equal(detail.fuelLevelPct, 60);
+  assert.equal(detail.checklist[0].checkItemId, checkId);
+  assert.equal(detail.checklist[0].status, 'issue');
+  assert.equal(detail.damages[0].damageId, damageId);
+  assert.equal(detail.damages[0].severity, 'severe');
+  await request(a.advisor, a.tenantId, 'PATCH', `${route}/checklist`, checkBody, 409, 'RECEPTION_NOT_EDITABLE');
+  await request(a.advisor, a.tenantId, 'PATCH', `${route}/damages`, damageBody, 409, 'RECEPTION_NOT_EDITABLE');
   const queryRoute = `/api/v1/receptions?status=closed&vehicleId=${vehicleId}`;
   sentinels.push(queryRoute, encodeURIComponent(customerNotes), encodeURIComponent(document));
   const listed = await request(a.advisor, a.tenantId, 'GET', queryRoute, undefined, 200);
@@ -169,9 +203,10 @@ async function runReceptionE2e(admin, baseUrl, identity, tenants, vehicleId, fet
   assert.equal(state.history[0].row.to_status, 'reception');
   assert.equal(state.history[0].row.changed_by_membership_id, a.advisor.membershipId);
   assert.equal(state.vehicles[0].row.current_mileage_km, 2345);
-  assert.equal(state.audits.length, 4);
+  assert.equal(state.audits.length, 8);
   assert.deepEqual(state.audits.map(({ row }) => row.action).sort(),
-    ['reception.closed', 'reception.created', 'reception.signed', 'reception.updated']);
+    ['reception.checklist_updated', 'reception.checklist_updated', 'reception.closed', 'reception.created',
+      'reception.damages_updated', 'reception.damages_updated', 'reception.signed', 'reception.updated']);
   for (const { row } of state.audits) {
     assert.equal(row.outcome, 'success');
     assert.equal(row.actor_user_id, a.advisor.userId);
