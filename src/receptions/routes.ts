@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ApiError, getTenantRequestContext } from '../api/app.js';
 import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
+import { RECEPTION_ACCEPTANCE_VERSION, receptionAcceptanceDocument } from './acceptance-document.js';
 import { closeReception, mapCloseDbError } from './close.js';
 import { getReception, listReceptions } from './queries.js';
 import { parseListReceptionsQuery } from './queries-validation.js';
@@ -18,6 +19,21 @@ async function requireJson(request: FastifyRequest): Promise<void> {
     throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json.');
 }
 export function registerReceptionRoutes(app: FastifyInstance): void {
+  // The sole published acceptance text; the signature echoes its documentVersion.
+  // The hash stays server-owned evidence and is not part of the response.
+  app.get('/api/v1/reception-acceptance-document', {
+    config: { permission: 'signatures.capture' }, onRequest: noStore,
+  }, async (request, reply) => {
+    if (Object.keys((request.query ?? {}) as object).length > 0)
+      throw new ApiError(400, 'REQUEST_VALIDATION_FAILED', 'The request query is invalid.');
+    // Fastify does not parse GET payloads; reject their framing as well.
+    if (request.body !== undefined || request.headers['transfer-encoding'] !== undefined
+      || (request.headers['content-length'] !== undefined && request.headers['content-length'] !== '0'))
+      throw new ApiError(400, 'REQUEST_VALIDATION_FAILED', 'The request body must be empty.');
+    const document = receptionAcceptanceDocument(RECEPTION_ACCEPTANCE_VERSION);
+    if (!document) throw new Error('RECEPTION_ACCEPTANCE_DOCUMENT_MISSING');
+    return reply.send({ acceptanceDocument: { documentVersion: document.version, text: document.text } });
+  });
   app.get('/api/v1/receptions', {
     config: { permission: 'receptions.read' }, onRequest: noStore,
   }, async (request, reply) => reply.send(await listReceptions(

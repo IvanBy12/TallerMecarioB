@@ -48,6 +48,34 @@ function invalid(): ApiError {
   return new ApiError(400, 'REQUEST_VALIDATION_FAILED', 'The request body is invalid.');
 }
 
+const invalidQuery = () => new ApiError(400, 'REQUEST_VALIDATION_FAILED', 'The request query is invalid.');
+
+/** Only `allowed` keys, each a single string (duplicates arrive as arrays). */
+function strictQuery(query: unknown, allowed: readonly string[]): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const [key, value] of Object.entries((query ?? {}) as Record<string, unknown>)) {
+    if (!allowed.includes(key) || typeof value !== 'string') throw invalidQuery();
+    values[key] = value;
+  }
+  return values;
+}
+
+/** GET /privacy-notice?purposeCode=<catalog purpose> (required). */
+export function parsePrivacyNoticeQuery(query: unknown): PrivacyPurposeCode {
+  const { purposeCode } = strictQuery(query, ['purposeCode']);
+  if (!isPrivacyPurposeCode(purposeCode)) throw invalidQuery();
+  return purposeCode;
+}
+
+/** GET /customers/:id/privacy-consents?status=granted[&purposeCode=...]; status is required. */
+export function parseListPrivacyConsentsQuery(query: unknown): { purposeCode?: PrivacyPurposeCode } {
+  const { status, purposeCode } = strictQuery(query, ['status', 'purposeCode']);
+  if (status !== 'granted') throw invalidQuery();
+  if (purposeCode === undefined) return {};
+  if (!isPrivacyPurposeCode(purposeCode)) throw invalidQuery();
+  return { purposeCode };
+}
+
 /** RFC 3339 instant with an explicit offset and a real calendar date. */
 export function isDeclaredInstant(value: string): boolean {
   const match = INSTANT.exec(value);

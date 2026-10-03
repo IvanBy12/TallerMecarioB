@@ -31,6 +31,7 @@ const { applyOwnershipMutation } = require('./ownership-api-mutations.cjs');
 const { applySignatureMutation } = require('./signature-api-mutations.cjs');
 const { applyCloseMutation } = require('./close-api-mutations.cjs');
 const { applyReceptionQueriesMutation } = require('./reception-queries-mutations.cjs');
+const { applyReceptionContractMutation } = require('./reception-contract-mutations.cjs');
 
 const CANONICAL_ROLES = [
   'tallermecario_schema_owner',
@@ -151,6 +152,7 @@ async function main() {
       applySignatureMutation(compiledRoot);
       applyCloseMutation(compiledRoot);
       applyReceptionQueriesMutation(compiledRoot);
+      applyReceptionContractMutation(compiledRoot);
     }
     if (process.env.S208_LOG_MUTATION === 'request-url') {
       const file = join(compiledRoot, 'api', 'app.js');
@@ -221,11 +223,13 @@ async function main() {
       cleanupPassed = !remaining.database_present && !remaining.login_present;
     }
     await maintenance.end({ timeout: 5 });
+    // Failed behavioral tests must still prove fixture cleanup to mutation runners.
+    if (databaseCreated && !cleanupPassed) throw new Error('TEST_DATABASE_CLEANUP_FAILED');
+    if (cleanupPassed) process.stdout.write('CRM_API_FIXTURE_CLEANUP_PASS\n');
   }
 
   if (!testPassed) throw new Error('CRM_API_TESTS_FAILED');
   if (!cleanupPassed) throw new Error('TEST_DATABASE_CLEANUP_FAILED');
-  process.stdout.write('CRM_API_FIXTURE_CLEANUP_PASS\n');
 }
 
 main().catch((error) => {

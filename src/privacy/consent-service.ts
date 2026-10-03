@@ -7,7 +7,8 @@
 import { ApiError, type TenantRequestContext } from '../api/app.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
 import { computeAuthorizationTextHash } from './canonical-text.js';
-import { PRODUCTION_PRIVACY_DOCUMENT_CATALOG, type PrivacyDocumentCatalog } from './catalog.js';
+import { PRODUCTION_PRIVACY_DOCUMENT_CATALOG, PRODUCTION_PRIVACY_DOCUMENT_PRESENTATION,
+  type PrivacyDocumentCatalog, type PrivacyDocumentPresentation, type PrivacyPurposeCode } from './catalog.js';
 import { buildControllerNoticeSnapshot, type ControllerNoticeConfiguration, type ControllerNoticeSnapshot,
   PRODUCTION_CONTROLLER_NOTICE_CONFIGURATION } from './controller-notice.js';
 import { bundleConsentEvidence, type PrivacyNoticeBundleKeyRing, type PrivacyNoticeBundleValidityPolicy,
@@ -19,10 +20,13 @@ export interface RequestMeta { requestId: string; ipAddress: string; }
 export interface PrivacyConsentDependencies {
   catalog: PrivacyDocumentCatalog;
   controllerNotice: ControllerNoticeConfiguration;
+  /** Absent: GET /privacy-notice fails closed (no inferred "current" version). */
+  presentation?: PrivacyDocumentPresentation;
 }
 export const PRODUCTION_PRIVACY_CONSENT_DEPENDENCIES: PrivacyConsentDependencies = Object.freeze({
   catalog: PRODUCTION_PRIVACY_DOCUMENT_CATALOG,
   controllerNotice: PRODUCTION_CONTROLLER_NOTICE_CONFIGURATION,
+  presentation: PRODUCTION_PRIVACY_DOCUMENT_PRESENTATION,
 });
 /** Offline evidence needs an explicit key ring and ADR-005 validity policy: no defaults. */
 export interface OfflineBundleDependencies {
@@ -37,6 +41,18 @@ export interface PrivacyConsentDto {
   privacyConsentId: string; customerId: string; purposeCode: string;
   privacyNoticeVersion: string; authorizationTextVersion: string; channel: string;
   status: 'granted'; capturedAt: string; createdAt: string;
+}
+/**
+ * What the client shows before capture and then echoes back by version. The
+ * controller block is built exactly as capture builds its snapshot; capture
+ * re-reads the workshop, so the stored snapshot is the authority (D-PRIV-02).
+ */
+export interface PrivacyNoticeDto {
+  purposeCode: PrivacyPurposeCode;
+  privacyNoticeVersion: string; privacyNoticeText: string;
+  authorizationTextVersion: string; authorizationText: string;
+  controller: { legalName: string; address: string; phone: string | null; email: string | null;
+    rightsChannel: string };
 }
 interface ConsentRow {
   id: string; customer_id: string; purpose_code: string; privacy_notice_version: string;
@@ -77,6 +93,45 @@ export async function capturePrivacyConsent(context: TenantRequestContext, input
     authorizationTextVersion: input.authorizationTextVersion, ...documents, snapshot,
   });
   return persistPrivacyConsent(context, input, { snapshot, authorizationTextHash }, meta);
+}
+
+/** GET /privacy-notice: the presented versions plus the current controller identity. */
+export async function presentPrivacyNotice(context: TenantRequestContext, purposeCode: PrivacyPurposeCode,
+  dependencies: PrivacyConsentDependencies): Promise<PrivacyNoticeDto> {
+  const privacyNoticeVersion = dependencies.presentation?.privacyNoticeVersion;
+  const authorizationTextVersion = dependencies.presentation?.authorizationTextVersions[purposeCode];
+  const documents = privacyNoticeVersion && authorizationTextVersion
+    ? dependencies.catalog.resolve(purposeCode, privacyNoticeVersion, authorizationTextVersion) : null;
+  if (!documents || !privacyNoticeVersion || !authorizationTextVersion) throw versionUnavailable();
+  const snapshot = await currentControllerNotice(context, dependencies.controllerNotice);
+  if (!snapshot) throw noticeNotConfigured();
+  return { purposeCode, privacyNoticeVersion, privacyNoticeText: documents.noticeText,
+    authorizationTextVersion, authorizationText: documents.authorizationText,
+    controller: { legalName: snapshot.legalName, address: snapshot.address, phone: snapshot.phone,
+      email: snapshot.email, rightsChannel: snapshot.rightsChannel } };
+}
+
+/**
+ * The customer's currently granted consents (at most one per purpose, by
+ * privacy_consents_one_granted_uq): the source of an existing privacyConsentId.
+ * Absent and foreign customers share one 404.
+ */
+export async function listGrantedPrivacyConsents(context: TenantRequestContext, customerId: string,
+  purposeCode: PrivacyPurposeCode | undefined): Promise<PrivacyConsentDto[]> {
+  const { sql, tenant } = context;
+  const [customer] = await sql`SELECT id FROM public.customers
+    WHERE tenant_id = ${tenant.tenantId} AND id = ${customerId}`;
+  if (!customer) throw customerNotFound();
+  const rows = await sql<ConsentRow[]>`SELECT c.id, c.customer_id, c.purpose_code,
+      c.privacy_notice_version, c.authorization_text_version, c.channel,
+      pg_catalog.to_char(c.captured_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS captured_at,
+      pg_catalog.to_char(c.created_at AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS created_at
+    FROM public.privacy_consents AS c
+    WHERE c.tenant_id = ${tenant.tenantId} AND c.customer_id = ${customerId}
+      AND c.status = 'granted' AND c.revoked_at IS NULL
+      ${purposeCode === undefined ? sql`` : sql`AND c.purpose_code = ${purposeCode}`}
+    ORDER BY c.purpose_code ASC, c.id ASC`;
+  return rows.map(toConsentDto);
 }
 
 /**
@@ -160,6 +215,10 @@ async function persistPrivacyConsent(context: TenantRequestContext, input: Captu
       privacy_notice_version: row.privacy_notice_version,
       authorization_text_version: row.authorization_text_version, channel: row.channel })},
     ${meta.requestId}, ${meta.ipAddress}::inet)`;
+  return toConsentDto(row);
+}
+
+function toConsentDto(row: ConsentRow): PrivacyConsentDto {
   return { privacyConsentId: row.id, customerId: row.customer_id, purposeCode: row.purpose_code,
     privacyNoticeVersion: row.privacy_notice_version, authorizationTextVersion: row.authorization_text_version,
     channel: row.channel, status: 'granted', capturedAt: row.captured_at, createdAt: row.created_at };

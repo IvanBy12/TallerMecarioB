@@ -90,7 +90,7 @@ async function main(): Promise<void> {
       registerMemberLifecycleRoutes(server);
       registerCustomerRoutes(server);
       registerVehicleRoutes(server);
-      // Production catalog publishes no privacy copy yet: capture fails closed.
+      // Privacy reads and capture share the production catalog and controller configuration.
       registerPrivacyConsentRoutes(server);
       registerReceptionRoutes(server);
       // Deploy-smoke-test only: proves the full protected-route pipeline
