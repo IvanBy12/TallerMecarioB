@@ -5,7 +5,7 @@ const { join } = require('node:path');
 
 const MUTATION_NAMES = Object.freeze([
   'bodyless_empty_object_allowed',
-  'reception_lock_removed', 'signature_precheck_removed',
+  'reception_lock_removed', 'signature_requirement_reintroduced',
   'mileage_revalidation_removed', 'vehicle_mileage_update_skipped',
   'advisory_lock_removed', 'allocation_before_advisory',
   'idempotent_branch_removed', 'duplicate_audit_on_retry',
@@ -33,8 +33,9 @@ function applyCloseMutation(compiledRoot) {
     reception_lock_removed: () => {
       source = replaceExact(source, 'FOR NO KEY UPDATE OF r`;', '`;', name);
     },
-    signature_precheck_removed: () => {
-      source = replaceExact(source, 'if (!signature)', 'if (false && !signature)', name);
+    signature_requirement_reintroduced: () => {
+      source = replaceExact(source, '// Global lock order',
+        "throw new app_js_1.ApiError(409, 'RECEPTION_SIGNATURE_REQUIRED', 'A reception signature is required.');\n    // Global lock order", name);
     },
     mileage_revalidation_removed: () => {
       source = replaceExact(source, '&& reception.mileage_km < vehicle.current_mileage_km)',

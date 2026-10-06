@@ -58,13 +58,6 @@ export async function closeReception(context: TenantRequestContext, receptionId:
   if (reception.status !== 'open')
     throw new ApiError(409, 'RECEPTION_NOT_CLOSABLE', 'The reception cannot be closed.');
 
-  // A captured signature is historical evidence. Media quarantine, consent
-  // revocation, and owner transfer do not invalidate it at close time.
-  const [signature] = await sql`SELECT id FROM public.signatures
-    WHERE tenant_id = ${tenant.tenantId} AND reception_id = ${reception.id}`;
-  if (!signature) throw new ApiError(409, 'RECEPTION_SIGNATURE_REQUIRED',
-    'A reception signature is required.');
-
   // Global lock order for existing receptions: reception -> vehicle -> number.
   const [vehicle] = await sql<{ current_mileage_km: number | null }[]>`
     SELECT current_mileage_km FROM public.vehicles
@@ -127,8 +120,6 @@ export async function closeReception(context: TenantRequestContext, receptionId:
 export function mapCloseDbError(error: unknown): ApiError | null {
   const db = error as { code?: string; constraint_name?: string; constraint?: string };
   const name = db.constraint_name ?? db.constraint;
-  if (db.code === '23514' && name === 'receptions_signature_required')
-    return new ApiError(409, 'RECEPTION_SIGNATURE_REQUIRED', 'A reception signature is required.');
   if (db.code === '23514' && name === 'receptions_vehicle_mileage_guard')
     return new ApiError(409, 'RECEPTION_MILEAGE_CONFLICT',
       'The reception mileage conflicts with the current vehicle mileage.');

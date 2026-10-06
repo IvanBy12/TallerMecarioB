@@ -18,6 +18,8 @@ const migrations = new Map([
     readFileSync('drizzle/0022_s3_05_signed_media_quarantine.sql', 'utf8').replace(/\r\n/gu, '\n')],
   ['0023_s3_reception_signature_retention.sql',
     readFileSync('drizzle/0023_s3_reception_signature_retention.sql', 'utf8').replace(/\r\n/gu, '\n')],
+  ['0024_reception_close_without_signature.sql',
+    readFileSync('drizzle/0024_reception_close_without_signature.sql', 'utf8').replace(/\r\n/gu, '\n')],
 ]);
 const { cases, replaceMigration } = require('./reception-db-mutations.cjs');
 
