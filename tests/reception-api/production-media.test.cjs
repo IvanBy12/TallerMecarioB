@@ -89,7 +89,7 @@ test('production route composition registers all media paths, preserves RBAC, te
       assert.equal(app.hasRoute({ method, url }), true);
     const { a, b } = await h.twoTenants();
     const body = { mediaType: 'signature', mimeType: 'image/png',
-      retentionClass: 'authorization_evidence', idempotencyKey: randomUUID() };
+      retentionClass: 'authorization_evidence', expectedSizeBytes: 68, idempotencyKey: randomUUID() };
     const call = (actor, tenantId, method, url, payload) => h.call(app,
       { subject: actor.subject, tenantId, method, url, body: payload });
     const made = await call(b.owner, b.tenantId, 'POST', '/api/v1/media/upload-sessions', body);

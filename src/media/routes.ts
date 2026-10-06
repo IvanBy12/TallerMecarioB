@@ -1,9 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { getTenantRequestContext, markDurableTenantOutcome } from '../api/app.js';
+import { runMediaInspectionWithoutTransaction } from '../api/tenant-request.js';
 import type { R2Config } from './r2.js';
 import {
   MediaError,
   completeUploadSession,
+  prepareUploadCompletion,
+  inspectUploadCompletion,
   createUploadSession,
   getMediaDownloadUrl,
 } from './service.js';
@@ -32,7 +35,7 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
         body: {
           type: 'object',
           additionalProperties: false,
-          required: ['mediaType', 'mimeType', 'retentionClass', 'idempotencyKey'],
+          required: ['mediaType', 'mimeType', 'retentionClass', 'idempotencyKey', 'expectedSizeBytes'],
           properties: {
             mediaType: { type: 'string' },
             mimeType: { type: 'string' },
@@ -51,7 +54,7 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
         mimeType: string;
         retentionClass: string;
         idempotencyKey: string;
-        expectedSizeBytes?: number;
+        expectedSizeBytes: number;
         capturedAt?: string;
       };
       try {
@@ -72,12 +75,12 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
   app.post(
     '/api/v1/media/upload-sessions/:id/complete',
     {
-      config: { permission: 'media.upload', durableErrorCodes: ['UPLOAD_SESSION_EXPIRED', 'MEDIA_SIZE_INVALID'] },
+      config: { permission: 'media.upload', externalInspection: 'media-complete', durableErrorCodes: ['UPLOAD_SESSION_EXPIRED', 'MEDIA_SIZE_INVALID', 'MEDIA_METADATA_MISMATCH', 'MEDIA_CONTENT_INVALID'] },
       schema: {
         body: {
           type: 'object',
           additionalProperties: false,
-          properties: { checksumSha256: { type: 'string', minLength: 64, maxLength: 64 } },
+          properties: { checksumSha256: { type: 'string', pattern: '^[a-fA-F0-9]{64}$' } },
         },
       },
     },
@@ -86,17 +89,20 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
       const { id } = request.params as { id: string };
       const { checksumSha256 } = (request.body ?? {}) as { checksumSha256?: string };
       try {
-        const result = await completeUploadSession(context.sql, r2, context.tenant.tenantId, id, checksumSha256 ?? null);
-        return reply.send(result);
+        const plan = await prepareUploadCompletion(context.sql, context.tenant.tenantId, id);
+        const resumed = await runMediaInspectionWithoutTransaction(request, () => inspectUploadCompletion(r2, plan));
+        const outcome = await completeUploadSession(resumed.context.sql, resumed.context.tenant.tenantId,
+          id, plan, resumed.observation, checksumSha256 ?? null);
+        if (outcome.kind === 'completed') return reply.send(outcome.result);
+        const { error } = outcome;
+        // Explicitly returned domain outcomes alone can commit their mutations.
+        if (error.code === 'UPLOAD_SESSION_EXPIRED') markDurableTenantOutcome(request, 'UPLOAD_SESSION_EXPIRED');
+        else if (error.code === 'MEDIA_SIZE_INVALID' || error.code === 'MEDIA_METADATA_MISMATCH' || error.code === 'MEDIA_CONTENT_INVALID') {
+          markDurableTenantOutcome(request, error.code);
+        } else throw new Error('MEDIA_COMPLETION_OUTCOME_INVALID');
+        return sendMediaError(request, reply, error);
       } catch (error) {
-        if (error instanceof MediaError) {
-          if (error.code === 'UPLOAD_SESSION_EXPIRED' && error.statusCode === 409) {
-            markDurableTenantOutcome(request, 'UPLOAD_SESSION_EXPIRED');
-          } else if (error.code === 'MEDIA_SIZE_INVALID' && error.statusCode === 422) {
-            markDurableTenantOutcome(request, 'MEDIA_SIZE_INVALID');
-          }
-          return sendMediaError(request, reply, error);
-        }
+        if (error instanceof MediaError) return sendMediaError(request, reply, error);
         throw error;
       }
     },

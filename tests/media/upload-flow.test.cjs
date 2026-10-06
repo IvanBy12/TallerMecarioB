@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const test = require('node:test');
 const postgres = require('postgres');
@@ -67,7 +69,7 @@ function auth(token) {
 }
 
 function samplePngBytes() {
-  return Buffer.from(`fake-photo-bytes-${randomUUID()}`.repeat(64), 'utf8');
+  return readFileSync(join(__dirname, 'fixtures/pixel.png'));
 }
 
 function fetchR2(stage, url, options = {}, readBytes = false) {
@@ -173,7 +175,7 @@ test('full R2 flow: create session, upload real bytes, complete, and download th
     method: 'POST',
     url: '/api/v1/media/upload-sessions',
     headers: auth('token-a'),
-    payload: { mediaType: 'photo', mimeType: 'image/png', retentionClass: 'operational', idempotencyKey },
+    payload: { mediaType: 'document', mimeType: 'image/png', retentionClass: 'document', expectedSizeBytes: samplePngBytes().length, idempotencyKey },
   });
   assert.equal(createResponse.statusCode, 201);
   const created = createResponse.json();
@@ -224,7 +226,7 @@ test('full R2 flow: create session, upload real bytes, complete, and download th
 
 test('idempotency: retrying create-upload-session with the same key returns the same session, no duplicate rows', async () => {
   const idempotencyKey = randomUUID();
-  const payload = { mediaType: 'document', mimeType: 'application/pdf', retentionClass: 'document', idempotencyKey };
+  const payload = { mediaType: 'document', mimeType: 'application/pdf', retentionClass: 'document', expectedSizeBytes: 100, idempotencyKey };
 
   const first = await app.inject({ method: 'POST', url: '/api/v1/media/upload-sessions', headers: auth('token-a'), payload });
   assert.equal(first.statusCode, 201);
@@ -251,7 +253,7 @@ test('an expired upload session is rejected at complete time and flips to expire
     method: 'POST',
     url: '/api/v1/media/upload-sessions',
     headers: auth('token-a'),
-    payload: { mediaType: 'photo', mimeType: 'image/png', retentionClass: 'operational', idempotencyKey },
+    payload: { mediaType: 'document', mimeType: 'image/png', retentionClass: 'document', expectedSizeBytes: samplePngBytes().length, idempotencyKey },
   });
   const created = createResponse.json();
   createdObjectKeys.add(created.objectKey);
@@ -277,7 +279,7 @@ test('completing before the object reaches R2 fails without mutating asset state
     method: 'POST',
     url: '/api/v1/media/upload-sessions',
     headers: auth('token-a'),
-    payload: { mediaType: 'photo', mimeType: 'image/png', retentionClass: 'operational', idempotencyKey },
+    payload: { mediaType: 'document', mimeType: 'image/png', retentionClass: 'document', expectedSizeBytes: samplePngBytes().length, idempotencyKey },
   });
   const created = createResponse.json();
   createdObjectKeys.add(created.objectKey); // never uploaded; delete-on-cleanup is a safe no-op
@@ -301,7 +303,7 @@ test('cross-tenant: tenant B cannot complete or read tenant A media through the 
     method: 'POST',
     url: '/api/v1/media/upload-sessions',
     headers: auth('token-a'),
-    payload: { mediaType: 'photo', mimeType: 'image/png', retentionClass: 'operational', idempotencyKey },
+    payload: { mediaType: 'document', mimeType: 'image/png', retentionClass: 'document', expectedSizeBytes: samplePngBytes().length, idempotencyKey },
   });
   const created = createResponse.json();
   createdObjectKeys.add(created.objectKey);
@@ -351,7 +353,7 @@ test('cross-tenant: tenant B cannot complete or read tenant A media through the 
 test('signed reception evidence survives replay and unsigned-header attempts on the same PUT URL', async () => {
   const createResponse = await app.inject({
     method: 'POST', url: '/api/v1/media/upload-sessions', headers: auth('token-a'),
-    payload: { mediaType: 'signature', mimeType: 'image/png', retentionClass: 'authorization_evidence',
+    payload: { mediaType: 'signature', mimeType: 'image/png', retentionClass: 'authorization_evidence', expectedSizeBytes: samplePngBytes().length,
       idempotencyKey: randomUUID() },
   });
   assert.equal(createResponse.statusCode, 201);
@@ -361,7 +363,7 @@ test('signed reception evidence survives replay and unsigned-header attempts on 
   assert.equal(new URL(created.uploadUrl).searchParams.get('X-Amz-SignedHeaders'),
     'content-type;host;if-none-match');
   const original = samplePngBytes();
-  const changed = samplePngBytes();
+  const changed = Buffer.from(original); changed[45] ^= 1;
   const send = async (stage, url, headers, bytes) =>
     (await fetchR2(stage, url, { method: 'PUT', headers, body: bytes })).response;
 

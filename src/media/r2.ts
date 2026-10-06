@@ -3,8 +3,8 @@ import { createHash, createHmac } from 'node:crypto';
 /**
  * ADR-003: media never streams through the API. This module only builds
  * short-lived AWS SigV4 presigned URLs against Cloudflare R2 (S3-compatible)
- * and makes the small out-of-band HEAD/DELETE calls needed to verify/clean up
- * an object -- it never reads or writes the object body itself. No AWS SDK
+ * and performs bounded server-side integrity reads of objects already in R2.
+ * Client uploads still go directly to R2. No AWS SDK
  * dependency: R2's presign surface is a handful of well-defined string
  * operations over Node's built-in crypto + global fetch (Node 26).
  */
@@ -147,19 +147,58 @@ export interface R2ObjectHead {
   etag?: string;
 }
 
+/** Opaque transport failure: never expose provider response bodies or URLs. */
+export class R2UnavailableError extends Error {
+  constructor() { super('MEDIA_STORAGE_UNAVAILABLE'); }
+}
+
 /** Confirms a completed upload without ever reading the object body. */
-export async function headR2Object(config: R2Config, objectKey: string): Promise<R2ObjectHead> {
+export async function headR2Object(config: R2Config, objectKey: string, signal = AbortSignal.timeout(5000)): Promise<R2ObjectHead> {
   const url = presignR2Url(config, { method: 'HEAD', objectKey, expiresInSeconds: 60 });
-  const response = await fetch(url, { method: 'HEAD' });
-  if (response.status === 404) return { exists: false };
-  if (!response.ok) throw new Error(`R2_HEAD_FAILED_${response.status}`);
-  const contentLength = response.headers.get('content-length');
-  return {
-    exists: true,
-    sizeBytes: contentLength != null ? Number(contentLength) : undefined,
-    contentType: response.headers.get('content-type') ?? undefined,
-    etag: response.headers.get('etag') ?? undefined,
-  };
+  try {
+    const response = await fetch(url, { method: 'HEAD', signal, redirect: 'error' });
+    if (response.status === 404) return { exists: false };
+    if (response.status !== 200) throw new R2UnavailableError();
+    const contentLength = response.headers.get('content-length');
+    if (contentLength === null || !/^\d+$/.test(contentLength)
+      || !Number.isSafeInteger(Number(contentLength))) throw new R2UnavailableError();
+    return { exists: true, sizeBytes: Number(contentLength),
+      contentType: response.headers.get('content-type') ?? undefined,
+      etag: response.headers.get('etag') ?? undefined };
+  } catch { throw new R2UnavailableError(); }
+}
+
+/** Exact bounded range, pinned to the HEAD observation. ETag is only a version token. */
+export async function readR2Range(config: R2Config, objectKey: string, size: number,
+  etag: string, offset: number, length: number, signal: AbortSignal): Promise<Buffer> {
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0
+    || length < 1 || length > 1024 * 1024 || offset + length > size || !etag) throw new R2UnavailableError();
+  const headers = { Range: `bytes=${offset}-${offset + length - 1}`, 'If-Match': etag };
+  const url = presignR2Url(config, { method: 'GET', objectKey, expiresInSeconds: 60,
+    extraSignedHeaders: headers });
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    const response = await fetch(url, { headers, signal, redirect: 'error' });
+    if (response.status !== 206 || response.headers.get('content-range') !== `bytes ${offset}-${offset + length - 1}/${size}`
+      || response.headers.get('etag') !== etag || response.headers.get('content-encoding')
+      || response.headers.get('content-length') !== String(length) || !response.body) {
+      await response.body?.cancel();
+      throw new R2UnavailableError();
+    }
+    reader = response.body.getReader();
+    const bytes = Buffer.alloc(length);
+    let count = 0;
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      if (count + chunk.value.length > length) throw new R2UnavailableError();
+      bytes.set(chunk.value, count);
+      count += chunk.value.length;
+    }
+    if (count !== length || signal.aborted) throw new R2UnavailableError();
+    return bytes;
+  } catch { throw new R2UnavailableError(); }
+  finally { await reader?.cancel().catch(() => undefined); reader?.releaseLock(); }
 }
 
 /** Test/cleanup helper -- production purge flow is documented separately (retention baseline). */

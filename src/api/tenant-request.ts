@@ -72,12 +72,16 @@ declare module 'fastify' {
     permissionScope?: PermissionScopeRequirement;
     /** Server-declared durable 4xx outcomes; each also requires an explicit mark. */
     durableErrorCodes?: readonly DurableTenantOutcomeCode[];
+    /** The media completion route alone may release its read transaction for storage inspection. */
+    externalInspection?: 'media-complete';
   }
 }
 
 const DURABLE_OUTCOME_STATUS = Object.freeze({
   UPLOAD_SESSION_EXPIRED: 409,
   MEDIA_SIZE_INVALID: 422,
+  MEDIA_METADATA_MISMATCH: 422,
+  MEDIA_CONTENT_INVALID: 422,
   // S1-04: a denied privilege-escalation attempt commits its `denied` audit row.
   INVITATION_ROLE_NOT_ALLOWED: 403,
   // S1-05: denied role-escalation / self-modification attempts commit their `denied` audit row.
@@ -113,6 +117,7 @@ export interface TenantRequestContext {
 
 interface TenantRequestState {
   readonly context: TenantRequestContext;
+  readonly reopen?: () => Promise<TenantRequestState>;
   status: 'open' | 'closing' | 'closed';
   durableOutcome?: { readonly code: DurableTenantOutcomeCode; readonly statusCode: number };
   /** Set at preValidation: from then on route code may be using `sql`. */
@@ -177,6 +182,12 @@ function assertTenantRouteConfig(routeOptions: RouteOptions): void {
       routeOptions,
       'config.permission must be a known permission code and config.permissionScope tenant|resource',
     );
+  }
+  if (routeOptions.config?.externalInspection !== undefined
+    && (routeOptions.config.externalInspection !== 'media-complete'
+      || routeOptions.method !== 'POST' || routeOptions.url !== '/api/v1/media/upload-sessions/:id/complete'
+      || routeOptions.config.permission !== 'media.upload' || (routeOptions.config.permissionScope ?? 'tenant') !== 'tenant')) {
+    throw new TenantRouteConfigurationError(routeOptions, 'externalInspection is restricted to media completion');
   }
   const codes = routeOptions.config?.durableErrorCodes;
   if (codes !== undefined && (!Array.isArray(codes) || codes.length === 0
@@ -292,6 +303,33 @@ export async function rollbackTenantRequest(request: FastifyRequest): Promise<vo
   if (state) await endTransaction(state, 'ROLLBACK').catch(() => undefined);
 }
 
+/** Phase A is read-only and rolled back/released before any external work.
+ * Phase C repeats identity, active membership, GUC binding and permission checks
+ * on a new reserved transaction. Normal routes cannot opt into this gap.
+ * SQL from the old context must never be used after this call.
+ */
+export async function runMediaInspectionWithoutTransaction<T>(request: FastifyRequest,
+  inspect: () => Promise<T>): Promise<{ observation: T; context: TenantRequestContext }> {
+  const state = tenantRequestStates.get(request);
+  if (request.routeOptions.config.externalInspection !== 'media-complete'
+    || state?.status !== 'open' || !state.reopen || state.durableOutcome) {
+    throw new Error('TENANT_INSPECTION_GAP_INVALID');
+  }
+  assertResourceAuthorizationComplete(state.context.resourceAuthorization);
+  await endTransaction(state, 'ROLLBACK');
+  const observation = await inspect();
+  const reopened = await state.reopen();
+  const before = state.context.tenant, after = reopened.context.tenant;
+  if (before.tenantId !== after.tenantId || before.userId !== after.userId
+    || before.membershipId !== after.membershipId) {
+    await endTransaction(reopened, 'ROLLBACK');
+    throw new TenantAccessDeniedError();
+  }
+  reopened.routeStarted = true;
+  tenantRequestStates.set(request, reopened);
+  return { observation, context: reopened.context };
+}
+
 /**
  * Last route-level onSend hook: runs after serialization and after every other
  * onSend hook, so a serialization or onSend failure is still rolled back.
@@ -351,7 +389,13 @@ export function registerTenantRequestLifecycle(
     const identity = await options.authenticate(request);
     const requirement = routeRequirement(request.routeOptions.config);
     const state = await openTenantRequest(options.database, request, identity, requirement);
-    tenantRequestStates.set(request, state);
+    const reopen = async () => {
+      const nextIdentity = await options.authenticate(request);
+      if (nextIdentity.identityProvider !== identity.identityProvider
+        || nextIdentity.externalSubject !== identity.externalSubject) throw new TenantAccessDeniedError();
+      return openTenantRequest(options.database, request, nextIdentity, requirement);
+    };
+    tenantRequestStates.set(request, { ...state, reopen });
   });
 
   app.addHook('preValidation', async (request) => {

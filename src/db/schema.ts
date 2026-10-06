@@ -706,6 +706,8 @@ export const mediaAssets = pgTable(
     deleteReason: varchar('delete_reason', { length: 160 }),
     capturedAt: ts('captured_at'),
     uploadedAt: ts('uploaded_at'),
+    quarantinedAt: ts('quarantined_at'),
+    integrityFailureCode: varchar('integrity_failure_code', { length: 48 }),
     createdByMembershipId: uuid('created_by_membership_id'),
     ...timestamps(),
   },
@@ -735,6 +737,9 @@ export const mediaAssets = pgTable(
       'document',
     ]),
     rawCheck('media_assets_size_check', '"size_bytes" >= 0'),
+    rawCheck('media_assets_integrity_failure_check', `"integrity_failure_code" IS NULL OR
+      ("status" IN ('quarantined', 'deleted') AND "quarantined_at" IS NOT NULL AND "integrity_failure_code" IN
+        ('MEDIA_SIZE_INVALID', 'MEDIA_METADATA_MISMATCH', 'MEDIA_CONTENT_INVALID', 'MEDIA_FORMAT_UNSUPPORTED', 'MEDIA_INSPECTION_LIMIT_EXCEEDED'))`),
     // `deleted_at` precede siempre a `purged_at`.
     rawCheck(
       'media_assets_purge_order_check',
@@ -751,6 +756,9 @@ export const uploadSessions = pgTable(
     tenantId: tenantId(),
     mediaAssetId: uuid('media_asset_id').notNull(),
     idempotencyKey: uuid('idempotency_key').notNull(),
+    // 0025 preserves old rows as legacy/NULL; CHECK + invoker trigger require immutable v1 expectations for new runtime rows.
+    integrityVersion: varchar('integrity_version', { length: 8 }).notNull().default('v1'),
+    expectedSizeBytes: bigint('expected_size_bytes', { mode: 'bigint' }),
     status: varchar('status', { length: 16 }).notNull().default('pending'),
     expiresAt: ts('expires_at').notNull(),
     completedAt: ts('completed_at'),
@@ -760,6 +768,9 @@ export const uploadSessions = pgTable(
   (t) => [
     unique('upload_sessions_tenant_id_key').on(t.tenantId, t.id),
     unique('upload_sessions_idempotency_key').on(t.tenantId, t.idempotencyKey),
+    rawCheck('upload_sessions_integrity_expectation_check', `("integrity_version" = 'legacy' AND
+      "expected_size_bytes" IS NULL) OR ("integrity_version" = 'v1' AND "expected_size_bytes" IS NOT NULL
+      AND "expected_size_bytes" > 0 AND "expected_size_bytes" <= 786432000)`),
     foreignKey({
       name: 'upload_sessions_media_fk',
       columns: [t.tenantId, t.mediaAssetId],

@@ -26,6 +26,7 @@ import { registerReceptionRoutes } from '../receptions/routes.js';
 import { registerPrivacyConsentRoutes } from '../privacy/routes.js';
 import { loadR2ConfigFromEnv } from '../media/r2.js';
 import { registerMediaRoutes } from '../media/routes.js';
+import { assertMediaIntegritySchema } from '../media/deployment.js';
 
 /**
  * Used ONLY when no Clerk variable is configured at all (e.g. the local
@@ -118,6 +119,8 @@ export async function buildProductionApi(
 async function main(): Promise<void> {
   const config = loadProductionApiConfig();
   const database = await runtimeDatabase('api', Number(process.env.DB_POOL_MAX ?? 10));
+  try { await assertMediaIntegritySchema(database); }
+  catch (error) { await database.end({ timeout: 5 }); throw error; }
   const clerk = config.clerk?.config;
   const app = await buildProductionApi({ database,
     identityProvider: clerk ? new ClerkIdentityProvider(clerk) : new UnimplementedIdentityProvider(),

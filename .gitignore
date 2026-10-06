@@ -152,6 +152,7 @@ vite.config.ts.timestamp-*
 .audit-*/
 
 
-# Keep new local docs ignored except the canonical Sprint 4 media contract.
+# Keep new local docs ignored except canonical Sprint 4 media artifacts.
 docs/*
 !docs/S4-B01-media-contract.md
+!docs/S4-B02-media-integrity.md
