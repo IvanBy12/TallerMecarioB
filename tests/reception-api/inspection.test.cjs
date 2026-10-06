@@ -101,12 +101,15 @@ for (const kind of ['checklist', 'damages']) {
     assert.equal(result.headers['cache-control'], 'no-store');
     assert.ok(result.json.reception.updatedAt > r.updatedAt);
     assert.deepEqual((await detail(a, r)).json, result.json);
-    for (const [i, item] of result.json.reception[kind].entries()) {
-      if (kind === 'checklist') {
+    if (kind === 'checklist') {
+      for (const [i, item] of result.json.reception.checklist.entries()) {
         assert.equal(item.status, values[i]); assert.equal(item.notes, entries[i].notes);
-      } else {
-        assert.equal(item.severity, values[i]); assert.equal(item.description, entries[i].description);
       }
+    } else {
+      // Damages are ordered by createdAt and UUID, not by batch input order.
+      const batchValues = items => items.map(({ severity, description }) => ({ severity, description }))
+        .sort((a, b) => a.severity.localeCompare(b.severity));
+      assert.deepEqual(batchValues(result.json.reception.damages), batchValues(entries));
     }
     const first = result.json.reception[kind][0];
     const idKey = kind === 'checklist' ? 'checkItemId' : 'damageId'; r = result.json.reception;
