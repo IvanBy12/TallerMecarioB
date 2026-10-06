@@ -1,5 +1,7 @@
 # S3-06 — Close Reception + Exactly-One Service Order
 
+> **Historical snapshot superseded for signature prerequisites:** the 2026-10-05 product decision, migration 0024 and [current reception contract §5.8](api/reception-contract.md) allow normal close without a signature. The signature-required steps below describe the original S3-06 implementation, not current behavior. Sprint 4 must preserve close without signature; see [S4-B01 §16, DOC_CONFLICT-02](S4-B01-media-contract.md#16-resolved-documentation-conflicts).
+
 ## API contract
 
 `POST /api/v1/receptions/:receptionId/close` is a bodyless command. An absent
