@@ -216,6 +216,8 @@ Estas decisiones cierran S2-08 DOC_GAP-01 y DOC_GAP-02 a nivel de contrato. **Sp
 
 # 6. Sprint 3 — Recepción
 
+**S4-B01 — DOC_CONFLICT-02 resuelto:** firma/captura y CHECK XOR protegen el flujo legacy y su histórico; no exigen firma para cerrar una recepción normal. La decisión 2026-10-05 y migración 0024 prevalecen sobre el requisito histórico. Sprint 4 conserva cierre sin firma; [contrato canónico Media §16](../../S4-B01-media-contract.md#16-resolved-documentation-conflicts).
+
 - [ ]  Buscar placa.
 - [ ]  Crear cliente/vehículo si no existe.
 - [ ]  Kilometraje.

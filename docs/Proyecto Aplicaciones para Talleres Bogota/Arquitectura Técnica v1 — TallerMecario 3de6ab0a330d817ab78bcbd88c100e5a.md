@@ -252,10 +252,12 @@ sequenceDiagram
     API->>DB: crea media_asset = pending_upload
     API-->>PWA: URL firmada + object_key
     PWA->>R2: PUT video/foto directo
-    PWA->>API: POST /media/{id}/complete
+    PWA->>API: POST /api/v1/media/upload-sessions/{uploadSessionId}/complete
     API->>R2: valida metadata
     API->>DB: media_asset = active
 ```
+
+**S4-B01 — DOC_CONFLICT-01 resuelto:** completion identifica la upload session, no el asset; se preserva la ruta productiva. Contrato backend: [S4-B01 Media Contract](../S4-B01-media-contract.md).
 
 ### Estados de archivo
 
