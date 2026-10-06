@@ -191,7 +191,7 @@ async function main() {
   const maintenance = postgres(source.toString(), { max: 1, prepare: false, onnotice: () => {} });
   const original = new Set((await maintenance`SELECT rolname FROM pg_roles WHERE rolname = ANY(${ROLES})`).map((r) => r.rolname));
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json','utf8'));
-  assert.equal(journal.entries.length, 24);
+  assert.equal(journal.entries.length, 25);
   // 0019 cases upgrade to a 0019 head: their valid fixture holds a legacy
   // reception, which 0020 deliberately refuses (fail closed, covered below).
   const head19 = mkdtempSync(join(tmpdir(), 'tm-reception-head19-'));
@@ -313,7 +313,7 @@ async function main() {
         if (!expectedConstraint) {
           assert.equal(diagnostic, null, 'clean preflight');
           assert.equal(upgraded.status, 0, upgraded.stderr);
-          assert.equal(await ledger(sql), 24);
+          assert.equal(await ledger(sql), 25);
           await forced();
           assert.deepEqual(await privacySnapshot(sql, tenant), before);
           const schemaAfter = await privacySchema(sql);
@@ -323,7 +323,7 @@ async function main() {
             'privacy_consents_evidence_truncate_trg', 'receptions_guard_10_current_owner_trg',
             'receptions_guard_20_privacy_consent_trg']);
           assert.equal(migrate(target.toString(), 'drizzle').status, 0);
-          assert.equal(await ledger(sql), 24);
+          assert.equal(await ledger(sql), 25);
           assert.deepEqual(await privacySchema(sql), schemaAfter, 'rerun is a no-op');
           process.stdout.write(`UPGRADE_PRIVACY_${kind.toUpperCase()}_PASS 0019 -> 0020; data unchanged; rerun no-op\n`);
         } else {
@@ -373,12 +373,12 @@ async function main() {
           process.stdout.write('UPGRADE_SINGLE_USE_DUPLICATE_FAIL_CLOSED_PASS ledger=21; rows intact; rollback complete\n');
         } else {
           assert.equal(upgrade.status, 0, upgrade.stderr);
-          assert.equal(await ledger(sql), 24);
+          assert.equal(await ledger(sql), 25);
           const [state] = await sql`SELECT to_regclass('public.signatures_one_media_uq') IS NOT NULL AS indexed`;
           assert.equal(state.indexed, true);
           assert.deepEqual(await dataSnapshot(sql, tenant), before);
           assert.equal(migrate(target.toString(), 'drizzle').status, 0);
-          assert.equal(await ledger(sql), 24);
+          assert.equal(await ledger(sql), 25);
           process.stdout.write('UPGRADE_SINGLE_USE_CLEAN_PASS 0020 -> 0022; rows intact; rerun no-op\n');
         }
       } finally { await sql.end({ timeout: 5 }); }
@@ -437,7 +437,7 @@ async function main() {
         } else {
           assert.equal(diagnostic, null);
           assert.equal(upgraded.status, 0, upgraded.stderr);
-          assert.equal(await ledger(sql), 24);
+          assert.equal(await ledger(sql), 25);
           const afterSchema = await schema();
           assert.deepEqual(afterSchema.rls, beforeSchema.rls);
           assert.ok(afterSchema.rls.every((r) => r.relrowsecurity && r.relforcerowsecurity));
@@ -447,7 +447,7 @@ async function main() {
           assert.deepEqual(await schema(), afterSchema);
         }
         assert.deepEqual(await snapshots(), before, 'all historical evidence remains byte-for-byte unchanged');
-        process.stdout.write(`UPGRADE_RETENTION_${kind.toUpperCase()}_PASS ledger=${kind === 'wrong' ? 23 : 24}; evidence unchanged\n`);
+        process.stdout.write(`UPGRADE_RETENTION_${kind.toUpperCase()}_PASS ledger=${kind === 'wrong' ? 23 : 25}; evidence unchanged\n`);
       } finally { await sql.end({ timeout: 5 }); }
     }
   } catch (e) { failure = e; }

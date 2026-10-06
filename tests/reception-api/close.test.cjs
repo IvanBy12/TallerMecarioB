@@ -17,7 +17,7 @@ before(async () => {
 });
 after(async () => h.closeAll(app));
 
-async function fixture(tenant, { mileage = 1000, vehicleMileage = null, signed = true } = {}) {
+async function fixture(tenant, { mileage = 1000, vehicleMileage = null, signed = false } = {}) {
   const customer = randomUUID(), vehicle = randomUUID(), consent = randomUUID(), reception = randomUUID();
   await h.admin.begin(async (tx) => {
     await tx`INSERT INTO public.customers (id,tenant_id,first_name,last_name,phone)
@@ -101,12 +101,14 @@ async function blockedBy(pid, count, fragment) {
   }
 }
 
-test('close persists exactly one order, history, mileage and audit; retry is read-only', async () => {
+test('unsigned close persists exactly one order, history, mileage and audit; retry is read-only', async () => {
   const { a } = await h.twoTenants();
   const f = await fixture(a);
   const first = await close(a.advisor, a.tenantId, f.reception);
   assert.equal(first.status, 200, JSON.stringify(first.json));
   assert.equal(first.json.reception.status, 'closed');
+  assert.equal((await h.admin`SELECT id FROM public.signatures WHERE reception_id=${f.reception}`).length, 0);
+  assert.equal((await h.admin`SELECT id FROM public.media_assets WHERE tenant_id=${a.tenantId}`).length, 0);
   assert.equal(first.json.serviceOrder.orderNumber, '1');
   assert.equal(first.json.serviceOrder.status, 'reception');
   assert.equal(first.json.serviceOrder.version, 1);
@@ -209,7 +211,7 @@ test('late retry returns an advanced persisted order without resetting state', a
   assert.deepEqual(Array.from(await audits(f.reception)), Array.from(auditsBefore));
 });
 
-test('RBAC, anti-oracle, body, missing signature, and mileage conflict', async () => {
+test('RBAC, anti-oracle, body and mileage conflict remain enforced without signature', async () => {
   const { a, b } = await h.twoTenants();
   const f = await fixture(a, { signed: false });
   for (const [actor, tenant, id, extra, status, code] of [
@@ -220,7 +222,6 @@ test('RBAC, anti-oracle, body, missing signature, and mileage conflict', async (
       'priority', 'version', 'tenantId', 'customerId', 'vehicleId'].map((field) =>
       [a.owner, a.tenantId, f.reception, { body: { [field]: 'forged' } }, 400,
         'REQUEST_VALIDATION_FAILED']),
-    [a.owner, a.tenantId, f.reception, {}, 409, 'RECEPTION_SIGNATURE_REQUIRED'],
   ]) {
     const result = await close(actor, tenant, id, extra);
     assert.deepEqual([result.status, errorCode(result)], [status, code], JSON.stringify(result.json));
@@ -251,7 +252,7 @@ test('equal vehicle mileage avoids a vehicle UPDATE', async () => {
   assert.deepEqual({ ...after }, { ...before });
 });
 
-test('missing signature fails before trying the vehicle lock', async () => {
+test('unsigned close waits for the vehicle lock and then succeeds', async () => {
   const { a } = await h.twoTenants();
   const f = await fixture(a, { signed: false });
   const holder = await h.admin.reserve();
@@ -267,9 +268,10 @@ test('missing signature fails before trying the vehicle lock', async () => {
     holder.release();
     await Promise.allSettled([pending].filter(Boolean));
   }
-  assert.equal(early, true, 'close must not wait for vehicle when signature is absent');
+  assert.equal(early, false, 'unsigned close must still serialize with vehicle writers');
   const result = await pending;
-  assert.deepEqual([result.status, errorCode(result)], [409, 'RECEPTION_SIGNATURE_REQUIRED']);
+  assert.equal(result.status, 200, JSON.stringify(result.json));
+  assert.equal((await orders(f.reception)).length, 1);
 });
 
 test('corrupt closed reception without order fails closed and is not repaired', async () => {
@@ -291,7 +293,7 @@ test('corrupt closed reception without order fails closed and is not repaired', 
 
 test('signed media quarantine and historical consent revocation permit close', async () => {
   const { a } = await h.twoTenants();
-  const f = await fixture(a);
+  const f = await fixture(a, { signed: true });
   await h.admin`UPDATE public.media_assets SET status='quarantined'
     WHERE id=(SELECT signature_media_id FROM public.signatures WHERE reception_id=${f.reception})`;
   await h.admin`UPDATE public.privacy_consents SET status='revoked',
@@ -373,11 +375,8 @@ test('signature and close serialize in both orders through real endpoints', asyn
       await Promise.allSettled([first, second].filter(Boolean));
     }
     const [one, two] = await Promise.all([first, second]);
-    assert.deepEqual([one.status, two.status], signatureFirst ? [201, 200] : [409, 201]);
-    if (!signatureFirst) {
-      assert.equal(errorCode(one), 'RECEPTION_SIGNATURE_REQUIRED');
-      assert.equal((await close(a.owner, a.tenantId, f.reception)).status, 200);
-    }
+    assert.deepEqual([one.status, two.status], signatureFirst ? [201, 200] : [200, 409]);
+    if (!signatureFirst) assert.equal(errorCode(two), 'RECEPTION_NOT_EDITABLE');
     assert.equal((await orders(f.reception)).length, 1);
   }
 });

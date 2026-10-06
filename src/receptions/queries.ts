@@ -86,7 +86,7 @@ export async function getReception(context: TenantRequestContext, receptionId: s
   // Aggregate every matching row: uniqueness violations must not select an arbitrary row.
   if (row.signatures.length > 1 || row.service_orders.length > 1
     || (row.status === 'open' && row.service_orders.length !== 0)
-    || (row.status === 'closed' && (row.signatures.length !== 1 || row.service_orders.length !== 1))
+    || (row.status === 'closed' && row.service_orders.length !== 1)
     || (row.status !== 'open' && row.status !== 'closed'))
     throw new Error('RECEPTION_READ_STATE_INCONSISTENT');
   const signature = row.signatures[0] ?? null;

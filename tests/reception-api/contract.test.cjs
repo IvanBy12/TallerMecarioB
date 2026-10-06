@@ -297,9 +297,7 @@ test('vertical slice with published retry outcomes: create, patch, sign, close',
   assert.equal(detail.json.reception.signature, null);
   assert.equal(detail.json.reception.serviceOrder, null);
 
-  // Close needs a signature; a replayed signature is a stable 409.
-  const early = await send(a.advisor, a.tenantId, 'POST', `${url}/close`);
-  assert.equal(code(early), 'RECEPTION_SIGNATURE_REQUIRED');
+  // Legacy clients can still attach evidence; it is no longer a prerequisite for close.
   const documentVersion = (await get(a.advisor, a.tenantId, '/api/v1/reception-acceptance-document'))
     .json.acceptanceDocument.documentVersion;
   const signBody = { signatureMediaId: await signatureMedia(a.tenantId), signedByName: 'Cliente',

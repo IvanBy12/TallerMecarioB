@@ -251,12 +251,31 @@ test('two concurrent open creates serialize on the vehicle lock; partial UNIQUE 
   }
 });
 
+test('unsigned close with an order and initial history commits without creating signature media', async () => {
+  const vehicleId = await newVehicle();
+  const receptionId = await scoped(api, a.tenant, (c) => reception(c, a.tenant, vehicleId));
+  await scoped(api, a.tenant, async (c) => {
+    await c`UPDATE receptions SET status='closed',closed_at=now() WHERE id=${receptionId}`;
+    const order = id();
+    await c`INSERT INTO service_orders ${c({ id: order, tenant_id: a.tenant,
+      reception_id: receptionId, vehicle_id: vehicleId, customer_id: a.customer,
+      order_number: 102n, created_by_membership_id: a.member })}`;
+    await c`INSERT INTO order_status_history ${c({ id: id(), tenant_id: a.tenant,
+      order_id: order, to_status: 'reception', request_id: id() })}`;
+  });
+  await scoped(api, a.tenant, async (c) => {
+    assert.equal((await c`SELECT status FROM receptions WHERE id=${receptionId}`)[0].status, 'closed');
+    assert.equal((await c`SELECT id FROM signatures WHERE reception_id=${receptionId}`).length, 0);
+    assert.equal((await c`SELECT id FROM service_orders WHERE reception_id=${receptionId}`).length, 1);
+  });
+});
+
 test('signature evidence, media guard, append-only and close lifecycle', async () => {
   const vehicleId = await newVehicle();
   const r = await scoped(api, a.tenant, (c) => reception(c, a.tenant, vehicleId));
   await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE receptions
     SET status='closed', closed_at=now() WHERE id=${r}`),
-  failure('23514', 'receptions_signature_required'));
+  failure('23514', 'receptions_order_required'));
   const good = await scoped(api, a.tenant, (c) => media(c));
   const wrongRetention = await scoped(api, a.tenant, (c) => media(c, a.tenant, 'signature', 'active', 'operational'));
   const wrongType = await scoped(api, a.tenant, (c) => media(c, a.tenant, 'photo'));

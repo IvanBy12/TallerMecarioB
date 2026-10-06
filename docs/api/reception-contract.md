@@ -42,7 +42,7 @@ Este documento consolida el contrato HTTP actual. Las decisiones de privacidad d
 - **Rate limit:** 429 `RATE_LIMIT_EXCEEDED` con header `Retry-After` (segundos).
 - **Anti-oráculo:** recursos ajenos al tenant e inexistentes devuelven exactamente el mismo status/code/message.
 
-## 3. Flujo del slice (orden canónico, Diccionario 05 §1.1)
+## 3. Flujo del slice (revisión explícita 2026-10-05)
 
 1. **Cliente y vehículo (CRM, contratos S2):** el `customerId` de la recepción debe ser el **propietario principal vigente** del vehículo (D-PRIV-03). Obtenerlo con `GET /api/v1/vehicles/:vehicleId/owners` (S2-06). Entrega por terceros, representantes o menores: fuera del MVP.
 2. **Consentimiento `service_provision` → `privacyConsentId`:**
@@ -52,7 +52,7 @@ Este documento consolida el contrato HTTP actual. Las decisiones de privacidad d
    4. Las finalidades opcionales (`marketing`, `image_use`, `appointment_reminders`, `service_notifications_whatsapp`) no tienen textos publicados (409 en el paso 3) y nunca condicionan la recepción.
 3. **Crear recepción:** `POST /api/v1/receptions` con `vehicleId`, `customerId`, `privacyConsentId`, `mileageKm` (+ opcionales).
 4. **Editar mientras está abierta:** `PATCH /api/v1/receptions/:receptionId` y batches `PATCH …/checklist` / `PATCH …/damages` (§5.10), con `expectedUpdatedAt` = último `updatedAt` recibido.
-5. **Firma de aceptación:** `GET /api/v1/reception-acceptance-document`, mostrar `text`, subir la imagen de firma como media `signature` (rutas productivas registradas; gate externo pendiente, §11) y `POST …/signature` con el `documentVersion` mostrado.
+5. **Sin firma digital:** el flujo estándar pasa de la inspección al cierre. No solicita documento de aceptación, captura ni subida R2. Los endpoints §5.6–5.7 se mantienen para compatibilidad con clientes anteriores; no son un requisito del cierre. La evidencia ya registrada conserva sus reglas de retención.
 6. **Cerrar:** `POST /api/v1/receptions/:receptionId/close` (sin body) → recepción `closed` + orden de servicio `reception`.
 
 ## 4. Privacidad y consentimiento
@@ -185,7 +185,7 @@ Sólo scope tenant (owner/admin/asesor); un técnico recibe 403 aunque tenga asi
 - **Scope assigned** (técnico líder/soporte con asignación activa a la orden de esa recepción): sólo `receptionId`, `vehicleId`, `mileageKm`, `fuelLevelPct`, `status`, `receivedAt`, `closedAt`, `checklist`, `damages`, `signature`, `serviceOrder`.
 - `checklist[]`: `checkItemId`, `code`, `label`, `status` (`ok|issue|not_checked|not_applicable`), `notes`, `createdAt`; orden code, id. `damages[]`: `damageId`, `zoneCode`, `damageType`, `severity` (`minor|moderate|severe`), `description`, `createdAt`; orden creación, id. Escritura de ambos mediante §5.10; GET conserva las vistas tenant/assigned y sus DTOs.
 
-Ambas vistas incluyen `signature`: null o `{ signatureId, documentVersion, signedAt }`, y `serviceOrder`: null o `{ id, orderNumber, status }`. `orderNumber` es string decimal exacto (PostgreSQL `order_number::text`), incluso fuera del rango seguro de JS. Abierta sin firma: ambos null; abierta firmada: sólo firma; cerrada: ambos. No se incluyen identidad del firmante, media de firma, hashes ni detalles adicionales de la orden. Estados inconsistentes fallan con 500 `INTERNAL_ERROR` sin filtrar el diagnóstico interno; véase S3-07.
+Ambas vistas incluyen `signature`: null o `{ signatureId, documentVersion, signedAt }`, y `serviceOrder`: null o `{ id, orderNumber, status }`. `orderNumber` es string decimal exacto (PostgreSQL `order_number::text`), incluso fuera del rango seguro de JS. Abierta sin firma: ambos null; abierta con firma histórica: sólo firma; cerrada: serviceOrder obligatorio y signature nullable. No se incluyen identidad del firmante, media de firma, hashes ni detalles adicionales de la orden. Estados inconsistentes fallan con 500 `INTERNAL_ERROR` sin filtrar el diagnóstico interno; véase S3-07.
 
 Errores: 404 `RECEPTION_NOT_FOUND` (malformado, inexistente, ajeno o no asignado: idénticos); 403; 500 `INTERNAL_ERROR`.
 
@@ -224,9 +224,9 @@ Sin body ni `Content-Type` (cualquier body, incluso `{}`, → 400).
 }
 ```
 
-(Nota: aquí la recepción usa la clave `id`, no `receptionId`, tal como se publicó en S3-06.) Requiere firma; no revalida consentimiento, propietario ni media. Actualiza `current_mileage_km` del vehículo si cambió, crea exactamente una orden + historial inicial y audita `reception.closed`, todo atómico.
+(Nota: aquí la recepción usa la clave `id`, no `receptionId`, tal como se publicó en S3-06.) No requiere firma digital de recepción (decisión del usuario, 2026-10-05; migración 0024). No revalida consentimiento ni propietario al cerrar. Las firmas históricas y su media siguen conservadas. Actualiza `current_mileage_km` del vehículo si cambió, crea exactamente una orden + historial inicial y audita `reception.closed`, todo atómico.
 
-Errores: 400; 404 `RECEPTION_NOT_FOUND`; 409 `RECEPTION_SIGNATURE_REQUIRED`; 409 `RECEPTION_MILEAGE_CONFLICT`; 500 `RECEPTION_ORDER_INTEGRITY_ERROR` (invariante roto; no reintentar).
+Errores: 400; 404 `RECEPTION_NOT_FOUND`; 409 `RECEPTION_MILEAGE_CONFLICT`; 500 `RECEPTION_ORDER_INTEGRITY_ERROR` (invariante roto; no reintentar).
 
 ### 5.9 Cancelación — NO EXISTE en S3
 

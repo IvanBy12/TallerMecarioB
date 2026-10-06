@@ -169,6 +169,13 @@
       "when": 1790899200000,
       "tag": "0023_s3_reception_signature_retention",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791158400000,
+      "tag": "0024_reception_close_without_signature",
+      "breakpoints": true
     }
   ]
 }

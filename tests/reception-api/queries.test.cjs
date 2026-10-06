@@ -324,9 +324,10 @@ test('authoritative unsigned, signed and closed detail is minimal, lossless and 
   const unsigned = await fixture(a);
   const signed = await fixture(a, { signed: true });
   const closed = await fixture(a, { closed: true, orderNumber: '9007199254740993' });
+  const closedUnsigned = await fixture(a, { closed: true, signed: false });
   const foreign = await fixture(b, { closed: true });
   const before = await readSnapshot(a.tenantId);
-  for (const f of [unsigned, signed, closed]) {
+  for (const f of [unsigned, signed, closed, closedUnsigned]) {
     const result = await detail(a.owner, a.tenantId, f.reception);
     assert.equal(result.status, 200, JSON.stringify(result.json));
     assert.equal(result.headers['cache-control'], 'no-store');
@@ -355,15 +356,13 @@ test('authoritative unsigned, signed and closed detail is minimal, lossless and 
 test('corrupt reception state fails with the generic 500 instead of fabricated summaries', async () => {
   const { a } = await h.twoTenants();
   const openWithOrder = await fixture(a, { closed: true });
-  const missingSignature = await fixture(a, { closed: true });
   const missingOrder = await fixture(a, { closed: true });
   await h.admin.begin(async (tx) => {
     await tx`SET LOCAL session_replication_role = replica`;
     await tx`UPDATE public.receptions SET status='open',closed_at=NULL WHERE id=${openWithOrder.reception}`;
-    await tx`DELETE FROM public.signatures WHERE reception_id=${missingSignature.reception}`;
     await tx`DELETE FROM public.service_orders WHERE reception_id=${missingOrder.reception}`;
   });
-  for (const f of [openWithOrder, missingSignature, missingOrder]) {
+  for (const f of [openWithOrder, missingOrder]) {
     const result = await detail(a.owner, a.tenantId, f.reception);
     assert.deepEqual([result.status, code(result)], [500, 'INTERNAL_ERROR']);
     assert.equal(Object.hasOwn(result.json, 'reception'), false);
