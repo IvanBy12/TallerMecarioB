@@ -167,7 +167,7 @@ async function main() {
       throw new Error(`UNKNOWN_MUTATION ${process.env.S208_LOG_MUTATION}`);
     }
 
-    const suiteDir = process.env.TEST_SUITE_DIR === 'reception-api' ? 'tests/reception-api' : 'tests/crm-api';
+    const suiteDir = { 'reception-api': 'tests/reception-api', 'media-api': 'tests/media-api' }[process.env.TEST_SUITE_DIR] ?? 'tests/crm-api';
     const files = readdirSync(suiteDir)
       .filter((name) => name.endsWith('.test.cjs'))
       .filter((name) => !process.env.TEST_FILE_FILTER || name === process.env.TEST_FILE_FILTER)

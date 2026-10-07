@@ -176,6 +176,13 @@
       "when": 1791158400000,
       "tag": "0024_reception_close_without_signature",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791303396189,
+      "tag": "0025_s4_b02_media_integrity",
+      "breakpoints": true
     }
   ]
 }

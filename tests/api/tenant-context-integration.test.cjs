@@ -275,6 +275,15 @@ function contextView(context) {
 
 function registerTestRoutes(server, db) {
   registerMediaRoutes(server, testR2);
+  server.post('/api/v1/__it/media-class-rollback/:mode', {
+    config: { permission: 'customers.update', durableErrorCodes: ['MEDIA_CONTENT_INVALID'] },
+  }, async (request, reply) => {
+    await touchCustomerA(getTenantRequestContext(request).sql, 'must rollback arbitrary media error');
+    const { MediaError } = require(join(root, 'media/service.js'));
+    if (request.params.mode === 'reply') return reply.code(422).send({ error: { code: 'MEDIA_CONTENT_INVALID', request_id: request.id } });
+    if (request.params.mode === 'marked-throw') markDurableTenantOutcome(request, 'MEDIA_CONTENT_INVALID');
+    throw new MediaError(422, 'MEDIA_CONTENT_INVALID', 'arbitrary handler error');
+  });
   server.get('/api/v1/__it/context', { config: { permission: 'workshop.read' } }, async (request) => {
     ran('context');
     const context = getTenantRequestContext(request);
@@ -1132,7 +1141,7 @@ describe('media durable 4xx outcomes', () => {
     const response = await app.inject({
       method: 'POST', url: '/api/v1/media/upload-sessions', headers: auth('ownerA'),
       payload: {
-        mediaType: 'photo', mimeType: 'image/png', retentionClass: 'operational',
+        mediaType: 'signature', mimeType: 'image/png', retentionClass: 'authorization_evidence', expectedSizeBytes: 68,
         idempotencyKey: randomUUID(),
       },
     });
@@ -1142,7 +1151,7 @@ describe('media durable 4xx outcomes', () => {
 
   test('retry creation of an expired session commits only its explicit 409 outcome', async () => {
     const idempotencyKey = randomUUID();
-    const payload = { mediaType: 'photo', mimeType: 'image/png', retentionClass: 'operational', idempotencyKey };
+    const payload = { mediaType: 'signature', mimeType: 'image/png', retentionClass: 'authorization_evidence', expectedSizeBytes: 68, idempotencyKey };
     const created = await app.inject({ method: 'POST', url: '/api/v1/media/upload-sessions', headers: auth('ownerA'), payload });
     assert.equal(created.statusCode, 201, created.body);
     const sessionId = created.json().uploadSessionId;
@@ -1170,7 +1179,9 @@ describe('media durable 4xx outcomes', () => {
     assertError(response, 409, 'UPLOAD_SESSION_EXPIRED');
     const [stored] = await admin`SELECT status FROM upload_sessions WHERE id = ${created.uploadSessionId}`;
     assert.equal(stored.status, 'expired');
-    const [tx] = since(main, mark).transactions;
+    const [read, tx] = since(main, mark).transactions;
+    assert.equal(kinds(read).at(-1), 'ROLLBACK');
+    assert.equal(read.releases, 1);
     assert.equal(kinds(tx).filter((kind) => kind === 'COMMIT').length, 1);
     assert.equal(kinds(tx).includes('ROLLBACK'), false);
     assert.equal(tx.releases, 1);
@@ -1181,7 +1192,7 @@ describe('media durable 4xx outcomes', () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (_url, options) => {
       assert.equal(options.method, 'HEAD');
-      return new Response(null, { status: 200, headers: { 'content-length': String(21 * 1024 * 1024) } });
+      return new Response(null, { status: 200, headers: { 'content-length': String(3 * 1024 * 1024) } });
     };
     const mark = checkpoint(main);
     let response;
@@ -1201,7 +1212,9 @@ describe('media durable 4xx outcomes', () => {
       WHERE ma.id = ${created.mediaAssetId}
     `;
     assert.deepEqual({ ...stored }, { asset_status: 'quarantined', session_status: 'failed' });
-    const [tx] = since(main, mark).transactions;
+    const [read, tx] = since(main, mark).transactions;
+    assert.equal(kinds(read).at(-1), 'ROLLBACK');
+    assert.equal(read.releases, 1);
     assert.equal(kinds(tx).filter((kind) => kind === 'COMMIT').length, 1);
     assert.equal(kinds(tx).includes('ROLLBACK'), false);
     assert.equal(tx.releases, 1);
@@ -1725,4 +1738,13 @@ describe('identity boundary', () => {
     assert.ok(providerCalls.verify > 50);
     assert.equal(providerCalls.profile, 0);
   });
+});
+
+for (const mode of ['reply', 'throw', 'marked-throw']) test(`unrelated customer partial write rolls back for ${mode} with media durable-code`, async () => {
+  const [before] = await admin`SELECT notes FROM customers WHERE id=${C.A}`;
+  const mark = checkpoint(main);
+  const response = await app.inject({ method: 'POST', url: `/api/v1/__it/media-class-rollback/${mode}`, headers: auth('ownerA') });
+  assert.equal(response.statusCode, mode === 'reply' ? 422 : 500);
+  const [after] = await admin`SELECT notes FROM customers WHERE id=${C.A}`; assert.deepEqual({ ...after }, { ...before });
+  const [tx] = since(main, mark).transactions; assert.equal(kinds(tx).at(-1), 'ROLLBACK'); assert.equal(kinds(tx).includes('COMMIT'), false);
 });

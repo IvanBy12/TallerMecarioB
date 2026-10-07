@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
 import { headR2Object, presignR2Url, writeOnceUploadHeaders, type R2Config } from './r2.js';
+import { inspectR2Content, MediaContentInvalid, MediaContentUnsupported } from './content.js';
 import { MEDIA_TYPES } from '../db/schema.js';
+import { uuidV7 } from '../platform/uuid-v7.js';
 
 /**
  * ADR-003 flow (create session -> presigned PUT -> client uploads -> complete
@@ -41,14 +43,10 @@ const MIME_EXTENSION: Record<string, string> = {
   'application/pdf': 'pdf',
 };
 
-const RETENTION_CLASSES = [
-  'ephemeral_upload',
-  'operational',
-  'warranty_evidence',
-  'authorization_evidence',
-  'delivery_evidence',
-  'document',
-] as const;
+const RETENTION_CLASS: Record<MediaType, string> = {
+  photo: 'operational', video: 'operational', video360: 'operational',
+  signature: 'authorization_evidence', quote_pdf: 'document', document: 'document',
+};
 
 const RETENTION_POLICY_VERSION = 'v1';
 const UPLOAD_URL_TTL_SECONDS = 15 * 60;
@@ -78,7 +76,7 @@ export interface CreateUploadSessionInput {
   mimeType: string;
   retentionClass: string;
   idempotencyKey: string;
-  expectedSizeBytes?: number | null;
+  expectedSizeBytes: number;
   capturedAt?: string | null;
 }
 
@@ -112,25 +110,32 @@ export async function createUploadSession(
   if (!isMediaType(input.mediaType)) {
     throw new MediaError(422, 'MEDIA_TYPE_NOT_ALLOWED', `Unsupported media_type '${input.mediaType}'.`);
   }
-  if (!RETENTION_CLASSES.includes(input.retentionClass as (typeof RETENTION_CLASSES)[number])) {
-    throw new MediaError(422, 'RETENTION_CLASS_NOT_ALLOWED', `Unsupported retention_class '${input.retentionClass}'.`);
+  if (input.retentionClass !== RETENTION_CLASS[input.mediaType]) {
+    throw new MediaError(422, 'RETENTION_CLASS_NOT_ALLOWED', 'Retention class is not allowed for this media type.');
   }
   const allowedMimes = MEDIA_TYPE_MIME_ALLOWLIST[input.mediaType];
   if (!allowedMimes.includes(input.mimeType)) {
     throw new MediaError(422, 'MIME_TYPE_NOT_ALLOWED', `mime_type '${input.mimeType}' not allowed for media_type '${input.mediaType}'.`);
   }
   const maxBytes = MEDIA_TYPE_MAX_BYTES[input.mediaType];
-  if (input.expectedSizeBytes != null && (input.expectedSizeBytes <= 0 || input.expectedSizeBytes > maxBytes)) {
+  if (!Number.isSafeInteger(input.expectedSizeBytes) || input.expectedSizeBytes == null
+    || input.expectedSizeBytes <= 0 || input.expectedSizeBytes > maxBytes) {
     throw new MediaError(422, 'MEDIA_SIZE_TOO_LARGE', `expected_size_bytes exceeds the limit for media_type '${input.mediaType}'.`);
   }
 
+  // S4-B01 §12.1: the generic endpoint has no verified initial domain binding.
+  // B04 must define it before operational PUT capabilities can be issued.
+  if (['photo', 'video', 'video360'].includes(input.mediaType)) {
+    throw new MediaError(403, 'PERMISSION_DENIED', 'Operational upload requires a verified domain context.');
+  }
+
   const [existing] = await sql<
-    { id: string; media_asset_id: string; status: string; expires_at: Date; object_key: string; mime_type: string }[]
+    { id: string; media_asset_id: string; status: string; expires_at: Date; object_key: string; mime_type: string; expected_size_bytes: string | null; integrity_version: string }[]
   >`
-    SELECT us.id, us.media_asset_id, us.status, us.expires_at, ma.object_key, ma.mime_type
+    SELECT us.id, us.media_asset_id, us.status, us.expires_at, ma.object_key, ma.mime_type, us.expected_size_bytes, us.integrity_version
     FROM upload_sessions us
     JOIN media_assets ma ON ma.tenant_id = us.tenant_id AND ma.id = us.media_asset_id
-    WHERE us.tenant_id = ${tenantId} AND us.idempotency_key = ${input.idempotencyKey}
+    WHERE us.tenant_id = ${tenantId} AND us.idempotency_key = ${input.idempotencyKey} FOR UPDATE OF us
   `;
 
   if (existing) {
@@ -140,14 +145,21 @@ export async function createUploadSession(
     if (existing.status === 'failed') {
       throw new MediaError(409, 'UPLOAD_SESSION_FAILED', 'This upload session already failed; retry with a new idempotency key.');
     }
-    if (existing.status === 'expired' || new Date(existing.expires_at).getTime() <= Date.now()) {
+    if (existing.integrity_version !== 'v1' || existing.expected_size_bytes === null
+      || existing.status === 'expired' || new Date(existing.expires_at).getTime() <= Date.now()) {
       if (existing.status === 'pending') {
         await sql`
           UPDATE upload_sessions SET status = 'expired'
           WHERE tenant_id = ${tenantId} AND id = ${existing.id} AND status = 'pending'
         `;
       }
+      if (existing.status === 'pending') {
+        await auditMedia(sql, tenantId, existing.media_asset_id, existing.id, 'media.upload_session_expired', 'UPLOAD_SESSION_EXPIRED');
+      }
       throw new MediaError(409, 'UPLOAD_SESSION_EXPIRED', 'This upload session expired; retry with a new idempotency key.');
+    }
+    if (Number(existing.expected_size_bytes) !== input.expectedSizeBytes || existing.mime_type !== input.mimeType) {
+      throw new MediaError(409, 'IDEMPOTENCY_PAYLOAD_MISMATCH', 'Upload expectation differs from the existing session.');
     }
     // Same in-flight request retried: return the same target, a fresh signed PUT URL.
     return {
@@ -178,12 +190,15 @@ export async function createUploadSession(
   `;
   await sql`
     INSERT INTO upload_sessions (
-      id, tenant_id, media_asset_id, idempotency_key, status, expires_at, created_by_membership_id
+      id, tenant_id, media_asset_id, idempotency_key, status, expires_at, created_by_membership_id,
+      expected_size_bytes, integrity_version
     ) VALUES (
-      ${uploadSessionId}, ${tenantId}, ${mediaAssetId}, ${input.idempotencyKey}, 'pending', ${expiresAt}, ${membershipId}
+      ${uploadSessionId}, ${tenantId}, ${mediaAssetId}, ${input.idempotencyKey}, 'pending', ${expiresAt}, ${membershipId},
+      ${input.expectedSizeBytes}, 'v1'
     )
   `;
 
+  await auditMedia(sql, tenantId, mediaAssetId, uploadSessionId, 'media.upload_session_created');
   return { uploadSessionId, mediaAssetId, status: 'pending',
     ...signedUploadTarget(r2, objectKey, input.mimeType),
     objectKey, expiresAt: expiresAt.toISOString() };
@@ -196,82 +211,162 @@ export interface CompleteUploadResult {
   checksumSha256: string | null;
 }
 
-export async function completeUploadSession(
-  sql: postgres.ReservedSql,
-  r2: R2Config,
-  tenantId: string,
-  uploadSessionId: string,
-  clientChecksumSha256: string | null = null,
-): Promise<CompleteUploadResult> {
-  const [session] = await sql<{ id: string; media_asset_id: string; status: string; expires_at: Date }[]>`
-    SELECT id, media_asset_id, status, expires_at FROM upload_sessions
-    WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}
-  `;
+interface CompletionSession {
+  id: string; media_asset_id: string; status: string; expires_at: Date;
+  integrity_version: string; expected_size_bytes: string | null;
+}
+interface CompletionAsset {
+  id: string; object_key: string; bucket: string; storage_provider: string;
+  media_type: MediaType; mime_type: string; status: string;
+  size_bytes: string | null; checksum_sha256: string | null;
+}
+export interface CompletionPlan { readonly session: CompletionSession; readonly asset?: CompletionAsset }
+type IntegrityFailure = 'MEDIA_SIZE_INVALID' | 'MEDIA_METADATA_MISMATCH' | 'MEDIA_CONTENT_INVALID'
+  | 'MEDIA_FORMAT_UNSUPPORTED' | 'MEDIA_INSPECTION_LIMIT_EXCEEDED';
+export interface CompletionObservation {
+  readonly plan: CompletionPlan;
+  readonly sizeBytes: number;
+  readonly contentType: string | undefined;
+  readonly etag: string | undefined;
+  readonly failure: IntegrityFailure | null;
+}
+export type CompletionOutcome = { readonly kind: 'completed'; readonly result: CompleteUploadResult }
+  | { readonly kind: 'durable-error'; readonly error: MediaError };
+
+async function readCompletionPlan(sql: postgres.ReservedSql, tenantId: string,
+  sessionId: string, lock: boolean): Promise<CompletionPlan> {
+  // Phase C lock order is always session then asset; Phase A takes no row locks.
+  const [session] = await sql.unsafe<CompletionSession[]>(
+    'SELECT id, media_asset_id, status, expires_at, integrity_version, expected_size_bytes FROM upload_sessions '
+      + 'WHERE tenant_id = $1 AND id = $2' + (lock ? ' FOR UPDATE' : ''), [tenantId, sessionId]);
   if (!session) throw new MediaError(404, 'UPLOAD_SESSION_NOT_FOUND', 'Upload session not found.');
-
-  if (session.status === 'completed') {
-    const [asset] = await sql<{ id: string; status: string; size_bytes: string | null; checksum_sha256: string | null }[]>`
-      SELECT id, status, size_bytes, checksum_sha256 FROM media_assets
-      WHERE tenant_id = ${tenantId} AND id = ${session.media_asset_id}
-    `;
-    if (!asset || asset.status !== 'active') throw new MediaError(409, 'MEDIA_ASSET_NOT_ACTIVE', 'Media asset is not active.');
-    return {
-      mediaAssetId: asset.id,
-      status: 'active',
-      sizeBytes: Number(asset.size_bytes ?? 0),
-      checksumSha256: asset.checksum_sha256,
-    };
-  }
-  if (session.status === 'failed') {
-    throw new MediaError(409, 'UPLOAD_SESSION_FAILED', 'Upload session already failed; it cannot be completed.');
-  }
-  if (session.status === 'expired' || new Date(session.expires_at).getTime() <= Date.now()) {
-    if (session.status === 'pending') {
-      await sql`
-        UPDATE upload_sessions SET status = 'expired'
-        WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId} AND status = 'pending'
-      `;
-    }
-    throw new MediaError(409, 'UPLOAD_SESSION_EXPIRED', 'Upload session expired before it was completed.');
-  }
-
-  const [asset] = await sql<{ id: string; object_key: string; media_type: MediaType; mime_type: string }[]>`
-    SELECT id, object_key, media_type, mime_type FROM media_assets
-    WHERE tenant_id = ${tenantId} AND id = ${session.media_asset_id}
-  `;
+  if (session.status === 'failed') throw new MediaError(409, 'UPLOAD_SESSION_FAILED', 'Upload session already failed; it cannot be completed.');
+  if (session.status !== 'completed' && (session.status === 'expired' || session.integrity_version !== 'v1'
+    || session.expected_size_bytes === null || new Date(session.expires_at).getTime() <= Date.now())) return { session };
+  const [asset] = await sql.unsafe<CompletionAsset[]>(
+    'SELECT id, object_key, bucket, storage_provider, media_type, mime_type, status, size_bytes, checksum_sha256 '
+      + 'FROM media_assets WHERE tenant_id = $1 AND id = $2 '
+      + 'AND deletion_requested_at IS NULL AND deleted_at IS NULL AND purged_at IS NULL'
+      + (lock ? ' FOR UPDATE' : ''), [tenantId, session.media_asset_id]);
   if (!asset) throw new MediaError(404, 'MEDIA_ASSET_NOT_FOUND', 'Media asset not found.');
-
-  const head = await headR2Object(r2, asset.object_key);
-  if (!head.exists) {
-    throw new MediaError(409, 'UPLOAD_NOT_FOUND_IN_STORAGE', 'The object was not found in storage yet; retry the upload before completing.');
+  if (session.status === 'completed' ? asset.status !== 'active' : !['pending_upload', 'uploaded'].includes(asset.status)) {
+    throw new MediaError(409, 'MEDIA_ASSET_NOT_ACTIVE', 'Media asset is not eligible for completion.');
   }
+  return { session, asset };
+}
 
+/** Phase A: tenant-scoped read only. Its transaction is closed before inspecting R2. */
+export async function prepareUploadCompletion(sql: postgres.ReservedSql, tenantId: string,
+  sessionId: string): Promise<CompletionPlan> {
+  return readCompletionPlan(sql, tenantId, sessionId, false);
+}
+
+/** Phase B: no SQL client or database transaction is available to this function. */
+export async function inspectUploadCompletion(r2: R2Config, plan: CompletionPlan): Promise<CompletionObservation | null> {
+  if (!plan.asset || plan.session.status === 'completed') return null;
+  const { asset, session } = plan;
+  if (asset.bucket !== r2.bucket || asset.storage_provider !== 'cloudflare_r2') {
+    throw new MediaError(503, 'MEDIA_STORAGE_UNAVAILABLE', 'Storage integrity validation is temporarily unavailable; retry later.');
+  }
+  const integrityDeadline = Date.now() + 10000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  let failure: IntegrityFailure | null = null;
+  try {
+    const head = await headR2Object(r2, asset.object_key, controller.signal);
+    if (!head.exists) throw new MediaError(409, 'UPLOAD_NOT_FOUND_IN_STORAGE', 'The object was not found in storage yet; retry the upload before completing.');
+    const sizeBytes = head.sizeBytes as number;
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0 || sizeBytes > MEDIA_TYPE_MAX_BYTES[asset.media_type]) {
+      failure = 'MEDIA_SIZE_INVALID';
+    } else if (sizeBytes !== Number(session.expected_size_bytes) || head.contentType !== asset.mime_type
+      || !MEDIA_TYPE_MIME_ALLOWLIST[asset.media_type].includes(asset.mime_type)) {
+      failure = 'MEDIA_METADATA_MISMATCH';
+    } else {
+      try { await inspectR2Content(r2, asset.object_key, asset.mime_type, sizeBytes, head.etag, controller.signal); }
+      catch (error) {
+        if (error instanceof MediaContentInvalid) failure = 'MEDIA_CONTENT_INVALID';
+        else if (error instanceof MediaContentUnsupported) failure = error.integrityFailureCode;
+        else throw error;
+      }
+    }
+    if (Date.now() >= integrityDeadline || controller.signal.aborted) {
+      controller.abort();
+      throw new Error('INTEGRITY_DEADLINE');
+    }
+    return Object.freeze({ plan, sizeBytes, contentType: head.contentType, etag: head.etag, failure });
+  } catch (error) {
+    if (error instanceof MediaError) throw error;
+    throw new MediaError(503, 'MEDIA_STORAGE_UNAVAILABLE', 'Storage integrity validation is temporarily unavailable; retry later.');
+  } finally { clearTimeout(timeout); }
+}
+
+/** Phase C: revalidated tenant transaction; no external I/O. Durable mutations
+ * return a domain outcome. Only the route explicitly opts that outcome into commit.
+ */
+export async function completeUploadSession(sql: postgres.ReservedSql, tenantId: string,
+  uploadSessionId: string, plan: CompletionPlan, observation: CompletionObservation | null,
+  clientChecksumSha256: string | null = null): Promise<CompletionOutcome> {
+  if (clientChecksumSha256 !== null && !/^[a-fA-F0-9]{64}$/.test(clientChecksumSha256)) {
+    throw new MediaError(400, 'REQUEST_VALIDATION_FAILED', 'Checksum must be 64 hexadecimal characters.');
+  }
+  const checksum = clientChecksumSha256?.toLowerCase() ?? null;
+  const current = await readCompletionPlan(sql, tenantId, uploadSessionId, true);
+  const { session, asset } = current;
+  if (session.status === 'completed' && asset) return { kind: 'completed', result: {
+    mediaAssetId: asset.id, status: 'active', sizeBytes: Number(asset.size_bytes), checksumSha256: asset.checksum_sha256,
+  } };
+  if (!asset) {
+    if (session.status === 'pending') {
+      await sql`UPDATE upload_sessions SET status = 'expired' WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}`;
+      await auditMedia(sql, tenantId, session.media_asset_id, uploadSessionId, 'media.upload_session_expired', 'UPLOAD_SESSION_EXPIRED');
+    }
+    return { kind: 'durable-error', error: new MediaError(409, 'UPLOAD_SESSION_EXPIRED', 'Upload session expired; create a new session with a new key.') };
+  }
+  const original = plan.asset;
+  // The DB expectation trigger freezes tenant/asset/version/size. Compare every
+  // other observation input too, including expiry, MIME, key, bucket and status.
+  if (!original || !observation || observation.plan !== plan
+    || session.id !== plan.session.id || session.media_asset_id !== plan.session.media_asset_id
+    || session.integrity_version !== plan.session.integrity_version
+    || String(session.expected_size_bytes) !== String(plan.session.expected_size_bytes)
+    || +new Date(session.expires_at) !== +new Date(plan.session.expires_at)
+    || (['id', 'object_key', 'bucket', 'storage_provider', 'media_type', 'mime_type', 'status'] as const)
+      .some((key) => asset[key] !== original[key])) {
+    throw new MediaError(409, 'MEDIA_ASSET_NOT_ACTIVE', 'Upload metadata changed during inspection; retry completion.');
+  }
+  const { sizeBytes, failure } = observation;
   const now = new Date();
-  const sizeBytes = head.sizeBytes ?? 0;
-  const maxBytes = MEDIA_TYPE_MAX_BYTES[asset.media_type];
-  const isValid = sizeBytes > 0 && sizeBytes <= maxBytes;
-
-  // pending_upload -> uploaded (object confirmed present) happens regardless of validity.
-  await sql`
-    UPDATE media_assets
-    SET status = 'uploaded', size_bytes = ${sizeBytes}, checksum_sha256 = ${clientChecksumSha256},
-        uploaded_at = ${now}, updated_at = ${now}
-    WHERE tenant_id = ${tenantId} AND id = ${asset.id}
-  `;
-
-  if (!isValid) {
-    await sql`UPDATE media_assets SET status = 'quarantined', updated_at = ${now} WHERE tenant_id = ${tenantId} AND id = ${asset.id}`;
-    await sql`UPDATE upload_sessions SET status = 'failed' WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}`;
-    throw new MediaError(422, 'MEDIA_SIZE_INVALID', 'Uploaded object size is invalid for this media_type; asset was quarantined.');
+  await sql`UPDATE media_assets SET status = 'uploaded', size_bytes = ${sizeBytes}, checksum_sha256 = ${checksum},
+    uploaded_at = COALESCE(uploaded_at, ${now}), updated_at = ${now}
+    WHERE tenant_id = ${tenantId} AND id = ${asset.id}`;
+  if (failure) {
+    await sql`UPDATE media_assets SET status = 'quarantined', quarantined_at = COALESCE(quarantined_at, ${now}),
+      integrity_failure_code = ${failure}, updated_at = ${now} WHERE tenant_id = ${tenantId} AND id = ${asset.id}`;
+    await sql`UPDATE upload_sessions SET status = 'failed', completed_at = NULL
+      WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}`;
+    await auditMedia(sql, tenantId, asset.id, uploadSessionId, 'media.quarantined', failure);
+    const code = failure === 'MEDIA_FORMAT_UNSUPPORTED' || failure === 'MEDIA_INSPECTION_LIMIT_EXCEEDED'
+      ? 'MEDIA_CONTENT_INVALID' : failure;
+    return { kind: 'durable-error', error: new MediaError(422, code, 'Uploaded object failed integrity validation and was quarantined.') };
   }
-
   await sql`UPDATE media_assets SET status = 'active', updated_at = ${now} WHERE tenant_id = ${tenantId} AND id = ${asset.id}`;
-  await sql`
-    UPDATE upload_sessions SET status = 'completed', completed_at = ${now}
-    WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}
-  `;
+  await sql`UPDATE upload_sessions SET status = 'completed', completed_at = ${now}
+    WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}`;
+  await auditMedia(sql, tenantId, asset.id, uploadSessionId, 'media.upload_completed');
+  return { kind: 'completed', result: { mediaAssetId: asset.id, status: 'active', sizeBytes, checksumSha256: checksum } };
+}
 
-  return { mediaAssetId: asset.id, status: 'active', sizeBytes, checksumSha256: clientChecksumSha256 };
+async function auditMedia(sql: postgres.ReservedSql, tenantId: string, mediaId: string,
+  sessionId: string, action: string, reason: string | null = null): Promise<void> {
+  // Actor and correlation originate exclusively in the verified, transaction-local context.
+  await sql`INSERT INTO public.audit_logs
+    (id, tenant_id, actor_type, actor_user_id, actor_membership_id, action, outcome,
+      entity_type, entity_id, reason_code, metadata_json, request_id)
+    VALUES (${uuidV7()}, ${tenantId}, 'user',
+      NULLIF(current_setting('app.user_id', true), '')::uuid,
+      NULLIF(current_setting('app.membership_id', true), '')::uuid,
+      ${action}, 'success', 'media_asset', ${mediaId}, ${reason},
+      ${sql.json({ upload_session_id: sessionId })}, current_setting('app.request_id', true))`;
 }
 
 export interface DownloadUrlResult {

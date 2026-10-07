@@ -5,7 +5,9 @@
 // state with the dev DB or any other run), runs migrations through the
 // concurrency-safe lock in scripts/migrate.cjs, provisions a real
 // NOBYPASSRLS runtime login, deploys the API, smoke-tests it, then
-// simulates a bad deploy and proves rollback recovers service. Everything
+// simulates bad config AND a distinct incompatible binary, proving recovery
+// to the pinned good v1 artifact. This local drill is implementation evidence;
+// real staging promotion is required before production migration. Everything
 // is torn down (containers, network, images, temp files) in `finally`.
 
 const assert = require('node:assert/strict');
@@ -75,6 +77,16 @@ async function fetchJson(url, options = {}) {
 async function main() {
   const report = {
     build: 'FAIL',
+    media_recovery_artifact: 'FAIL',
+    media_forward_recovery: 'FAIL',
+    media_initial_v1_writer: 'FAIL',
+    binary_distinct_artifacts: 'FAIL',
+    binary_candidate_capability_rejected: 'FAIL',
+    binary_candidate_startup_rejected: 'FAIL',
+    binary_api_recovery: 'FAIL',
+    binary_worker_recovery: 'FAIL',
+    binary_schema_0025_preserved: 'FAIL',
+    binary_data_history_preserved: 'FAIL',
     staging_deploy: 'FAIL',
     migration: 'FAIL',
     migrations: 'FAIL',
@@ -101,11 +113,15 @@ async function main() {
     cleanup: 'FAIL',
   };
 
+  const imageEvidence = { GOOD_RECOVERY_IMAGE_ID: null, BAD_CANDIDATE_IMAGE_ID: null };
   const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
   const project = `tm-staging-${suffix}`;
   const imageGood = `tallermecario-api:${suffix}-good`;
-  const imageBad = `tallermecario-api:${suffix}-bad`;
+  const imageBad = `tallermecario-api:${suffix}-bad-binary`;
+  const badBuildDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `tm-staging-binary-${suffix}-`));
+  const binaryOverrideFile = path.join(badBuildDirectory, 'binary.yml');
   const envFile = path.join(os.tmpdir(), `tallermecario-staging-${suffix}.env`);
+  let recoveryOverrideFile;
   const badOverrideFile = path.join(os.tmpdir(), `tallermecario-staging-bad-${suffix}.yml`);
 
   let stackUp = false;
@@ -162,6 +178,34 @@ async function main() {
     if (build.status !== 0) throw new Error('DOCKER_BUILD_FAILED');
     process.stdout.write(`BUILD_PASS ${imageGood}\n`);
     report.build = 'PASS';
+
+    // 0025 cannot be rolled back to a pre-B02 writer. Pin and capability-check
+    // the local v1 artifact BEFORE this disposable migration, never the tag.
+    // This does NOT qualify it as known-good for a real target environment.
+    const inspectGood = run('docker', ['image', 'inspect', '--format', '{{.Id}}', imageGood], { capture: true });
+    assert.equal(inspectGood.status, 0);
+    const recoveryImageId = inspectGood.stdout.trim();
+    imageEvidence.GOOD_RECOVERY_IMAGE_ID = recoveryImageId;
+    assert.match(recoveryImageId, /^sha256:[a-f0-9]{64}$/);
+    const capability = run('docker', ['run', '--rm', '--entrypoint', 'node', recoveryImageId,
+      'dist/media/deployment.js', '--artifact-capability'], { capture: true });
+    assert.equal(capability.status, 0, 'do not migrate without a v1 recovery artifact');
+    assert.equal(capability.stdout.trim(), 'MEDIA_INTEGRITY_WRITER_v1');
+    // Old artifacts missing this module fail the same pre-migration gate.
+    const absentCapability = run('docker', ['run', '--rm', '--entrypoint', 'node', recoveryImageId,
+      'dist/media/pre-b02-capability.js', '--artifact-capability'], { capture: true });
+    assert.notEqual(absentCapability.status, 0);
+    const goodOverrideFile = path.join(os.tmpdir(), `tallermecario-staging-recovery-${suffix}.yml`);
+    fs.writeFileSync(goodOverrideFile, `services:\n  api:\n    image: ${recoveryImageId}\n  worker:\n    image: ${recoveryImageId}\n`);
+    // Recovery below must select this immutable image. Register cleanup now.
+    recoveryOverrideFile = goodOverrideFile;
+    // Use the immutable ID for migration/provisioning and the initial deploy too.
+    fs.writeFileSync(envFile, envContents.replace(`STAGING_API_IMAGE=${imageGood}`,
+      `STAGING_API_IMAGE=${recoveryImageId}`), { encoding: 'utf8', mode: 0o600 });
+    report.media_recovery_artifact = 'PASS';
+    process.stdout.write(`GOOD_RECOVERY_IMAGE_ID ${recoveryImageId} local disposable artifact\n`);
+    process.stdout.write('MEDIA_V1_RECOVERY_ARTIFACT_PINNED_PASS before migration; pre-B02 capability rejected\n');
+
 
     // ---- staging deploy: postgres up, migrate, provision, api/worker up ----
     const pgUp = compose(project, envFile, ['up', '-d', 'postgres']);
@@ -341,6 +385,56 @@ async function main() {
         && [200, 201].includes(event.status_code)).length, 1);
     }
     process.stdout.write(`RECEPTION_LOG_PRIVACY_PASS ${receptionE2e.requestCount} completion events; closed allowlist; audit correlation\n`);
+    // A real authenticated v1 writer is part of the GOOD artifact's local gates.
+    // No external PUT is performed. Seed media evidence before either failure.
+    const createV1Media = async () => {
+      const upload = await fetchJson(`${baseUrl}/api/v1/media/upload-sessions`, {
+        method: 'POST', headers: { authorization: `Bearer ${receptionE2e.recoveryToken}`,
+          'x-tenant-id': tenants.a.tenantId, 'content-type': 'application/json' },
+        body: JSON.stringify({ mediaType: 'signature', mimeType: 'image/png',
+          retentionClass: 'authorization_evidence', expectedSizeBytes: 68, idempotencyKey: randomUUID() }),
+      });
+      assert.equal(upload.status, 201, 'authenticated v1 media create');
+      const [stored] = await admin`SELECT integrity_version,expected_size_bytes,status FROM upload_sessions
+        WHERE id=${upload.body.uploadSessionId} AND tenant_id=${tenants.a.tenantId}`;
+      assert.equal(stored.integrity_version, 'v1');
+      assert.equal(Number(stored.expected_size_bytes), 68);
+      assert.equal(stored.status, 'pending');
+      assert.equal(upload.body.uploadHeaders['If-None-Match'], '*');
+      const [audit] = await admin`SELECT count(*)::int AS n FROM audit_logs
+        WHERE tenant_id=${tenants.a.tenantId} AND entity_id=${upload.body.mediaAssetId}
+        AND action='media.upload_session_created'`;
+      assert.equal(audit.n, 1);
+    };
+    await createV1Media();
+    report.media_initial_v1_writer = 'PASS';
+    const mediaSnapshot = async () => JSON.stringify(await admin`SELECT
+      (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM upload_sessions s
+        WHERE s.tenant_id IN (${tenants.a.tenantId},${tenants.b.tenantId})) AS sessions,
+      (SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM media_assets a
+        WHERE a.tenant_id IN (${tenants.a.tenantId},${tenants.b.tenantId})) AS assets,
+      (SELECT jsonb_agg(to_jsonb(l) ORDER BY l.id) FROM audit_logs l
+        WHERE l.tenant_id IN (${tenants.a.tenantId},${tenants.b.tenantId})) AS audits`);
+    const initialMediaSnapshot = await mediaSnapshot();
+    const containerState = (service) => {
+      const id = compose(project, envFile, ['ps', '-aq', service], { capture: true });
+      assert.equal(id.status, 0);
+      assert.ok(id.stdout.trim(), `${service} container must exist`);
+      const inspected = run('docker', ['inspect', '--format',
+        '{{json .Image}} {{json .State.Status}} {{json .State.ExitCode}}', id.stdout.trim()], { capture: true });
+      assert.equal(inspected.status, 0);
+      const [image, state, exitCode] = JSON.parse(`[${inspected.stdout.trim().split(' ').join(',')}]`);
+      return { image, state, exitCode };
+    };
+    const assertGoodProcesses = () => {
+      for (const service of ['api', 'worker']) {
+        const state = containerState(service);
+        assert.equal(state.image, recoveryImageId, `${service} uses the pinned GOOD image`);
+        assert.equal(state.state, 'running', `${service} is running`);
+      }
+    };
+    assertGoodProcesses();
+    process.stdout.write('GOOD_V1_LOCAL_GATES_PASS API, worker, authenticated v1 create, tenant/RBAC/audit/history\n');
     const crmSnapshotAfterReception = await readDataSnapshot(admin, e2e.vehicleId,
       tenants.a.tenantId, tenants.b.tenantId);
 
@@ -349,20 +443,17 @@ async function main() {
     const badOverride = [
       'services:',
       '  api:',
-      `    image: ${imageBad}`,
+      `    image: ${recoveryImageId}`,
       '    environment:',
       "      DATABASE_URL: postgresql://tallermecario_runtime:wrong-password@postgres:5432/tallermecario_staging",
       '',
     ].join('\n');
     fs.writeFileSync(badOverrideFile, badOverride, 'utf8');
     badOverrideWritten = true;
-    const tagBad = run('docker', ['tag', imageGood, imageBad]);
-    if (tagBad.status !== 0) throw new Error('DOCKER_TAG_BAD_FAILED');
-    imagesBuilt.push(imageBad);
 
     const badDeploy = run('docker', [
       'compose', '-f', COMPOSE_FILE, '-f', badOverrideFile, '-p', project, '--env-file', envFile,
-      'up', '-d', 'api',
+      'up', '-d', '--no-deps', 'api',
     ]);
     if (badDeploy.status !== 0) throw new Error('BAD_DEPLOY_COMMAND_FAILED');
 
@@ -376,7 +467,8 @@ async function main() {
     process.stdout.write('BAD_DEPLOY_CORRECTLY_REJECTED_AT_STARTUP\n');
     report.bad_config = 'PASS';
 
-    const rollback = compose(project, envFile, ['up', '-d', 'api']);
+    const rollback = run('docker', ['compose', '-f', COMPOSE_FILE, '-f', recoveryOverrideFile,
+      '-p', project, '--env-file', envFile, 'up', '-d', '--no-deps', 'api', 'worker']);
     if (rollback.status !== 0) throw new Error('ROLLBACK_REDEPLOY_COMMAND_FAILED');
     const recovered = await waitFor(
       async () => {
@@ -387,6 +479,92 @@ async function main() {
     );
     if (!recovered.body?.checks?.database) throw new Error('ROLLBACK_DID_NOT_RESTORE_READY_STATE');
     report.rollback_recovery = 'PASS';
+    assertGoodProcesses();
+    assert.equal(await migrationState(admin), initialMigrationState);
+    assert.equal(await mediaSnapshot(), initialMediaSnapshot);
+    process.stdout.write('BAD_CONFIG_RECOVERY_PASS pinned GOOD image; schema and media/audit preserved\n');
+
+    // Disposable fixture ONLY: break the artifact's startup capability module,
+    // and use that failing module as the worker entrypoint. No source/runtime
+    // bypass flags or altered DB credentials are added to the production image.
+    const failureMarker = 'MEDIA_INTEGRITY_DRILL_ARTIFACT_INCOMPATIBLE';
+    fs.writeFileSync(path.join(badBuildDirectory, 'startup.cjs'),
+      `'use strict';\nthrow new Error('${failureMarker}');\n`);
+    // BuildKit needs a local named base, rather than a raw Docker image ID.
+    // This per-run build alias is checked against GOOD; deploy/recovery still
+    // exclusively use immutable IDs, never the alias as recovery evidence.
+    const checkBuildBase = () => {
+      const base = run('docker', ['image', 'inspect', '--format', '{{.Id}}', imageGood], { capture: true });
+      assert.equal(base.status, 0);
+      assert.equal(base.stdout.trim(), recoveryImageId);
+    };
+    checkBuildBase();
+    fs.writeFileSync(path.join(badBuildDirectory, 'Dockerfile'),
+      `FROM ${imageGood}\nCOPY startup.cjs /app/dist/media/deployment.js\nCOPY startup.cjs /app/dist/worker/run.js\n`);
+    imagesBuilt.push(imageBad);
+    const badBuild = run('docker', ['build', '-t', imageBad, badBuildDirectory]);
+    assert.equal(badBuild.status, 0, 'disposable incompatible binary build');
+    checkBuildBase();
+    const inspectBad = run('docker', ['image', 'inspect', '--format', '{{.Id}}', imageBad], { capture: true });
+    assert.equal(inspectBad.status, 0);
+    const badCandidateImageId = inspectBad.stdout.trim();
+    assert.match(badCandidateImageId, /^sha256:[a-f0-9]{64}$/);
+    imageEvidence.BAD_CANDIDATE_IMAGE_ID = badCandidateImageId;
+    assert.notEqual(recoveryImageId, badCandidateImageId);
+    report.binary_distinct_artifacts = 'PASS';
+    process.stdout.write(`BAD_CANDIDATE_IMAGE_ID ${badCandidateImageId}\nBINARY_DIGESTS_DIFFER_PASS\n`);
+    const badCapability = run('docker', ['run', '--rm', '--entrypoint', 'node', badCandidateImageId,
+      'dist/media/deployment.js', '--artifact-capability'], { capture: true });
+    assert.notEqual(badCapability.status, 0);
+    assert.ok(badCapability.stderr.includes(failureMarker));
+    report.binary_candidate_capability_rejected = 'PASS';
+    // Negative test deliberately attempts a gated-out artifact on this local
+    // disposable stack. Release automation must reject it before real deploys.
+    fs.writeFileSync(binaryOverrideFile,
+      `services:\n  api:\n    image: ${badCandidateImageId}\n  worker:\n    image: ${badCandidateImageId}\n`);
+    const binaryDeploy = run('docker', ['compose', '-f', COMPOSE_FILE, '-f', binaryOverrideFile,
+      '-p', project, '--env-file', envFile, 'up', '-d', '--no-deps', 'api', 'worker']);
+    assert.equal(binaryDeploy.status, 0);
+    await waitFor(async () => {
+      for (const service of ['api', 'worker']) {
+        const state = containerState(service);
+        assert.equal(state.image, badCandidateImageId);
+        if (state.state !== 'exited' || state.exitCode === 0) return false;
+        const logs = compose(project, envFile, ['logs', '--no-color', '--no-log-prefix', service], { capture: true });
+        if (logs.status !== 0 || !logs.stdout.concat(logs.stderr).includes(failureMarker)) return false;
+      }
+      return true;
+    }, { timeoutMs: 20000, label: 'BAD_BINARY_STARTUP_FAILURE' });
+    const binaryReady = await fetchJson(`${baseUrl}/health/ready`).catch(() => ({ status: 0 }));
+    assert.notEqual(binaryReady.status, 200);
+    assert.equal(await migrationState(admin), initialMigrationState);
+    assert.equal(await mediaSnapshot(), initialMediaSnapshot);
+    report.binary_candidate_startup_rejected = 'PASS';
+    process.stdout.write('BAD_BINARY_REJECTED_PASS API and worker exit nonzero; readiness fails; valid DB config unchanged\n');
+
+    const binaryRecovery = run('docker', ['compose', '-f', COMPOSE_FILE, '-f', recoveryOverrideFile,
+      '-p', project, '--env-file', envFile, 'up', '-d', '--no-deps', 'api', 'worker']);
+    assert.equal(binaryRecovery.status, 0);
+    await waitFor(async () => {
+      const result = await fetchJson(`${baseUrl}/health/ready`);
+      return result.status === 200 && result.body?.checks?.database;
+    }, { timeoutMs: 30000, label: 'BINARY_API_RECOVERY' });
+    assertGoodProcesses();
+    report.binary_api_recovery = 'PASS';
+    // Prove the restored worker actually polls/claims/writes in PostgreSQL.
+    // Unknown synthetic event => existing permanent-failure path; no external IO.
+    const probeId = randomUUID();
+    await admin`INSERT INTO outbox_events (id,tenant_id,aggregate_type,event_type,payload_json)
+      VALUES (${probeId},${tenants.a.tenantId},'staging_drill','staging.binary_recovery_probe','{}'::jsonb)`;
+    await waitFor(async () => {
+      const [probe] = await admin`SELECT status,attempts,last_error FROM outbox_events
+        WHERE id=${probeId} AND tenant_id=${tenants.a.tenantId}`;
+      return probe?.status === 'failed' && probe.attempts === 1
+        && probe.last_error === 'no handler registered for event_type staging.binary_recovery_probe';
+    }, { timeoutMs: 15000, label: 'BINARY_WORKER_POLL_RECOVERY' });
+    assertGoodProcesses();
+    report.binary_worker_recovery = 'PASS';
+    process.stdout.write(`GOOD_BINARY_RECOVERY_PASS API ready; worker real DB claim/transition; both image=${recoveryImageId}\n`);
     const restoredHistory = await fetchJson(`${baseUrl}${e2e.ownerRoute}`, {
       headers: { authorization: `Bearer ${e2e.recoveryToken}`,
         'x-tenant-id': tenants.a.tenantId },
@@ -417,6 +595,18 @@ async function main() {
     process.stdout.write('RECEPTION_ROLLBACK_DATA_PRESERVED_PASS\n');
     assert.equal(await migrationState(admin), initialMigrationState,
       'migration ledger and schema unchanged after recovery');
+    assert.equal(latestTag, '0025_s4_b02_media_integrity');
+    report.binary_schema_0025_preserved = 'PASS';
+    assert.equal(await mediaSnapshot(), initialMediaSnapshot,
+      'existing media rows and audit history unchanged after both failure scenarios');
+    report.binary_data_history_preserved = 'PASS';
+    process.stdout.write('BINARY_SCHEMA_0025_AND_DATA_HISTORY_PRESERVED_PASS ledger, constraints, triggers, CRM/reception/media/audit\n');
+    // Actual authenticated HTTP writer after recovery, not merely health/auth
+    // smoke. No R2 PUT; the exact v1 expectation is persisted with an audit.
+    await createV1Media();
+    report.media_forward_recovery = 'PASS';
+    process.stdout.write('MEDIA_V1_FORWARD_RECOVERY_PASS authenticated create, exact expectation, write-once headers\n');
+
     report.rollback_data_preserved = 'PASS';
     process.stdout.write('ROLLBACK_REDEPLOY_PASS (bad deploy detected and rolled back to known-good)\n');
     report.rollback_redeploy = 'PASS';
@@ -442,8 +632,12 @@ async function main() {
           cleanupOk = false;
       } catch { cleanupOk = false; }
     }
+    if (recoveryOverrideFile && fs.existsSync(recoveryOverrideFile)) fs.rmSync(recoveryOverrideFile, { force: true });
     if (envWritten && fs.existsSync(envFile)) fs.rmSync(envFile, { force: true });
     if (badOverrideWritten && fs.existsSync(badOverrideFile)) fs.rmSync(badOverrideFile, { force: true });
+    if (recoveryOverrideFile && fs.existsSync(recoveryOverrideFile)) cleanupOk = false;
+    try { fs.rmSync(badBuildDirectory, { recursive: true, force: true }); } catch { cleanupOk = false; }
+    if (fs.existsSync(badBuildDirectory)) cleanupOk = false;
     if (envWritten && fs.existsSync(envFile)) cleanupOk = false;
     if (badOverrideWritten && fs.existsSync(badOverrideFile)) cleanupOk = false;
     if (stackUp) {
@@ -460,9 +654,9 @@ async function main() {
     }
     if (cleanupOk) report.cleanup = 'PASS';
 
-    process.stdout.write(`\nSTAGING_DRILL_REPORT ${JSON.stringify(report, null, 2)}\n`);
+    process.stdout.write(`\nSTAGING_DRILL_REPORT ${JSON.stringify({ ...report, ...imageEvidence }, null, 2)}\n`);
     if (process.env.GITHUB_STEP_SUMMARY) {
-      const rows = Object.entries(report).map(([key, value]) => `| ${key} | ${value} |`).join('\n');
+      const rows = Object.entries({ ...report, ...imageEvidence }).map(([key, value]) => `| ${key} | ${value} |`).join('\n');
       fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
         `\n## Sprint 3 backend staging deploy drill\n\n| Gate | Result |\n| --- | --- |\n${rows}\n`, 'utf8');
     }
