@@ -1,4 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
+import { setTimeout as backoff } from 'node:timers/promises';
 
 /**
  * ADR-003: media never streams through the API. This module only builds
@@ -152,12 +153,49 @@ export class R2UnavailableError extends Error {
   constructor() { super('MEDIA_STORAGE_UNAVAILABLE'); }
 }
 
+// Internal retry classification never leaves this adapter.
+class R2TransientError extends R2UnavailableError {}
+const READ_ATTEMPT_TIMEOUT_MS = 4000;
+const READ_RETRY_BACKOFF_MS = 25;
+
+/** Two attempts for safe reads only. The caller's overall signal always wins,
+ * including during body consumption and backoff; no new completion deadline.
+ */
+async function safeInspectionRead<T>(signal: AbortSignal, read: (attemptSignal: AbortSignal) => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (signal.aborted) throw new R2UnavailableError();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), READ_ATTEMPT_TIMEOUT_MS);
+    const attemptSignal = AbortSignal.any([signal, controller.signal]);
+    try {
+      const result = await read(attemptSignal);
+      if (attemptSignal.aborted) throw new R2TransientError();
+      return result;
+    } catch (error) {
+      if (signal.aborted || attempt === 1
+        || (!(error instanceof R2TransientError) && !controller.signal.aborted)) throw new R2UnavailableError();
+    } finally { clearTimeout(timer); }
+    try { await backoff(READ_RETRY_BACKOFF_MS, undefined, { signal }); }
+    catch { throw new R2UnavailableError(); }
+  }
+  throw new R2UnavailableError();
+}
+
+async function inspectionFetch(url: string, init: RequestInit): Promise<Response> {
+  try { return await fetch(url, init); }
+  catch { throw new R2TransientError(); }
+}
+function transientStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
 /** Confirms a completed upload without ever reading the object body. */
 export async function headR2Object(config: R2Config, objectKey: string, signal = AbortSignal.timeout(5000)): Promise<R2ObjectHead> {
   const url = presignR2Url(config, { method: 'HEAD', objectKey, expiresInSeconds: 60 });
-  try {
-    const response = await fetch(url, { method: 'HEAD', signal, redirect: 'error' });
+  return safeInspectionRead(signal, async (attemptSignal) => {
+    const response = await inspectionFetch(url, { method: 'HEAD', signal: attemptSignal, redirect: 'error' });
     if (response.status === 404) return { exists: false };
+    if (transientStatus(response.status)) throw new R2TransientError();
     if (response.status !== 200) throw new R2UnavailableError();
     const contentLength = response.headers.get('content-length');
     if (contentLength === null || !/^\d+$/.test(contentLength)
@@ -165,7 +203,7 @@ export async function headR2Object(config: R2Config, objectKey: string, signal =
     return { exists: true, sizeBytes: Number(contentLength),
       contentType: response.headers.get('content-type') ?? undefined,
       etag: response.headers.get('etag') ?? undefined };
-  } catch { throw new R2UnavailableError(); }
+  });
 }
 
 /** Exact bounded range, pinned to the HEAD observation. ETag is only a version token. */
@@ -176,29 +214,36 @@ export async function readR2Range(config: R2Config, objectKey: string, size: num
   const headers = { Range: `bytes=${offset}-${offset + length - 1}`, 'If-Match': etag };
   const url = presignR2Url(config, { method: 'GET', objectKey, expiresInSeconds: 60,
     extraSignedHeaders: headers });
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  try {
-    const response = await fetch(url, { headers, signal, redirect: 'error' });
-    if (response.status !== 206 || response.headers.get('content-range') !== `bytes ${offset}-${offset + length - 1}/${size}`
-      || response.headers.get('etag') !== etag || response.headers.get('content-encoding')
-      || response.headers.get('content-length') !== String(length) || !response.body) {
-      await response.body?.cancel();
-      throw new R2UnavailableError();
-    }
-    reader = response.body.getReader();
-    const bytes = Buffer.alloc(length);
-    let count = 0;
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      if (count + chunk.value.length > length) throw new R2UnavailableError();
-      bytes.set(chunk.value, count);
-      count += chunk.value.length;
-    }
-    if (count !== length || signal.aborted) throw new R2UnavailableError();
-    return bytes;
-  } catch { throw new R2UnavailableError(); }
-  finally { await reader?.cancel().catch(() => undefined); reader?.releaseLock(); }
+  return safeInspectionRead(signal, async (attemptSignal) => {
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      const response = await inspectionFetch(url, { headers, signal: attemptSignal, redirect: 'error' });
+      if (transientStatus(response.status)) {
+        await response.body?.cancel();
+        throw new R2TransientError();
+      }
+      if (response.status !== 206 || response.headers.get('content-range') !== `bytes ${offset}-${offset + length - 1}/${size}`
+        || response.headers.get('etag') !== etag || response.headers.get('content-encoding')
+        || response.headers.get('content-length') !== String(length) || !response.body) {
+        await response.body?.cancel();
+        throw new R2UnavailableError();
+      }
+      reader = response.body.getReader();
+      const bytes = Buffer.alloc(length);
+      let count = 0;
+      while (true) {
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try { chunk = await reader.read(); }
+        catch { throw new R2TransientError(); }
+        if (chunk.done) break;
+        if (count + chunk.value.length > length) throw new R2UnavailableError();
+        bytes.set(chunk.value, count);
+        count += chunk.value.length;
+      }
+      if (count !== length) throw new R2UnavailableError();
+      return bytes;
+    } finally { await reader?.cancel().catch(() => undefined); reader?.releaseLock(); }
+  });
 }
 
 /** Test/cleanup helper -- production purge flow is documented separately (retention baseline). */

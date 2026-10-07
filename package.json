@@ -109,7 +109,7 @@
     "test:reception:harness": "npm run build && node --test tests/reception-harness/*.test.cjs",
     "test:reception:contract:mutations": "node --env-file=.env scripts/test-reception-contract-mutations.cjs",
     "test:reception:contract:mutations:ci": "node scripts/test-reception-contract-mutations.cjs",
-    "test:media:integrity": "npm run build && node --test tests/media/content.test.cjs tests/media/r2-integrity.test.cjs",
+    "test:media:integrity": "npm run build && node --test tests/media/content.test.cjs tests/media/r2-integrity.test.cjs tests/media/idempotency.test.cjs",
     "test:media:api:ci": "node scripts/test-media-integrity-api.cjs",
     "test:media:upgrade:ci": "npm run build && node scripts/test-media-integrity-upgrade.cjs"
   },
