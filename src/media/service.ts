@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
 import { headR2Object, presignR2Url, writeOnceUploadHeaders, type R2Config } from './r2.js';
 import { inspectR2Content, MediaContentInvalid, MediaContentUnsupported } from './content.js';
@@ -91,10 +91,23 @@ export interface UploadSessionResult {
   expiresAt: string;
 }
 
-function signedUploadTarget(r2: R2Config, objectKey: string, mimeType: string) {
+/** UUID spellings are canonicalized exactly as PostgreSQL uuid equality.
+ * Hash collisions only add serialization; RLS and tenant predicates authorize.
+ */
+export function uploadCreateLockKey(tenantId: string, idempotencyKey: string): string {
+  return createHash('sha256').update(`media-create:v1:${tenantId.toLowerCase()}:${idempotencyKey.toLowerCase()}`)
+    .digest().readBigInt64BE(0).toString();
+}
+
+export function uploadUrlTtlSeconds(expiresAt: Date, now: Date): number {
+  return Math.min(UPLOAD_URL_TTL_SECONDS, Math.floor((+expiresAt - +now) / 1000));
+}
+
+function signedUploadTarget(r2: R2Config, objectKey: string, mimeType: string, ttlSeconds: number, now: Date) {
+  if (ttlSeconds < 1) throw new MediaError(409, 'UPLOAD_SESSION_EXPIRED', 'Upload session expired.');
   const uploadHeaders = writeOnceUploadHeaders(mimeType);
   const uploadUrl = presignR2Url(r2, {
-    method: 'PUT', objectKey, expiresInSeconds: UPLOAD_URL_TTL_SECONDS,
+    method: 'PUT', objectKey, expiresInSeconds: ttlSeconds, now,
     extraSignedHeaders: uploadHeaders,
   });
   return { uploadUrl, uploadMethod: 'PUT' as const, uploadHeaders };
@@ -129,46 +142,56 @@ export async function createUploadSession(
     throw new MediaError(403, 'PERMISSION_DENIED', 'Operational upload requires a verified domain context.');
   }
 
-  const [existing] = await sql<
-    { id: string; media_asset_id: string; status: string; expires_at: Date; object_key: string; mime_type: string; expected_size_bytes: string | null; integrity_version: string }[]
-  >`
-    SELECT us.id, us.media_asset_id, us.status, us.expires_at, ma.object_key, ma.mime_type, us.expected_size_bytes, us.integrity_version
-    FROM upload_sessions us
-    JOIN media_assets ma ON ma.tenant_id = us.tenant_id AND ma.id = us.media_asset_id
-    WHERE us.tenant_id = ${tenantId} AND us.idempotency_key = ${input.idempotencyKey} FOR UPDATE OF us
+  // Lock order: transaction advisory key -> upload_session -> media_asset.
+  // Acquired before the absent-row decision, released at commit/rollback.
+  // No external storage I/O occurs in create (presigning is local crypto).
+  await sql`SELECT pg_catalog.pg_advisory_xact_lock(${uploadCreateLockKey(tenantId, input.idempotencyKey)}::bigint)`;
+  const [existing] = await sql<CompletionSession[]>`
+    SELECT id, media_asset_id, status, expires_at, expected_size_bytes, integrity_version
+    FROM upload_sessions
+    WHERE tenant_id = ${tenantId} AND idempotency_key = ${input.idempotencyKey} FOR UPDATE
   `;
 
   if (existing) {
+    // Separate read after the session lock observes a concurrent completion's
+    // committed asset; never lock the asset before the session.
+    const [asset] = await sql<{ object_key: string; mime_type: string; media_type: string;
+      retention_class: string; captured_at_matches: boolean }[]>`
+      SELECT object_key, mime_type, media_type, retention_class,
+        captured_at IS NOT DISTINCT FROM ${input.capturedAt ?? null}::text::timestamptz AS captured_at_matches
+      FROM media_assets WHERE tenant_id = ${tenantId} AND id = ${existing.media_asset_id} FOR UPDATE
+    `;
+    if (!asset) throw new MediaError(404, 'MEDIA_ASSET_NOT_FOUND', 'Media asset not found.');
+    // Compare v1 semantics BEFORE disclosing any terminal outcome. PostgreSQL
+    // compares timestamp instants at persisted precision, preserving NULL.
+    if (existing.integrity_version === 'v1' && existing.expected_size_bytes !== null
+      && (Number(existing.expected_size_bytes) !== input.expectedSizeBytes || asset.mime_type !== input.mimeType
+        || asset.media_type !== input.mediaType || asset.retention_class !== input.retentionClass
+        || !asset.captured_at_matches)) {
+      throw new MediaError(409, 'IDEMPOTENCY_PAYLOAD_MISMATCH', 'Upload payload differs from the existing session.');
+    }
     if (existing.status === 'completed') {
       throw new MediaError(409, 'UPLOAD_SESSION_ALREADY_COMPLETED', 'This upload session was already completed.');
     }
     if (existing.status === 'failed') {
       throw new MediaError(409, 'UPLOAD_SESSION_FAILED', 'This upload session already failed; retry with a new idempotency key.');
     }
+    const now = new Date();
+    const expiresAt = new Date(existing.expires_at);
+    const ttlSeconds = uploadUrlTtlSeconds(expiresAt, now);
     if (existing.integrity_version !== 'v1' || existing.expected_size_bytes === null
-      || existing.status === 'expired' || new Date(existing.expires_at).getTime() <= Date.now()) {
+      || existing.status === 'expired' || ttlSeconds < 1) {
       if (existing.status === 'pending') {
-        await sql`
-          UPDATE upload_sessions SET status = 'expired'
-          WHERE tenant_id = ${tenantId} AND id = ${existing.id} AND status = 'pending'
-        `;
-      }
-      if (existing.status === 'pending') {
+        await sql`UPDATE upload_sessions SET status = 'expired'
+          WHERE tenant_id = ${tenantId} AND id = ${existing.id} AND status = 'pending'`;
         await auditMedia(sql, tenantId, existing.media_asset_id, existing.id, 'media.upload_session_expired', 'UPLOAD_SESSION_EXPIRED');
       }
       throw new MediaError(409, 'UPLOAD_SESSION_EXPIRED', 'This upload session expired; retry with a new idempotency key.');
     }
-    if (Number(existing.expected_size_bytes) !== input.expectedSizeBytes || existing.mime_type !== input.mimeType) {
-      throw new MediaError(409, 'IDEMPOTENCY_PAYLOAD_MISMATCH', 'Upload expectation differs from the existing session.');
-    }
-    // Same in-flight request retried: return the same target, a fresh signed PUT URL.
     return {
-      uploadSessionId: existing.id,
-      mediaAssetId: existing.media_asset_id,
-      status: 'pending',
-      ...signedUploadTarget(r2, existing.object_key, existing.mime_type),
-      objectKey: existing.object_key,
-      expiresAt: new Date(existing.expires_at).toISOString(),
+      uploadSessionId: existing.id, mediaAssetId: existing.media_asset_id, status: 'pending',
+      ...signedUploadTarget(r2, asset.object_key, asset.mime_type, ttlSeconds, now),
+      objectKey: asset.object_key, expiresAt: expiresAt.toISOString(),
     };
   }
 
@@ -185,7 +208,7 @@ export async function createUploadSession(
       status, retention_class, retention_policy_version, captured_at, created_by_membership_id
     ) VALUES (
       ${mediaAssetId}, ${tenantId}, 'cloudflare_r2', ${r2.bucket}, ${objectKey}, ${input.mediaType}, ${input.mimeType},
-      'pending_upload', ${input.retentionClass}, ${RETENTION_POLICY_VERSION}, ${input.capturedAt ?? null}, ${membershipId}
+      'pending_upload', ${input.retentionClass}, ${RETENTION_POLICY_VERSION}, ${input.capturedAt ?? null}::text::timestamptz, ${membershipId}
     )
   `;
   await sql`
@@ -199,8 +222,15 @@ export async function createUploadSession(
   `;
 
   await auditMedia(sql, tenantId, mediaAssetId, uploadSessionId, 'media.upload_session_created');
+  const signingNow = new Date();
+  const ttlSeconds = uploadUrlTtlSeconds(expiresAt, signingNow);
+  if (ttlSeconds < 1) {
+    await sql`UPDATE upload_sessions SET status = 'expired' WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}`;
+    await auditMedia(sql, tenantId, mediaAssetId, uploadSessionId, 'media.upload_session_expired', 'UPLOAD_SESSION_EXPIRED');
+    throw new MediaError(409, 'UPLOAD_SESSION_EXPIRED', 'Upload session expired; create a new session with a new key.');
+  }
   return { uploadSessionId, mediaAssetId, status: 'pending',
-    ...signedUploadTarget(r2, objectKey, input.mimeType),
+    ...signedUploadTarget(r2, objectKey, input.mimeType, ttlSeconds, signingNow),
     objectKey, expiresAt: expiresAt.toISOString() };
 }
 
@@ -312,9 +342,14 @@ export async function completeUploadSession(sql: postgres.ReservedSql, tenantId:
   const checksum = clientChecksumSha256?.toLowerCase() ?? null;
   const current = await readCompletionPlan(sql, tenantId, uploadSessionId, true);
   const { session, asset } = current;
-  if (session.status === 'completed' && asset) return { kind: 'completed', result: {
-    mediaAssetId: asset.id, status: 'active', sizeBytes: Number(asset.size_bytes), checksumSha256: asset.checksum_sha256,
-  } };
+  if (session.status === 'completed' && asset) {
+    if ((asset.checksum_sha256?.toLowerCase() ?? null) !== checksum) {
+      throw new MediaError(409, 'IDEMPOTENCY_PAYLOAD_MISMATCH', 'Completion payload differs from the completed session.');
+    }
+    return { kind: 'completed', result: {
+      mediaAssetId: asset.id, status: 'active', sizeBytes: Number(asset.size_bytes), checksumSha256: asset.checksum_sha256,
+    } };
+  }
   if (!asset) {
     if (session.status === 'pending') {
       await sql`UPDATE upload_sessions SET status = 'expired' WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}`;
