@@ -831,6 +831,7 @@ export const receptions = pgTable(
   },
   (t) => [
     unique('receptions_tenant_id_key').on(t.tenantId, t.id),
+    unique('receptions_consent_lineage_key').on(t.tenantId, t.id, t.privacyConsentId),
     unique('receptions_lineage_key').on(t.tenantId, t.id, t.vehicleId, t.customerId),
     uniqueIndex('receptions_one_open_vehicle_uq')
       .on(t.tenantId, t.vehicleId)
@@ -924,6 +925,7 @@ export const vehicleDamages = pgTable(
   },
   (t) => [
     unique('vehicle_damages_tenant_id_key').on(t.tenantId, t.id),
+    unique('vehicle_damages_reception_lineage_key').on(t.tenantId, t.id, t.receptionId),
     foreignKey({
       name: 'vehicle_damages_reception_fk',
       columns: [t.tenantId, t.receptionId],
@@ -3452,5 +3454,35 @@ export const featureFlags = pgTable(
     uniqueIndex('feature_flags_tenant_uq')
       .on(t.tenantId, t.featureKey)
       .where(sql`scope = 'tenant'`),
+  ],
+);
+
+/** Historical initial operational authorization; runtime receives INSERT/SELECT only in 0026. */
+export const mediaUploadBindings = pgTable(
+  'media_upload_bindings',
+  {
+    tenantId: tenantId(),
+    uploadSessionId: uuid('upload_session_id').notNull(),
+    receptionId: uuid('reception_id').notNull(),
+    damageId: uuid('damage_id'),
+    privacyConsentId: uuid('privacy_consent_id').notNull(),
+    authorizedAt: ts('authorized_at').notNull().defaultNow(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ name: 'media_upload_bindings_pk', columns: [t.tenantId, t.uploadSessionId] }),
+    foreignKey({ name: 'media_upload_bindings_session_fk', columns: [t.tenantId, t.uploadSessionId],
+      foreignColumns: [uploadSessions.tenantId, uploadSessions.id] }),
+    foreignKey({ name: 'media_upload_bindings_reception_consent_fk',
+      columns: [t.tenantId, t.receptionId, t.privacyConsentId],
+      foreignColumns: [receptions.tenantId, receptions.id, receptions.privacyConsentId] }),
+    foreignKey({ name: 'media_upload_bindings_consent_fk', columns: [t.tenantId, t.privacyConsentId],
+      foreignColumns: [privacyConsents.tenantId, privacyConsents.id] }),
+    foreignKey({ name: 'media_upload_bindings_damage_lineage_fk', columns: [t.tenantId, t.damageId, t.receptionId],
+      foreignColumns: [vehicleDamages.tenantId, vehicleDamages.id, vehicleDamages.receptionId] }),
+    rawCheck('media_upload_bindings_authorization_clock_check', '"authorized_at" = "created_at"'),
+    index('media_upload_bindings_reception_idx').on(t.tenantId, t.receptionId),
+    index('media_upload_bindings_damage_idx').on(t.tenantId, t.damageId, t.receptionId),
+    index('media_upload_bindings_consent_idx').on(t.tenantId, t.privacyConsentId),
   ],
 );

@@ -183,6 +183,13 @@
       "when": 1791303396189,
       "tag": "0025_s4_b02_media_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1791472958641,
+      "tag": "0026_s4_b04_media_upload_bindings",
+      "breakpoints": true
     }
   ]
 }
