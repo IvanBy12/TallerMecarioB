@@ -242,6 +242,22 @@ test.describe('RLS catalog and transaction-local context', () => {
     assert.equal(missingPolicies.length, 0, JSON.stringify(missingPolicies));
   });
 
+  test('media_assets UPDATE intentionally uses API-only column privileges, with forced tenant RLS', async () => {
+    // The universal table-owner/RLS/policy gate above still includes media_assets.
+    const allowed = ['status','size_bytes','checksum_sha256','uploaded_at','quarantined_at',
+      'integrity_failure_code','updated_at','retention_until'];
+    const columns = await admin`SELECT attname FROM pg_attribute WHERE attrelid='public.media_assets'::regclass
+      AND attnum>0 AND NOT attisdropped ORDER BY attnum`;
+    for (const role of ['tallermecario_api','tallermecario_worker']) {
+      const [table] = await admin`SELECT has_table_privilege(${role},'public.media_assets','UPDATE') broad`;
+      assert.equal(table.broad, false, role);
+      for (const {attname} of columns) {
+        const [column] = await admin`SELECT has_column_privilege(${role},'public.media_assets',${attname},'UPDATE') allowed`;
+        assert.equal(column.allowed, role==='tallermecario_api' && allowed.includes(attname), `${role}.${attname}`);
+      }
+    }
+  });
+
   test('media_upload_bindings retains forced RLS, schema ownership and API-only least privilege', async () => {
     const [table] = await admin`
       SELECT c.relrowsecurity, c.relforcerowsecurity, owner.rolname AS owner

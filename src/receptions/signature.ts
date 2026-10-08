@@ -1,3 +1,4 @@
+import { lockMediaRetention, recalculateLockedMediaRetention, type MediaRetentionLock } from '../media/retention.js';
 import { ApiError, type TenantRequestContext } from '../api/app.js';
 import { BIDI_CONTROL_CHARACTERS, codePointLength, hasValidUnicode,
   PROHIBITED_CONTROL_CHARACTERS } from '../platform/unicode-text.js';
@@ -65,13 +66,31 @@ export async function captureReceptionSignature(context: TenantRequestContext, r
   input: SignatureInput, meta: RequestMeta) {
   const { sql, tenant } = context;
   const [reception] = await sql<{ status: string }[]>`SELECT status FROM public.receptions
-    WHERE tenant_id=${tenant.tenantId} AND id=${receptionId} FOR NO KEY UPDATE`;
+    WHERE tenant_id=${tenant.tenantId} AND id=${receptionId}`;
   if (!reception) throw new ApiError(404, 'RECEPTION_NOT_FOUND', 'The reception was not found.');
   if (reception.status !== 'open')
     throw new ApiError(409, 'RECEPTION_NOT_EDITABLE', 'The reception cannot be edited.');
   const document = receptionAcceptanceDocument(input.documentVersion);
   if (!document) throw new ApiError(409, 'ACCEPTANCE_DOCUMENT_VERSION_MISMATCH',
     'The acceptance document version does not match.');
+  let retentionLock: MediaRetentionLock;
+  try {
+    retentionLock = await lockMediaRetention(sql, tenant.tenantId, [input.signatureMediaId],
+      { receptionIds: [receptionId] });
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === 'MEDIA_ASSET_NOT_FOUND') throw mediaNotFound();
+    if (code === 'MEDIA_ASSOCIATION_CONFLICT') {
+      const [used] = await sql`SELECT id FROM public.signatures
+        WHERE tenant_id=${tenant.tenantId} AND signature_media_id=${input.signatureMediaId}`;
+      if (used) throw mediaUsed();
+    }
+    throw error;
+  }
+  const [lockedReception] = await sql<{ status: string }[]>`SELECT status FROM public.receptions
+    WHERE tenant_id=${tenant.tenantId} AND id=${receptionId} FOR NO KEY UPDATE`;
+  if (lockedReception.status !== 'open')
+    throw new ApiError(409, 'RECEPTION_NOT_EDITABLE', 'The reception cannot be edited.');
   // Reception precedes media in both application and 0019 trigger lock graphs.
   const [media] = await sql<{ media_type: string; status: string; retention_class: string;
     deleted_at: Date | null; purged_at: Date | null }[]>`SELECT media_type, status, retention_class, deleted_at, purged_at
@@ -89,6 +108,7 @@ export async function captureReceptionSignature(context: TenantRequestContext, r
       pg_catalog.now(), ${meta.ipAddress}::inet)
     RETURNING id, signed_at`;
   if (!row) throw new Error('SIGNATURE_INSERT_FAILED');
+  await recalculateLockedMediaRetention(retentionLock, input.signatureMediaId);
   await sql`INSERT INTO public.audit_logs
     (id, tenant_id, actor_type, actor_user_id, actor_membership_id, action, outcome,
       entity_type, entity_id, reason_code, before_json, after_json, metadata_json,

@@ -115,6 +115,12 @@ test('valid capture stores server hash and signer separately from actor, exactly
   assert.equal(stored.document_hash, PIN);
   assert.equal(stored.document_version, RECEPTION_ACCEPTANCE_VERSION);
   assert.equal(stored.signature_media_id, m);
+  const [retention] = await h.admin`SELECT retention_until =
+    ((s.signed_at AT TIME ZONE 'UTC') + interval '36 months') AT TIME ZONE 'UTC' AS exact_clock
+    FROM media_assets ma JOIN signatures s ON s.tenant_id=ma.tenant_id AND s.signature_media_id=ma.id
+    WHERE ma.id=${m}`;
+  assert.equal(retention.exact_clock,true);
+  assert.equal((await h.admin`SELECT id FROM audit_logs WHERE entity_id=${m} AND action='media.retention_updated'`).length,1);
   const [audit] = await audits(reception);
   assert.equal(audit.actor_membership_id, a.advisor.membershipId);
   assert.deepEqual(audit.metadata_json, { signature_id: stored.id,
@@ -343,6 +349,8 @@ test('audit failure rolls back signature and retry succeeds', async () => {
   } finally { await remove(); }
   assert.equal((await signatures(reception)).length, 0);
   assert.equal((await audits(reception)).length, 0);
+  assert.equal((await h.admin`SELECT retention_until FROM media_assets WHERE id=${m}`)[0].retention_until,null);
+  assert.equal((await h.admin`SELECT id FROM audit_logs WHERE entity_id=${m} AND action='media.retention_updated'`).length,0);
   assert.equal((await capture(a.owner, a.tenantId, reception, body(m))).status, 201);
 });
 

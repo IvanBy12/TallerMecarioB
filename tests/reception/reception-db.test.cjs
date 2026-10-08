@@ -281,12 +281,13 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
   const wrongType = await scoped(api, a.tenant, (c) => media(c, a.tenant, 'photo'));
   const pending = await scoped(api, a.tenant, (c) => media(c, a.tenant, 'signature', 'pending_upload'));
   const foreign = await scoped(api, b.tenant, (c) => media(c, b.tenant));
-  const deleted = await scoped(api, a.tenant, async (c) => {
+  // Historical delete fixtures use admin; normal runtime cannot write B06 fields.
+  const deleted = await scoped(admin, a.tenant, async (c) => {
     const key = await media(c);
     await c`UPDATE media_assets SET deleted_at=now() WHERE id=${key}`;
     return key;
   });
-  const purged = await scoped(api, a.tenant, async (c) => {
+  const purged = await scoped(admin, a.tenant, async (c) => {
     const key = await media(c);
     await c`UPDATE media_assets SET deleted_at=now(), purged_at=now() WHERE id=${key}`;
     return key;
@@ -303,7 +304,9 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
     { delivery_id: id() })), failure('23514', 'signatures_parent_xor_check'));
   const sig = await scoped(api, a.tenant, (c) => signature(c, r, good));
   await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE media_assets
-    SET retention_class='operational' WHERE id=${good}`), failure('23514', 'signatures_media_guard'));
+    SET retention_class='operational' WHERE id=${good}`), failure('42501'));
+  await assert.rejects(admin`UPDATE media_assets SET retention_class='operational' WHERE id=${good}`,
+    failure('23514', 'signatures_media_guard'));
   await assert.rejects(scoped(api, a.tenant, (c) => signature(c, r, good)),
     failure('23505', 'signatures_one_reception_uq'));
   await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE signatures SET signed_by_name='X' WHERE id=${sig}`), failure('42501'));
@@ -326,11 +329,19 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
   ]) {
     await assert.rejects(scoped(api, a.tenant, (c) => c.unsafe(
       `UPDATE media_assets SET ${column}=$1 WHERE id=$2`, [value, good])),
+    ['status','checksum_sha256','size_bytes'].includes(column)
+      ? failure('23514', column==='status' && value==='deleted'
+        ? 'media_assets_delete_lifecycle_unavailable_guard' : 'signatures_media_guard') : failure('42501'));
+    // Privileged writers still hit the unchanged signed evidence trigger.
+    if (!(column==='status' && value==='deleted')) await assert.rejects(admin.unsafe(
+      `UPDATE media_assets SET ${column}=$1 WHERE id=$2`, [value, good]),
     failure('23514', 'signatures_media_guard'));
   }
   await assert.rejects(admin`DELETE FROM media_assets WHERE id=${good}`,
     failure('23503', 'signatures_media_fk'));
-  await scoped(api, a.tenant, (c) => c`UPDATE media_assets SET retention_policy_version='v2' WHERE id=${good}`);
+  await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE media_assets SET retention_policy_version='v2' WHERE id=${good}`),
+    failure('42501'));
+  assert.equal((await admin`SELECT retention_policy_version FROM media_assets WHERE id=${good}`)[0].retention_policy_version,'v1');
   await assert.rejects(scoped(api, a.tenant, (c) => c`UPDATE receptions SET status='cancelled', closed_at=now() WHERE id=${r}`),
     failure('23514', 'receptions_lifecycle_guard'));
   const order = await scoped(api, a.tenant, (c) => closeWithOrder(c, r, 1n, vehicleId));
