@@ -82,6 +82,11 @@ test('happy signature: exact metadata, real PNG, atomic timestamps, declared low
   assert.equal(+row.uploaded_at, +row.completed_at); assert.equal(row.integrity_failure_code, null);
   assert.equal(row.checksum_sha256, 'a'.repeat(64));
   assert.equal((await audits(s)).length, 2);
+  const [retention] = await h.admin`SELECT retention_until =
+    ((uploaded_at AT TIME ZONE 'UTC') + interval '30 days') AT TIME ZONE 'UTC' AS exact_clock
+    FROM media_assets WHERE id=${s.mediaAssetId}`;
+  assert.equal(retention.exact_clock,true);
+  assert.ok((await audits(s)).at(-1).metadata_json.retention_change);
   globalThis.fetch = () => { throw new Error('completed replay must not access R2'); };
   const replay = await complete(s, { checksumSha256: 'A'.repeat(64) });
   assert.equal(replay.statusCode, 200); assert.deepEqual(await rows(s), row); assert.equal((await audits(s)).length, 2);
@@ -113,6 +118,10 @@ for (const [name, data, mime, options, expected] of [
   assert.equal(response.json().error.code, expected);
   const row = await rows(s); assert.equal(row.asset_status, 'quarantined'); assert.equal(row.session_status, 'failed');
   assert.ok(row.quarantined_at); assert.ok(row.uploaded_at); assert.equal(row.completed_at, null);
+  const [retention] = await h.admin`SELECT retention_until =
+    ((quarantined_at AT TIME ZONE 'UTC') + interval '7 days') AT TIME ZONE 'UTC' AS exact_clock
+    FROM media_assets WHERE id=${s.mediaAssetId}`;
+  assert.equal(retention.exact_clock,true);
   assert.equal(row.integrity_failure_code, expected);
   const audit = (await audits(s)).at(-1); assert.equal(audit.action, 'media.quarantined'); assert.equal(audit.reason_code, expected);
   assert.equal(audit.actor_membership_id, a.owner.membershipId);

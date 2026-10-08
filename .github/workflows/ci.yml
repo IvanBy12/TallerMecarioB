@@ -145,7 +145,7 @@ jobs:
       - name: Reception create and edit API (S3-03 to S3-04)
         run: npm run test:reception:api:ci
 
-      - name: Media integrity, idempotency and operational binding (S4-B02 to S4-B04)
+      - name: Media integrity, idempotency, binding and retention (S4-B02 to S4-B05)
         run: |
           npm run test:media:api:ci
           npm run test:media:upgrade:ci

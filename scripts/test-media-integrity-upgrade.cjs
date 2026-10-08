@@ -44,10 +44,10 @@ async function seedBindingUpgrade(sql) {
     }
   });
 }
-async function bindingHistorySnapshot(sql) {
+async function bindingHistorySnapshot(sql, retention = false) {
   const result = {};
-  for (const table of ['media_assets','upload_sessions','receptions','privacy_consents','vehicle_damages','audit_logs']) {
-    result[table] = (await sql.unsafe(`SELECT row_to_json(t)::text AS row FROM public.${table} t ORDER BY id`)).map(r=>r.row);
+  for (const table of ['media_assets','upload_sessions','receptions','privacy_consents','vehicle_damages','audit_logs', ...(retention ? ['signatures','media_upload_bindings'] : [])]) {
+    result[table] = (await sql.unsafe(`SELECT row_to_json(t)::text AS row FROM public.${table} t ORDER BY ${table === 'media_upload_bindings' ? 'tenant_id,upload_session_id' : 'id'}`)).map(r=>r.row);
   }
   return result;
 }
@@ -59,6 +59,7 @@ async function main() {
   const maintenance = postgres(source.toString(), { max: 1, onnotice: () => {} });
   const previous = mkdtempSync(join(tmpdir(), 'tm-media-upgrade-'));
   const bindingPrevious = mkdtempSync(join(tmpdir(), 'tm-binding-upgrade-'));
+  const retentionPrevious = mkdtempSync(join(tmpdir(), 'tm-retention-upgrade-'));
   const names = [];
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json', 'utf8'));
   const index0025 = journal.entries.findIndex(entry => entry.tag === '0025_s4_b02_media_integrity');
@@ -66,6 +67,8 @@ async function main() {
   assert.ok(index0025 >= 0, 'pre-binding migration exists');
   assert.ok(index0026 >= 0, 'binding migration exists');
   assert.equal(index0026, index0025 + 1, 'B04 immediately follows the B02 boundary');
+  const index0027 = journal.entries.findIndex(entry => entry.tag === '0027_s4_b05_media_retention_guards');
+  assert.equal(index0027, index0026 + 1);
   const latest = journal.entries.at(-1);
   assert.ok(latest, 'migration journal is not empty');
   const count = journal.entries.length;
@@ -73,13 +76,15 @@ async function main() {
   writeFileSync(join(previous, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0, index0025) }));
   cpSync('drizzle', bindingPrevious, { recursive: true });
   writeFileSync(join(bindingPrevious, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0, index0026) }));
+  cpSync('drizzle', retentionPrevious, { recursive: true });
+  writeFileSync(join(retentionPrevious, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0, index0027) }));
   const migrate = (url, folder = 'drizzle') => {
     const result = spawnSync(process.execPath, ['scripts/migrate.cjs'], { encoding: 'utf8', timeout: 30000,
       env: { ...process.env, DATABASE_URL: url, MIGRATIONS_FOLDER: folder } });
     assert.equal(result.status, 0, result.stderr);
   };
   try {
-    for (const mode of ['fresh', 'upgrade', 'binding_upgrade']) {
+    for (const mode of ['fresh', 'upgrade', 'binding_upgrade', 'retention_upgrade']) {
       const name = `tm_media_${mode}_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
       await maintenance.unsafe(`CREATE DATABASE ${name}`); names.push(name);
       const url = new URL(source); url.pathname = `/${name}`;
@@ -104,11 +109,32 @@ async function main() {
                 ${sessionStatus === 'completed' ? new Date() : null})`;
           }
         }
-        let bindingBefore;
+        let bindingBefore, retentionBefore, signedGuardBefore;
         if (mode === 'binding_upgrade') {
           migrate(url.toString(), bindingPrevious);
           await seedBindingUpgrade(sql);
           bindingBefore = await bindingHistorySnapshot(sql);
+        }
+        const signedGuard = async () => (await sql`SELECT pg_get_triggerdef(t.oid) trigger,
+          pg_get_functiondef(t.tgfoid) function FROM pg_trigger t
+          WHERE t.tgrelid='public.media_assets'::regclass AND t.tgname='media_signed_active_trg'`)[0];
+        if (mode === 'retention_upgrade') {
+          migrate(url.toString(), retentionPrevious);
+          await seedBindingUpgrade(sql);
+          const [photo] = await sql`SELECT m.id,m.tenant_id,us.id session,r.id reception,r.privacy_consent_id consent
+            FROM media_assets m JOIN upload_sessions us ON us.media_asset_id=m.id AND us.tenant_id=m.tenant_id
+            JOIN receptions r ON r.tenant_id=m.tenant_id WHERE m.media_type='photo'`;
+          await sql`INSERT INTO media_upload_bindings(tenant_id,upload_session_id,reception_id,privacy_consent_id)
+            VALUES(${photo.tenant_id},${photo.session},${photo.reception},${photo.consent})`;
+          await sql`UPDATE media_assets SET retention_policy_version='historical-v0',retention_until='2040-01-01',legal_hold_until='2041-01-01'
+            WHERE id=${photo.id}`;
+          const [signature] = await sql`SELECT id FROM media_assets WHERE media_type='signature'`;
+          await sql`UPDATE media_assets SET status='active',uploaded_at=now() WHERE id=${signature.id}`;
+          await sql`UPDATE upload_sessions SET status='completed',completed_at=now() WHERE media_asset_id=${signature.id}`;
+          await sql`INSERT INTO signatures(id,tenant_id,reception_id,signature_media_id,signed_by_name,document_version,document_hash,signed_at)
+            VALUES(${randomUUID()},${photo.tenant_id},${photo.reception},${signature.id},'TEST','TEST','TEST',now())`;
+          retentionBefore = await bindingHistorySnapshot(sql, true);
+          signedGuardBefore = await signedGuard();
         }
         const before = mode === 'upgrade' ? await sql`SELECT row_to_json(us) AS value FROM upload_sessions us ORDER BY id` : [];
         migrate(url.toString());
@@ -133,7 +159,7 @@ async function main() {
           process.stdout.write('MEDIA_PRE_BINDING_HISTORY_PRESERVED_PASS no fabricated authorization\n');
         }
         const [bindings] = await sql`SELECT count(*)::int AS n FROM media_upload_bindings`;
-        assert.equal(bindings.n, 0, 'no fabricated historical binding/authorization');
+        assert.equal(bindings.n, mode === 'retention_upgrade' ? 1 : 0, 'no fabricated historical binding/authorization');
         for (const privilege of ['UPDATE', 'DELETE', 'TRUNCATE']) {
           const [grant] = await sql`SELECT has_table_privilege('tallermecario_api','public.media_upload_bindings',${privilege}) AS allowed`;
           assert.equal(grant.allowed, false);
@@ -141,7 +167,26 @@ async function main() {
         const [guard] = await sql`SELECT p.prosecdef FROM pg_proc p
           WHERE p.oid='app.authorize_media_upload_binding()'::regprocedure`;
         assert.equal(guard.prosecdef, false);
+        if (retentionBefore) {
+          assert.deepEqual(await bindingHistorySnapshot(sql, true), retentionBefore);
+          assert.deepEqual(await signedGuard(), signedGuardBefore);
+          const [historic] = await sql`SELECT retention_policy_version,retention_until::text,legal_hold_until::text
+            FROM media_assets WHERE media_type='photo'`;
+          assert.equal(historic.retention_policy_version,'historical-v0');
+          assert.match(historic.retention_until,/^2040-01-01/);assert.match(historic.legal_hold_until,/^2041-01-01/);
+          process.stdout.write('MEDIA_RETENTION_HISTORY_PRESERVED_PASS assets/signatures/sessions/bindings/audits unchanged\n');
+        }
+        const functions = await sql`SELECT p.prosecdef,p.proconfig,owner.rolname owner FROM pg_proc p
+          JOIN pg_roles owner ON owner.oid=p.proowner WHERE p.oid IN
+          ('app.enforce_media_retention_monotonic()'::regprocedure,'app.enforce_media_delete_lifecycle_unavailable()'::regprocedure)`;
+        assert.equal(functions.length,2);
+        assert.ok(functions.every(f=>!f.prosecdef&&f.owner==='tallermecario_schema_owner'&&f.proconfig.includes('search_path=pg_catalog')));
+        for (const role of ['tallermecario_api','tallermecario_worker']) {
+          const [privilege] = await sql`SELECT has_table_privilege(${role},'public.media_assets','UPDATE') broad`;
+          assert.equal(privilege.broad,false);
+        }
         migrate(url.toString());
+        if (retentionBefore) assert.deepEqual(await bindingHistorySnapshot(sql, true), retentionBefore);
         if (bindingBefore) assert.deepEqual(await bindingHistorySnapshot(sql), bindingBefore);
         const [rerun] = await sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`;
         assert.equal(rerun.n, count);
@@ -157,6 +202,7 @@ async function main() {
     for (const name of names) await maintenance.unsafe(`DROP DATABASE ${name}`);
     rmSync(previous, { recursive: true, force: true });
     rmSync(bindingPrevious, { recursive: true, force: true });
+    rmSync(retentionPrevious, { recursive: true, force: true });
     const [remaining] = await maintenance`SELECT count(*)::int AS n FROM pg_database WHERE datname=ANY(${names})`;
     assert.equal(remaining.n, 0); await maintenance.end({ timeout: 5 });
     process.stdout.write('MEDIA_UPGRADE_CLEANUP_PASS databases=0\n');

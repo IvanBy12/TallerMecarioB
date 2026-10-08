@@ -451,7 +451,22 @@ async function main() {
           const afterSchema = await schema();
           assert.deepEqual(afterSchema.rls, beforeSchema.rls);
           assert.ok(afterSchema.rls.every((r) => r.relrowsecurity && r.relforcerowsecurity));
-          assert.deepEqual(afterSchema.grants, beforeSchema.grants);
+          // This scenario upgrades through HEAD: 0027 intentionally replaces only
+          // media_assets API/worker broad UPDATE. All other grants remain intact.
+          assert.deepEqual(afterSchema.grants, beforeSchema.grants.filter(g => !(g.table_name==='media_assets'
+            && g.privilege_type==='UPDATE' && ['tallermecario_api','tallermecario_worker'].includes(g.grantee))));
+          const columns = await sql`SELECT attname FROM pg_attribute WHERE attrelid='public.media_assets'::regclass
+            AND attnum>0 AND NOT attisdropped`;
+          const allowed = ['status','size_bytes','checksum_sha256','uploaded_at','quarantined_at',
+            'integrity_failure_code','updated_at','retention_until'];
+          for (const role of ['tallermecario_api','tallermecario_worker']) {
+            const [table] = await sql`SELECT has_table_privilege(${role},'public.media_assets','UPDATE') broad`;
+            assert.equal(table.broad,false);
+            for (const {attname} of columns) {
+              const [column] = await sql`SELECT has_column_privilege(${role},'public.media_assets',${attname},'UPDATE') allowed`;
+              assert.equal(column.allowed,role==='tallermecario_api' && allowed.includes(attname),`${role}.${attname}`);
+            }
+          }
           assert.match(afterSchema.trigger[0].definition, /retention_class/u);
           assert.equal(migrate(target.toString(), 'drizzle').status, 0, 'rerun no-op');
           assert.deepEqual(await schema(), afterSchema);

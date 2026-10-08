@@ -1,3 +1,4 @@
+import { lockMediaRetention, persistMediaLifecycleRetention, type RetentionChange } from './retention.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
 import { headR2Object, presignR2Url, writeOnceUploadHeaders, type R2Config } from './r2.js';
@@ -376,6 +377,7 @@ export async function completeUploadSession(sql: postgres.ReservedSql, tenantId:
     throw new MediaError(400, 'REQUEST_VALIDATION_FAILED', 'Checksum must be 64 hexadecimal characters.');
   }
   const checksum = clientChecksumSha256?.toLowerCase() ?? null;
+  const retentionLock = await lockMediaRetention(sql, tenantId, [plan.session.media_asset_id]);
   const current = await readCompletionPlan(sql, tenantId, uploadSessionId, true);
   const { session, asset } = current;
   if (current.binding?.reception_id !== plan.binding?.reception_id
@@ -420,7 +422,8 @@ export async function completeUploadSession(sql: postgres.ReservedSql, tenantId:
       integrity_failure_code = ${failure}, updated_at = ${now} WHERE tenant_id = ${tenantId} AND id = ${asset.id}`;
     await sql`UPDATE upload_sessions SET status = 'failed', completed_at = NULL
       WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}`;
-    await auditMedia(sql, tenantId, asset.id, uploadSessionId, 'media.quarantined', failure);
+    const { change } = await persistMediaLifecycleRetention(retentionLock, asset.id);
+    await auditMedia(sql, tenantId, asset.id, uploadSessionId, 'media.quarantined', failure, undefined, change);
     const code = failure === 'MEDIA_FORMAT_UNSUPPORTED' || failure === 'MEDIA_INSPECTION_LIMIT_EXCEEDED'
       ? 'MEDIA_CONTENT_INVALID' : failure;
     return { kind: 'durable-error', error: new MediaError(422, code, 'Uploaded object failed integrity validation and was quarantined.') };
@@ -428,12 +431,13 @@ export async function completeUploadSession(sql: postgres.ReservedSql, tenantId:
   await sql`UPDATE media_assets SET status = 'active', updated_at = ${now} WHERE tenant_id = ${tenantId} AND id = ${asset.id}`;
   await sql`UPDATE upload_sessions SET status = 'completed', completed_at = ${now}
     WHERE tenant_id = ${tenantId} AND id = ${uploadSessionId}`;
-  await auditMedia(sql, tenantId, asset.id, uploadSessionId, 'media.upload_completed');
+  const { change } = await persistMediaLifecycleRetention(retentionLock, asset.id);
+  await auditMedia(sql, tenantId, asset.id, uploadSessionId, 'media.upload_completed', null, undefined, change);
   return { kind: 'completed', result: { mediaAssetId: asset.id, status: 'active', sizeBytes, checksumSha256: checksum } };
 }
 
 async function auditMedia(sql: postgres.ReservedSql, tenantId: string, mediaId: string,
-  sessionId: string, action: string, reason: string | null = null, binding?: UploadBinding): Promise<void> {
+  sessionId: string, action: string, reason: string | null = null, binding?: UploadBinding, retentionChange?: RetentionChange | null): Promise<void> {
   // Actor and correlation originate exclusively in the verified, transaction-local context.
   await sql`INSERT INTO public.audit_logs
     (id, tenant_id, actor_type, actor_user_id, actor_membership_id, action, outcome,
@@ -442,7 +446,7 @@ async function auditMedia(sql: postgres.ReservedSql, tenantId: string, mediaId: 
       NULLIF(current_setting('app.user_id', true), '')::uuid,
       NULLIF(current_setting('app.membership_id', true), '')::uuid,
       ${action}, 'success', 'media_asset', ${mediaId}, ${reason},
-      ${sql.json({ upload_session_id: sessionId, ...(binding ? {
+      ${sql.json({ upload_session_id: sessionId, ...(retentionChange ? { retention_change: retentionChange } : {}), ...(binding ? {
         context_type: binding.damage_id ? 'damage' : 'reception', reception_id: binding.reception_id,
         ...(binding.damage_id ? { damage_id: binding.damage_id } : {}), privacy_consent_id: binding.privacy_consent_id,
       } : {}) })}, current_setting('app.request_id', true))`;
