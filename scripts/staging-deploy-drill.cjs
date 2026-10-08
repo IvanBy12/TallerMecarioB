@@ -85,7 +85,7 @@ async function main() {
     binary_candidate_startup_rejected: 'FAIL',
     binary_api_recovery: 'FAIL',
     binary_worker_recovery: 'FAIL',
-    binary_schema_0025_preserved: 'FAIL',
+    binary_media_schema_preserved: 'FAIL',
     binary_data_history_preserved: 'FAIL',
     staging_deploy: 'FAIL',
     migration: 'FAIL',
@@ -595,12 +595,14 @@ async function main() {
     process.stdout.write('RECEPTION_ROLLBACK_DATA_PRESERVED_PASS\n');
     assert.equal(await migrationState(admin), initialMigrationState,
       'migration ledger and schema unchanged after recovery');
-    assert.equal(latestTag, '0025_s4_b02_media_integrity');
-    report.binary_schema_0025_preserved = 'PASS';
+    const journal = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'drizzle/meta/_journal.json'), 'utf8'));
+    assert.equal(count, journal.entries.length);
+    assert.equal(latestTag, journal.entries.at(-1).tag);
+    report.binary_media_schema_preserved = 'PASS';
     assert.equal(await mediaSnapshot(), initialMediaSnapshot,
       'existing media rows and audit history unchanged after both failure scenarios');
     report.binary_data_history_preserved = 'PASS';
-    process.stdout.write('BINARY_SCHEMA_0025_AND_DATA_HISTORY_PRESERVED_PASS ledger, constraints, triggers, CRM/reception/media/audit\n');
+    process.stdout.write('MEDIA_SCHEMA_AND_DATA_HISTORY_PRESERVED_PASS ledger, constraints, triggers, CRM/reception/media/audit\n');
     // Actual authenticated HTTP writer after recovery, not merely health/auth
     // smoke. No R2 PUT; the exact v1 expectation is persisted with an audit.
     await createV1Media();

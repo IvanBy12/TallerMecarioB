@@ -60,11 +60,12 @@ test('CREATE persists v1 exact expectation; incompatible expectation cannot sile
   const different = await create({ idempotencyKey, expectedSizeBytes: f.png.length + 1 });
   assert.equal(different.statusCode, 409); assert.equal(different.json().error.code, 'IDEMPOTENCY_PAYLOAD_MISMATCH');
 });
-test('operational create stays contract-blocked by B04 for all tenant roles', async () => {
+test('operational create requires context; technician remains fail-closed', async () => {
   for (const actor of [a.owner, a.admin, a.advisor, a.technician]) for (const mediaType of ['photo', 'video', 'video360']) {
     const response = await create({ mediaType, mimeType: mediaType === 'photo' ? 'image/png' : 'video/mp4',
       retentionClass: 'operational' }, { ...a, owner: actor });
-    assert.equal(response.statusCode, 403); assert.equal(response.json().error.code, 'PERMISSION_DENIED');
+    assert.equal(response.statusCode, actor === a.technician ? 403 : 400);
+    assert.equal(response.json().error.code, actor === a.technician ? 'PERMISSION_DENIED' : 'REQUEST_VALIDATION_FAILED');
     assert.equal(response.json().uploadUrl, undefined);
   }
   const incompatible = await create({ retentionClass: 'operational' });
@@ -191,14 +192,11 @@ test('failed quarantine audit rolls back quarantine and failed session consisten
   assert.equal((await complete(s)).statusCode, 422);
   assert.equal((await rows(s)).session_status, 'failed');
 });
-// Controlled privileged fixture for integrity only; operational domain binding remains B04 pending.
+// New public operation with a real authorized parent; never upgrade old fixtures into evidence.
 async function operationalFixture(bytes, mediaType, mimeType) {
-  const id = randomUUID(), media = randomUUID();
-  await h.admin`INSERT INTO media_assets (id,tenant_id,bucket,object_key,media_type,mime_type,retention_class,retention_policy_version)
-    VALUES (${media},${a.tenantId},${f.r2.bucket},${media},${mediaType},${mimeType},'operational','v1')`;
-  await h.admin`INSERT INTO upload_sessions (id,tenant_id,media_asset_id,idempotency_key,expires_at,expected_size_bytes)
-    VALUES (${id},${a.tenantId},${media},${randomUUID()},now()+interval '1 hour',${bytes.length})`;
-  return { uploadSessionId: id, mediaAssetId: media };
+  const parent = await require('./operational-helpers.cjs').parent(a);
+  return session({ mediaType, mimeType, retentionClass: 'operational', expectedSizeBytes: bytes.length,
+    operationalContext: { type: 'reception', receptionId: parent.reception } });
 }
 for (const [name, bytes, mime, type] of [['JPEG', f.jpeg, 'image/jpeg', 'document'],
   ['PNG document', f.png, 'image/png', 'document'], ['PDF', f.pdf, 'application/pdf', 'quote_pdf'],
@@ -235,7 +233,7 @@ test('PostgreSQL enforces positive v1 expectation, per-type maximum, tenant FK a
     (e) => e.code === '23514');
 });
 for (const [type, extension, mime] of [['video', 'mp4', 'video/mp4'], ['video360', 'mov', 'video/quicktime']]) {
-  test(`${type} container completion passes integrity independently of B04 and unresolved duration policy`, async () => {
+  test(`${type} bound container completion passes integrity with duration policy still unresolved`, async () => {
     const bytes = require('node:fs').readFileSync(require('node:path').join(__dirname, `../media/fixtures/clip.${extension}`));
     const s = await operationalFixture(bytes, type, mime); globalThis.fetch = f.objectFetch(bytes, mime);
     assert.equal((await complete(s)).statusCode, 200);

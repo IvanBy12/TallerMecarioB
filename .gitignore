@@ -157,3 +157,4 @@ docs/*
 !docs/S4-B01-media-contract.md
 !docs/S4-B02-media-integrity.md
 !docs/S4-B03-media-idempotency.md
+!docs/S4-B04-media-associations.md

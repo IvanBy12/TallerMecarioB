@@ -8,25 +8,78 @@ const { join } = require('node:path');
 const postgres = require('postgres');
 const { assertMediaIntegritySchema } = require('../dist/media/deployment.js');
 
+// Explicit pre-binding (0025) history. Includes an unbound operational
+// fixture to prove 0026 does not silently turn fixtures into authorization.
+async function seedBindingUpgrade(sql) {
+  const tenant = randomUUID(), user = randomUUID(), member = randomUUID();
+  const customer = randomUUID(), vehicle = randomUUID(), consent = randomUUID(), reception = randomUUID();
+  await sql.begin(async tx => {
+    await tx`INSERT INTO workshops(id,slug,legal_name,display_name) VALUES(${tenant},${tenant},'Test','Test')`;
+    await tx`INSERT INTO workshop_locations(id,tenant_id,name,address_line,city,department,is_primary)
+      VALUES(${randomUUID()},${tenant},'Test','Test','Test','Test',true)`;
+    await tx`INSERT INTO users(id,external_subject,email) VALUES(${user},${user},${user+'@example.test'})`;
+    await tx`INSERT INTO memberships(id,tenant_id,user_id) VALUES(${member},${tenant},${user})`;
+    await tx`INSERT INTO customers(id,tenant_id,first_name,last_name,phone) VALUES(${customer},${tenant},'Test','Test','3000000000')`;
+    await tx`INSERT INTO vehicles(id,tenant_id,plate,vehicle_type,brand,model)
+      VALUES(${vehicle},${tenant},${'B'+vehicle.replaceAll('-','').slice(0,12).toUpperCase()},'car','Test','Test')`;
+    await tx`INSERT INTO vehicle_owners(id,tenant_id,vehicle_id,customer_id,relationship_type,is_primary)
+      VALUES(${randomUUID()},${tenant},${vehicle},${customer},'owner',true)`;
+    await tx`INSERT INTO privacy_consents(id,tenant_id,customer_id,purpose_code,privacy_notice_version,
+      authorization_text_version,authorization_text_hash,controller_notice_snapshot,channel,captured_at)
+      VALUES(${consent},${tenant},${customer},'service_provision','test','test',${'a'.repeat(64)},
+      ${tx.json({legalName:'TEST-ONLY',address:'TEST-ONLY',phone:'+5700000000',email:null,rightsChannel:'TEST-ONLY'})},'in_person',now())`;
+    await tx`INSERT INTO receptions(id,tenant_id,vehicle_id,customer_id,privacy_consent_id,received_by_membership_id,mileage_km)
+      VALUES(${reception},${tenant},${vehicle},${customer},${consent},${member},0)`;
+    await tx`INSERT INTO vehicle_damages(id,tenant_id,reception_id,zone_code,damage_type)
+      VALUES(${randomUUID()},${tenant},${reception},'front','scratch')`;
+    for (const type of ['signature','photo']) {
+      const media = randomUUID(), session = randomUUID();
+      await tx`INSERT INTO media_assets(id,tenant_id,bucket,object_key,media_type,mime_type,retention_class,retention_policy_version)
+        VALUES(${media},${tenant},'test',${media},${type},'image/png',${type==='photo'?'operational':'authorization_evidence'},'v1')`;
+      await tx`INSERT INTO upload_sessions(id,tenant_id,media_asset_id,idempotency_key,expires_at,expected_size_bytes)
+        VALUES(${session},${tenant},${media},${randomUUID()},now()+interval '1 hour',68)`;
+      await tx`INSERT INTO audit_logs(id,tenant_id,actor_type,action,outcome,entity_type,entity_id,metadata_json,request_id)
+        VALUES(${randomUUID()},${tenant},'system','media.upload_session_created','success','media_asset',${media},
+          ${tx.json({upload_session_id:session})},${randomUUID()})`;
+    }
+  });
+}
+async function bindingHistorySnapshot(sql) {
+  const result = {};
+  for (const table of ['media_assets','upload_sessions','receptions','privacy_consents','vehicle_damages','audit_logs']) {
+    result[table] = (await sql.unsafe(`SELECT row_to_json(t)::text AS row FROM public.${table} t ORDER BY id`)).map(r=>r.row);
+  }
+  return result;
+}
+
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_CONFIGURATION_REQUIRED');
   const source = new URL(process.env.DATABASE_URL);
   if (!['localhost', '127.0.0.1', '[::1]'].includes(source.hostname)) throw new Error('REFUSING_NON_LOCAL_DATABASE');
   const maintenance = postgres(source.toString(), { max: 1, onnotice: () => {} });
   const previous = mkdtempSync(join(tmpdir(), 'tm-media-upgrade-'));
+  const bindingPrevious = mkdtempSync(join(tmpdir(), 'tm-binding-upgrade-'));
   const names = [];
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json', 'utf8'));
-  assert.equal(journal.entries.at(-1).tag, '0025_s4_b02_media_integrity');
+  const index0025 = journal.entries.findIndex(entry => entry.tag === '0025_s4_b02_media_integrity');
+  const index0026 = journal.entries.findIndex(entry => entry.tag === '0026_s4_b04_media_upload_bindings');
+  assert.ok(index0025 >= 0, 'pre-binding migration exists');
+  assert.ok(index0026 >= 0, 'binding migration exists');
+  assert.equal(index0026, index0025 + 1, 'B04 immediately follows the B02 boundary');
+  const latest = journal.entries.at(-1);
+  assert.ok(latest, 'migration journal is not empty');
   const count = journal.entries.length;
   cpSync('drizzle', previous, { recursive: true });
-  writeFileSync(join(previous, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0, -1) }));
+  writeFileSync(join(previous, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0, index0025) }));
+  cpSync('drizzle', bindingPrevious, { recursive: true });
+  writeFileSync(join(bindingPrevious, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0, index0026) }));
   const migrate = (url, folder = 'drizzle') => {
     const result = spawnSync(process.execPath, ['scripts/migrate.cjs'], { encoding: 'utf8', timeout: 30000,
       env: { ...process.env, DATABASE_URL: url, MIGRATIONS_FOLDER: folder } });
     assert.equal(result.status, 0, result.stderr);
   };
   try {
-    for (const mode of ['fresh', 'upgrade']) {
+    for (const mode of ['fresh', 'upgrade', 'binding_upgrade']) {
       const name = `tm_media_${mode}_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
       await maintenance.unsafe(`CREATE DATABASE ${name}`); names.push(name);
       const url = new URL(source); url.pathname = `/${name}`;
@@ -51,11 +104,19 @@ async function main() {
                 ${sessionStatus === 'completed' ? new Date() : null})`;
           }
         }
+        let bindingBefore;
+        if (mode === 'binding_upgrade') {
+          migrate(url.toString(), bindingPrevious);
+          await seedBindingUpgrade(sql);
+          bindingBefore = await bindingHistorySnapshot(sql);
+        }
         const before = mode === 'upgrade' ? await sql`SELECT row_to_json(us) AS value FROM upload_sessions us ORDER BY id` : [];
         migrate(url.toString());
         await assertMediaIntegritySchema(sql);
         const [ledger] = await sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`;
         assert.equal(ledger.n, count);
+        const [latestLedger] = await sql`SELECT created_at FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
+        assert.equal(Number(latestLedger.created_at), latest.when, `latest migration ${latest.tag}`);
         if (mode === 'upgrade') {
           const after = await sql`SELECT row_to_json(us) AS value FROM upload_sessions us ORDER BY id`;
           assert.equal(after.length, ids.length);
@@ -67,11 +128,25 @@ async function main() {
           const assets = await sql`SELECT quarantined_at,integrity_failure_code FROM media_assets`;
           assert.ok(assets.every((r) => r.quarantined_at === null && r.integrity_failure_code === null), 'no fabricated historical quarantine clock');
         }
+        if (bindingBefore) {
+          assert.deepEqual(await bindingHistorySnapshot(sql), bindingBefore);
+          process.stdout.write('MEDIA_PRE_BINDING_HISTORY_PRESERVED_PASS no fabricated authorization\n');
+        }
+        const [bindings] = await sql`SELECT count(*)::int AS n FROM media_upload_bindings`;
+        assert.equal(bindings.n, 0, 'no fabricated historical binding/authorization');
+        for (const privilege of ['UPDATE', 'DELETE', 'TRUNCATE']) {
+          const [grant] = await sql`SELECT has_table_privilege('tallermecario_api','public.media_upload_bindings',${privilege}) AS allowed`;
+          assert.equal(grant.allowed, false);
+        }
+        const [guard] = await sql`SELECT p.prosecdef FROM pg_proc p
+          WHERE p.oid='app.authorize_media_upload_binding()'::regprocedure`;
+        assert.equal(guard.prosecdef, false);
         migrate(url.toString());
+        if (bindingBefore) assert.deepEqual(await bindingHistorySnapshot(sql), bindingBefore);
         const [rerun] = await sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`;
         assert.equal(rerun.n, count);
         const rls = await sql`SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid IN
-          ('public.media_assets'::regclass,'public.upload_sessions'::regclass)`;
+          ('public.media_assets'::regclass,'public.upload_sessions'::regclass,'public.media_upload_bindings'::regclass)`;
         assert.ok(rls.every((r) => r.relrowsecurity && r.relforcerowsecurity));
         const [role] = await sql`SELECT rolbypassrls,rolsuper FROM pg_roles WHERE rolname='tallermecario_api'`;
         assert.equal(role.rolbypassrls || role.rolsuper, false);
@@ -81,6 +156,7 @@ async function main() {
   } finally {
     for (const name of names) await maintenance.unsafe(`DROP DATABASE ${name}`);
     rmSync(previous, { recursive: true, force: true });
+    rmSync(bindingPrevious, { recursive: true, force: true });
     const [remaining] = await maintenance`SELECT count(*)::int AS n FROM pg_database WHERE datname=ANY(${names})`;
     assert.equal(remaining.n, 0); await maintenance.end({ timeout: 5 });
     process.stdout.write('MEDIA_UPGRADE_CLEANUP_PASS databases=0\n');

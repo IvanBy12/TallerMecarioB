@@ -4,6 +4,10 @@ import { headR2Object, presignR2Url, writeOnceUploadHeaders, type R2Config } fro
 import { inspectR2Content, MediaContentInvalid, MediaContentUnsupported } from './content.js';
 import { MEDIA_TYPES } from '../db/schema.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
+import { MediaError } from './errors.js';
+import { authorizeOperationalCreate, bindingMatchesContext, insertUploadBinding, isOperationalMedia,
+  readUploadBinding, revalidateUploadBinding, type OperationalContext, type UploadBinding } from './operational-binding.js';
+export { MediaError } from './errors.js';
 
 /**
  * ADR-003 flow (create session -> presigned PUT -> client uploads -> complete
@@ -52,16 +56,6 @@ const RETENTION_POLICY_VERSION = 'v1';
 const UPLOAD_URL_TTL_SECONDS = 15 * 60;
 const DOWNLOAD_URL_TTL_SECONDS = 5 * 60;
 
-export class MediaError extends Error {
-  constructor(
-    readonly statusCode: number,
-    readonly code: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
 function isMediaType(value: string): value is MediaType {
   return (MEDIA_TYPES as readonly string[]).includes(value);
 }
@@ -78,6 +72,7 @@ export interface CreateUploadSessionInput {
   idempotencyKey: string;
   expectedSizeBytes: number;
   capturedAt?: string | null;
+  operationalContext?: OperationalContext;
 }
 
 export interface UploadSessionResult {
@@ -136,16 +131,45 @@ export async function createUploadSession(
     throw new MediaError(422, 'MEDIA_SIZE_TOO_LARGE', `expected_size_bytes exceeds the limit for media_type '${input.mediaType}'.`);
   }
 
-  // S4-B01 §12.1: the generic endpoint has no verified initial domain binding.
-  // B04 must define it before operational PUT capabilities can be issued.
-  if (['photo', 'video', 'video360'].includes(input.mediaType)) {
-    throw new MediaError(403, 'PERMISSION_DENIED', 'Operational upload requires a verified domain context.');
+  const operational = isOperationalMedia(input.mediaType);
+  if (operational !== (input.operationalContext !== undefined)) {
+    throw new MediaError(400, 'REQUEST_VALIDATION_FAILED', 'Operational context is required only for operational media.');
   }
-
-  // Lock order: transaction advisory key -> upload_session -> media_asset.
-  // Acquired before the absent-row decision, released at commit/rollback.
-  // No external storage I/O occurs in create (presigning is local crypto).
+  // Advisory key -> authoritative reception -> damage -> initial consent
+  // -> session -> asset. Discovery reads never acquire media/child locks first.
+  // Presigning is local crypto, with no R2 network I/O.
   await sql`SELECT pg_catalog.pg_advisory_xact_lock(${uploadCreateLockKey(tenantId, input.idempotencyKey)}::bigint)`;
+  const [discovered] = await sql<{ id: string; media_type: string; mime_type: string; retention_class: string;
+    integrity_version: string; expected_size_bytes: string | null; captured_at_matches: boolean }[]>`
+    SELECT us.id, us.integrity_version, us.expected_size_bytes, ma.media_type, ma.mime_type, ma.retention_class,
+      ma.captured_at IS NOT DISTINCT FROM ${input.capturedAt ?? null}::text::timestamptz AS captured_at_matches
+    FROM upload_sessions us JOIN media_assets ma ON ma.tenant_id=us.tenant_id AND ma.id=us.media_asset_id
+    WHERE us.tenant_id=${tenantId} AND us.idempotency_key=${input.idempotencyKey}`;
+  let binding: UploadBinding | undefined;
+  if (discovered) {
+    if (isOperationalMedia(discovered.media_type)) {
+      binding = await readUploadBinding(sql, tenantId, discovered.id);
+      if (!bindingMatchesContext(binding, input.operationalContext)) {
+        throw new MediaError(409, 'IDEMPOTENCY_PAYLOAD_MISMATCH', 'Upload payload differs from the existing session.');
+      }
+    } else if (input.operationalContext) {
+      throw new MediaError(409, 'IDEMPOTENCY_PAYLOAD_MISMATCH', 'Upload payload differs from the existing session.');
+    }
+    // Persisted identity and v1 semantics precede parent/terminal disclosure.
+    // This tenant-scoped discovery takes no row locks; the advisory create
+    // lock serializes the logical operation. Never resolve an incoming target.
+    if (discovered.integrity_version === 'v1' && discovered.expected_size_bytes !== null
+      && (Number(discovered.expected_size_bytes) !== input.expectedSizeBytes || discovered.mime_type !== input.mimeType
+        || discovered.media_type !== input.mediaType || discovered.retention_class !== input.retentionClass
+        || !discovered.captured_at_matches)) {
+      throw new MediaError(409, 'IDEMPOTENCY_PAYLOAD_MISMATCH', 'Upload payload differs from the existing session.');
+    }
+    if (isOperationalMedia(discovered.media_type)) {
+      await revalidateUploadBinding(sql, tenantId, discovered.id, discovered.media_type, true);
+    }
+  } else if (input.operationalContext) {
+    binding = await authorizeOperationalCreate(sql, tenantId, input.operationalContext, input.mediaType);
+  }
   const [existing] = await sql<CompletionSession[]>`
     SELECT id, media_asset_id, status, expires_at, expected_size_bytes, integrity_version
     FROM upload_sessions
@@ -221,7 +245,8 @@ export async function createUploadSession(
     )
   `;
 
-  await auditMedia(sql, tenantId, mediaAssetId, uploadSessionId, 'media.upload_session_created');
+  if (binding) await insertUploadBinding(sql, tenantId, uploadSessionId, binding);
+  await auditMedia(sql, tenantId, mediaAssetId, uploadSessionId, 'media.upload_session_created', null, binding);
   const signingNow = new Date();
   const ttlSeconds = uploadUrlTtlSeconds(expiresAt, signingNow);
   if (ttlSeconds < 1) {
@@ -250,7 +275,7 @@ interface CompletionAsset {
   media_type: MediaType; mime_type: string; status: string;
   size_bytes: string | null; checksum_sha256: string | null;
 }
-export interface CompletionPlan { readonly session: CompletionSession; readonly asset?: CompletionAsset }
+export interface CompletionPlan { readonly session: CompletionSession; readonly asset?: CompletionAsset; readonly binding?: UploadBinding }
 type IntegrityFailure = 'MEDIA_SIZE_INVALID' | 'MEDIA_METADATA_MISMATCH' | 'MEDIA_CONTENT_INVALID'
   | 'MEDIA_FORMAT_UNSUPPORTED' | 'MEDIA_INSPECTION_LIMIT_EXCEEDED';
 export interface CompletionObservation {
@@ -265,14 +290,25 @@ export type CompletionOutcome = { readonly kind: 'completed'; readonly result: C
 
 async function readCompletionPlan(sql: postgres.ReservedSql, tenantId: string,
   sessionId: string, lock: boolean): Promise<CompletionPlan> {
-  // Phase C lock order is always session then asset; Phase A takes no row locks.
+  // Phase A discovery takes no locks. Phase C revalidates/locks the parent
+  // before locking session/asset, matching close and operational create.
+  const [discovered] = await sql<{ media_type: string; retention_class: string }[]>`SELECT ma.media_type, ma.retention_class
+    FROM upload_sessions us JOIN media_assets ma ON ma.tenant_id=us.tenant_id AND ma.id=us.media_asset_id
+    WHERE us.tenant_id=${tenantId} AND us.id=${sessionId}`;
+  let binding: UploadBinding | undefined;
+  if (discovered && isOperationalMedia(discovered.media_type)) {
+    if (discovered.retention_class !== 'operational') {
+      throw new MediaError(409, 'MEDIA_ASSOCIATION_CONFLICT', 'Operational upload binding is not eligible.');
+    }
+    binding = await revalidateUploadBinding(sql, tenantId, sessionId, discovered.media_type, lock);
+  }
   const [session] = await sql.unsafe<CompletionSession[]>(
     'SELECT id, media_asset_id, status, expires_at, integrity_version, expected_size_bytes FROM upload_sessions '
       + 'WHERE tenant_id = $1 AND id = $2' + (lock ? ' FOR UPDATE' : ''), [tenantId, sessionId]);
   if (!session) throw new MediaError(404, 'UPLOAD_SESSION_NOT_FOUND', 'Upload session not found.');
   if (session.status === 'failed') throw new MediaError(409, 'UPLOAD_SESSION_FAILED', 'Upload session already failed; it cannot be completed.');
   if (session.status !== 'completed' && (session.status === 'expired' || session.integrity_version !== 'v1'
-    || session.expected_size_bytes === null || new Date(session.expires_at).getTime() <= Date.now())) return { session };
+    || session.expected_size_bytes === null || new Date(session.expires_at).getTime() <= Date.now())) return { session, binding };
   const [asset] = await sql.unsafe<CompletionAsset[]>(
     'SELECT id, object_key, bucket, storage_provider, media_type, mime_type, status, size_bytes, checksum_sha256 '
       + 'FROM media_assets WHERE tenant_id = $1 AND id = $2 '
@@ -282,7 +318,7 @@ async function readCompletionPlan(sql: postgres.ReservedSql, tenantId: string,
   if (session.status === 'completed' ? asset.status !== 'active' : !['pending_upload', 'uploaded'].includes(asset.status)) {
     throw new MediaError(409, 'MEDIA_ASSET_NOT_ACTIVE', 'Media asset is not eligible for completion.');
   }
-  return { session, asset };
+  return { session, asset, binding };
 }
 
 /** Phase A: tenant-scoped read only. Its transaction is closed before inspecting R2. */
@@ -342,6 +378,11 @@ export async function completeUploadSession(sql: postgres.ReservedSql, tenantId:
   const checksum = clientChecksumSha256?.toLowerCase() ?? null;
   const current = await readCompletionPlan(sql, tenantId, uploadSessionId, true);
   const { session, asset } = current;
+  if (current.binding?.reception_id !== plan.binding?.reception_id
+    || current.binding?.damage_id !== plan.binding?.damage_id
+    || current.binding?.privacy_consent_id !== plan.binding?.privacy_consent_id) {
+    throw new MediaError(409, 'MEDIA_ASSOCIATION_CONFLICT', 'Operational upload binding changed during inspection.');
+  }
   if (session.status === 'completed' && asset) {
     if ((asset.checksum_sha256?.toLowerCase() ?? null) !== checksum) {
       throw new MediaError(409, 'IDEMPOTENCY_PAYLOAD_MISMATCH', 'Completion payload differs from the completed session.');
@@ -392,7 +433,7 @@ export async function completeUploadSession(sql: postgres.ReservedSql, tenantId:
 }
 
 async function auditMedia(sql: postgres.ReservedSql, tenantId: string, mediaId: string,
-  sessionId: string, action: string, reason: string | null = null): Promise<void> {
+  sessionId: string, action: string, reason: string | null = null, binding?: UploadBinding): Promise<void> {
   // Actor and correlation originate exclusively in the verified, transaction-local context.
   await sql`INSERT INTO public.audit_logs
     (id, tenant_id, actor_type, actor_user_id, actor_membership_id, action, outcome,
@@ -401,7 +442,10 @@ async function auditMedia(sql: postgres.ReservedSql, tenantId: string, mediaId: 
       NULLIF(current_setting('app.user_id', true), '')::uuid,
       NULLIF(current_setting('app.membership_id', true), '')::uuid,
       ${action}, 'success', 'media_asset', ${mediaId}, ${reason},
-      ${sql.json({ upload_session_id: sessionId })}, current_setting('app.request_id', true))`;
+      ${sql.json({ upload_session_id: sessionId, ...(binding ? {
+        context_type: binding.damage_id ? 'damage' : 'reception', reception_id: binding.reception_id,
+        ...(binding.damage_id ? { damage_id: binding.damage_id } : {}), privacy_consent_id: binding.privacy_consent_id,
+      } : {}) })}, current_setting('app.request_id', true))`;
 }
 
 export interface DownloadUrlResult {

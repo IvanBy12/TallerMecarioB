@@ -16,6 +16,20 @@ const denied = (error) => {
   return true;
 };
 
+const DEFAULT_TENANT_POLICY_ROLES = {
+  SELECT: ['tallermecario_api', 'tallermecario_worker'],
+  INSERT: ['tallermecario_api', 'tallermecario_worker'],
+};
+
+// Initial upload authorization belongs to the API. The worker has no binding
+// access; this changes expected policy scope, never tenant-table coverage.
+const TENANT_POLICY_ROLE_OVERRIDES = {
+  media_upload_bindings: {
+    SELECT: ['tallermecario_api'],
+    INSERT: ['tallermecario_api'],
+  },
+};
+
 const APPEND_ONLY_TABLES = [
   'order_status_history',
   'quote_authorizations',
@@ -194,7 +208,7 @@ test.describe('RLS catalog and transaction-local context', () => {
     `;
     assert.equal(uncovered.length, 0);
 
-    const missingPolicies = await admin`
+    const tablePolicies = await admin`
       WITH covered AS (
         SELECT c.relname
         FROM pg_catalog.pg_class AS c
@@ -209,21 +223,62 @@ test.describe('RLS catalog and transaction-local context', () => {
             )
           )
       )
-      SELECT covered.relname
+      SELECT covered.relname,
+        COALESCE(jsonb_agg(jsonb_build_object('command', p.cmd, 'roles', p.roles))
+          FILTER (WHERE p.policyname IS NOT NULL), '[]'::jsonb) AS policies
       FROM covered
-      WHERE NOT EXISTS (
-        SELECT 1 FROM pg_catalog.pg_policies AS p
-        WHERE p.schemaname = 'public' AND p.tablename = covered.relname AND p.cmd = 'SELECT'
-          AND p.roles @> ARRAY['tallermecario_api'::name, 'tallermecario_worker'::name]
-      )
-      OR NOT EXISTS (
-        SELECT 1 FROM pg_catalog.pg_policies AS p
-        WHERE p.schemaname = 'public' AND p.tablename = covered.relname AND p.cmd = 'INSERT'
-          AND p.roles @> ARRAY['tallermecario_api'::name, 'tallermecario_worker'::name]
-      )
+      LEFT JOIN pg_catalog.pg_policies AS p
+        ON p.schemaname = 'public' AND p.tablename = covered.relname
+      GROUP BY covered.relname
       ORDER BY covered.relname
     `;
-    assert.equal(missingPolicies.length, 0);
+    const missingPolicies = tablePolicies.filter((table) => {
+      const override = TENANT_POLICY_ROLE_OVERRIDES[table.relname];
+      const expected = override ?? DEFAULT_TENANT_POLICY_ROLES;
+      return Object.entries(expected).some(([command, roles]) => !table.policies.some((policy) =>
+        policy.command === command && roles.every((role) => policy.roles.includes(role))
+          && (!override || policy.roles.length === roles.length)));
+    });
+    assert.equal(missingPolicies.length, 0, JSON.stringify(missingPolicies));
+  });
+
+  test('media_upload_bindings retains forced RLS, schema ownership and API-only least privilege', async () => {
+    const [table] = await admin`
+      SELECT c.relrowsecurity, c.relforcerowsecurity, owner.rolname AS owner
+      FROM pg_catalog.pg_class AS c
+      JOIN pg_catalog.pg_roles AS owner ON owner.oid = c.relowner
+      WHERE c.oid = 'public.media_upload_bindings'::regclass
+    `;
+    assert.deepEqual(table, {
+      relrowsecurity: true, relforcerowsecurity: true, owner: 'tallermecario_schema_owner',
+    });
+    const policies = await admin`
+      SELECT policyname, cmd, roles, with_check
+      FROM pg_catalog.pg_policies
+      WHERE schemaname = 'public' AND tablename = 'media_upload_bindings'
+      ORDER BY policyname
+    `;
+    assert.deepEqual(policies.map((policy) => [policy.policyname, policy.cmd]),
+      [['tenant_insert', 'INSERT'], ['tenant_select', 'SELECT']]);
+    for (const policy of policies) {
+      assert.deepEqual(policy.roles, TENANT_POLICY_ROLE_OVERRIDES.media_upload_bindings[policy.cmd], policy.policyname);
+      assert.equal(policy.roles.includes('tallermecario_worker'), false, policy.policyname);
+      if (policy.cmd === 'INSERT') assert.ok(policy.with_check, 'binding INSERT requires WITH CHECK');
+    }
+    for (const role of ['tallermecario_api', 'tallermecario_worker']) {
+      const [privileges] = await admin`
+        SELECT
+          pg_catalog.has_table_privilege(${role}, 'public.media_upload_bindings', 'SELECT') AS select,
+          pg_catalog.has_table_privilege(${role}, 'public.media_upload_bindings', 'INSERT') AS insert,
+          pg_catalog.has_table_privilege(${role}, 'public.media_upload_bindings', 'UPDATE') AS update,
+          pg_catalog.has_table_privilege(${role}, 'public.media_upload_bindings', 'DELETE') AS delete,
+          pg_catalog.has_table_privilege(${role}, 'public.media_upload_bindings', 'TRUNCATE') AS truncate
+      `;
+      assert.deepEqual(privileges, {
+        select: role === 'tallermecario_api', insert: role === 'tallermecario_api',
+        update: false, delete: false, truncate: false,
+      }, role);
+    }
   });
 
   test('missing context sees no tenant rows; A cannot read/write B; context clears after COMMIT and ROLLBACK', async () => {

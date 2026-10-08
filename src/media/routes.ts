@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { getTenantRequestContext, markDurableTenantOutcome } from '../api/app.js';
 import { runMediaInspectionWithoutTransaction } from '../api/tenant-request.js';
 import type { R2Config } from './r2.js';
+import type { OperationalContext } from './operational-binding.js';
 import {
   MediaError,
   completeUploadSession,
@@ -36,6 +37,11 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
           type: 'object',
           additionalProperties: false,
           required: ['mediaType', 'mimeType', 'retentionClass', 'idempotencyKey', 'expectedSizeBytes'],
+          allOf: [{
+            if: { properties: { mediaType: { enum: ['photo', 'video', 'video360'] } }, required: ['mediaType'] },
+            then: { required: ['operationalContext'] },
+            else: { not: { required: ['operationalContext'] } },
+          }],
           properties: {
             mediaType: { type: 'string' },
             mimeType: { type: 'string' },
@@ -43,6 +49,12 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
             idempotencyKey: { type: 'string', format: 'uuid' },
             expectedSizeBytes: { type: 'integer', minimum: 1 },
             capturedAt: { type: 'string', format: 'date-time' },
+            operationalContext: { oneOf: [
+              { type: 'object', additionalProperties: false, required: ['type', 'receptionId'],
+                properties: { type: { const: 'reception' }, receptionId: { type: 'string', format: 'uuid' } } },
+              { type: 'object', additionalProperties: false, required: ['type', 'damageId'],
+                properties: { type: { const: 'damage' }, damageId: { type: 'string', format: 'uuid' } } },
+            ] },
           },
         },
       },
@@ -56,6 +68,7 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
         idempotencyKey: string;
         expectedSizeBytes: number;
         capturedAt?: string;
+        operationalContext?: OperationalContext;
       };
       try {
         const result = await createUploadSession(context.sql, r2, context.tenant.tenantId, context.tenant.membershipId, body);
