@@ -7,7 +7,9 @@ const MUTANTS = Object.freeze({
   open_guard: ["if (reception.status !== 'open')", 'if (false)'],
   version_guard: ['if (!document)', 'if (false)'],
   client_owned_fields: ['if (Object.keys(raw).some((key) => ![', 'if (false && Object.keys(raw).some((key) => !['],
-  reception_lock: ['FOR NO KEY UPDATE', ''],
+  // B05 reserves the reception before session/asset locks in lockMediaRetention.
+  // The later lockedReception re-read still validates lifecycle state.
+  reception_lock: ['{ receptionIds: [receptionId] }', '{}'],
   audit_rollback: ['await sql `INSERT INTO public.audit_logs', 'if (false) await sql `INSERT INTO public.audit_logs'],
   trim_before_controls: ["BIDI_CONTROL_CHARACTERS.test(value)", "BIDI_CONTROL_CHARACTERS.test(value.normalize('NFC').trim())"],
 });
