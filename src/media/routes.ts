@@ -1,6 +1,8 @@
+import { attachMedia, listAssociatedMedia, type AssociationTarget } from './associations.js';
+import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
 import type { FastifyInstance } from 'fastify';
-import { getTenantRequestContext, markDurableTenantOutcome } from '../api/app.js';
-import { runMediaInspectionWithoutTransaction } from '../api/tenant-request.js';
+import { ApiError, getTenantRequestContext, markDurableTenantOutcome } from '../api/app.js';
+import { runMediaInspectionWithoutTransaction, runMediaAssociationTransaction } from '../api/tenant-request.js';
 import type { R2Config } from './r2.js';
 import type { OperationalContext } from './operational-binding.js';
 import {
@@ -20,6 +22,57 @@ function sendMediaError(request: { id: string }, reply: { code: (n: number) => {
 }
 
 export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
+  for (const type of ['reception', 'damage'] as const) {
+    const url = type === 'reception' ? '/api/v1/receptions/:receptionId/media'
+      : '/api/v1/receptions/:receptionId/damages/:damageId/media';
+    const target = (params: unknown): AssociationTarget => {
+      const p = params as { receptionId: string; damageId?: string };
+      const receptionId = parseCanonicalUuid(p.receptionId), damageId = parseCanonicalUuid(p.damageId);
+      if (!receptionId) throw new MediaError(404, 'RECEPTION_NOT_FOUND', 'The reception was not found.');
+      if (type === 'damage') {
+        if (!damageId) throw new MediaError(404, 'DAMAGE_NOT_FOUND', 'The damage was not found.');
+        return { type, receptionId, damageId };
+      }
+      return { type, receptionId };
+    };
+    app.post(url, { bodyLimit: 2048, config: { permission: 'media.upload' },
+      onRequest: async (request, reply) => {
+        reply.header('cache-control', 'no-store');
+        if (request.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json')
+          throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be application/json.');
+      },
+      schema: { body: { type: 'object', additionalProperties: false, required: ['mediaAssetId'], properties: {
+        mediaAssetId: { type: 'string', format: 'uuid' },
+        sortOrder: { type: 'integer', minimum: 0, maximum: 2147483647 },
+      } } },
+    }, async (request, reply) => {
+      try {
+        const body = request.body as { mediaAssetId: string; sortOrder?: number };
+        if (!parseCanonicalUuid(body.mediaAssetId) || (body.sortOrder !== undefined && !Number.isInteger(body.sortOrder)))
+          throw new MediaError(400, 'REQUEST_VALIDATION_FAILED', 'The request body is invalid.');
+        const association = await runMediaAssociationTransaction(request, context =>
+          attachMedia(context.sql, context.tenant.tenantId, target(request.params), body));
+        return reply.code(201).send({ media: association });
+      } catch (error) {
+        if (error instanceof MediaError) return sendMediaError(request, reply, error);
+        throw error;
+      }
+    });
+    app.get(url, { config: { permission: 'media.read' },
+      onRequest: async (_request, reply) => { reply.header('cache-control', 'no-store'); },
+    }, async (request, reply) => {
+      try {
+        if (Object.keys((request.query ?? {}) as object).length)
+          throw new MediaError(400, 'REQUEST_VALIDATION_FAILED', 'The request query is invalid.');
+        const context = getTenantRequestContext(request);
+        return reply.send({ media: await listAssociatedMedia(context.sql, context.tenant.tenantId, target(request.params)) });
+      } catch (error) {
+        if (error instanceof MediaError) return sendMediaError(request, reply, error);
+        throw error;
+      }
+    });
+  }
+
   app.post(
     '/api/v1/media/upload-sessions',
     {

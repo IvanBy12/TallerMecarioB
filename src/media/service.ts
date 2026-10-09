@@ -464,11 +464,11 @@ export async function getMediaDownloadUrl(
   tenantId: string,
   mediaAssetId: string,
 ): Promise<DownloadUrlResult> {
-  const [asset] = await sql<{ id: string; object_key: string; status: string; deleted_at: Date | null }[]>`
-    SELECT id, object_key, status, deleted_at FROM media_assets
+  const [asset] = await sql<{ id: string; object_key: string; status: string; deletion_requested_at: Date | null; deleted_at: Date | null; purged_at: Date | null }[]>`
+    SELECT id, object_key, status, deletion_requested_at, deleted_at, purged_at FROM media_assets
     WHERE tenant_id = ${tenantId} AND id = ${mediaAssetId}
   `;
-  if (!asset || asset.deleted_at) throw new MediaError(404, 'MEDIA_ASSET_NOT_FOUND', 'Media asset not found.');
+  if (!asset || asset.deletion_requested_at || asset.deleted_at || asset.purged_at) throw new MediaError(404, 'MEDIA_ASSET_NOT_FOUND', 'Media asset not found.');
   if (asset.status !== 'active') throw new MediaError(409, 'MEDIA_ASSET_NOT_ACTIVE', 'Media asset is not available for download.');
 
   const expiresAt = new Date(Date.now() + DOWNLOAD_URL_TTL_SECONDS * 1000);

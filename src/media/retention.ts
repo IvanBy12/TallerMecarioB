@@ -1,5 +1,5 @@
 import type postgres from 'postgres';
-import { MediaError } from './errors.js';
+import { MediaError, MediaLineageChangedError } from './errors.js';
 import { uuidV7 } from '../platform/uuid-v7.js';
 
 // v1 already denotes the canonical product defaults. No historical relabeling.
@@ -33,7 +33,7 @@ interface Asset {
   unlinked_until: string | null; quarantine_until: string | null; now: string;
 }
 const missing = () => new MediaError(404, 'MEDIA_ASSET_NOT_FOUND', 'The media asset was not found.');
-const retry = () => new MediaError(409, 'MEDIA_ASSOCIATION_CONFLICT', 'Media lineage changed; retry the transaction.');
+const retry = () => new MediaLineageChangedError();
 const iso = (value: string) => `to_char((${value}) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 const calendar = (field: string, interval: string) => `((${field} AT TIME ZONE 'UTC') + interval '${interval}') AT TIME ZONE 'UTC'`;
 
@@ -120,7 +120,9 @@ export async function lockMediaRetention(sql: postgres.ReservedSql, tenantId: st
   const receptions = distinct([...discovered.map((l) => l.reception_id), ...extraDamages.map((d) => d.reception_id),
     ...extraOrders.map((o) => o.reception_id), ...(additionalParents.receptionIds ?? []).map((id) => id.toLowerCase())]);
   const damages = distinct([...discovered.map((l) => l.damage_id), ...extraDamages.map((d) => d.id)]);
-  const orders = distinct([...discovered.map((l) => l.order_id), ...extraOrders.map((o) => o.id)]);
+  const receptionOrders = await sql<{ id: string }[]>`SELECT id FROM public.service_orders
+    WHERE tenant_id=${tenantId} AND reception_id=ANY(${receptions}::uuid[])`;
+  const orders = distinct([...discovered.map((l) => l.order_id), ...extraOrders.map((o) => o.id), ...receptionOrders.map((o) => o.id)]);
   await sql`SELECT id FROM public.receptions WHERE tenant_id=${tenantId} AND id=ANY(${receptions}::uuid[])
     ORDER BY id FOR NO KEY UPDATE`;
   await sql`SELECT id FROM public.vehicle_damages WHERE tenant_id=${tenantId} AND id=ANY(${damages}::uuid[])
@@ -149,6 +151,9 @@ async function state(token: MediaRetentionLock): Promise<LockState> {
   // the ENTIRE transaction; never acquire an unknown parent after the asset.
   if (current.some((l) => (l.reception_id && !locked.receptions.has(l.reception_id))
     || (l.damage_id && !locked.damages.has(l.damage_id)) || (l.order_id && !locked.orders.has(l.order_id)))) throw retry();
+  const orders = await locked.sql<{ id: string }[]>`SELECT id FROM public.service_orders
+    WHERE tenant_id=${locked.tenantId} AND reception_id=ANY(${[...locked.receptions]}::uuid[])`;
+  if (orders.some((o) => !locked.orders.has(o.id))) throw retry();
   const sessions = await locked.sql<{ id: string }[]>`SELECT id FROM public.upload_sessions
     WHERE tenant_id=${locked.tenantId} AND media_asset_id=ANY(${locked.ids}::uuid[])`;
   if (sessions.some((s) => !locked.sessions.has(s.id))) throw retry();
@@ -180,7 +185,14 @@ export async function evaluateLockedMediaRetention(token: MediaRetentionLock, as
         AND c.purpose_code='service_provision' AND c.created_at<=b.authorized_at
         AND b.created_at=b.authorized_at AND b.authorized_at<=clock_timestamp()
         AND ((us.status='pending' AND us.expires_at>clock_timestamp() AND us.integrity_version='v1')
-          OR (us.status='completed' AND ${asset.status}='active'))) AS protected
+          OR (us.status='completed' AND ${asset.status}='active' AND NOT (
+            (b.damage_id IS NULL AND EXISTS (SELECT 1 FROM public.reception_media rm
+              WHERE rm.tenant_id=b.tenant_id AND rm.reception_id=b.reception_id
+                AND rm.media_asset_id=us.media_asset_id AND rm.purpose='intake_evidence'))
+            OR (b.damage_id IS NOT NULL AND EXISTS (SELECT 1 FROM public.damage_media dm
+              JOIN public.vehicle_damages d ON d.tenant_id=dm.tenant_id AND d.id=dm.damage_id
+              WHERE dm.tenant_id=b.tenant_id AND dm.damage_id=b.damage_id AND d.reception_id=b.reception_id
+                AND dm.media_asset_id=us.media_asset_id AND dm.purpose='damage_evidence')))))) AS protected
         FROM public.media_upload_bindings b JOIN public.upload_sessions us ON us.tenant_id=b.tenant_id AND us.id=b.upload_session_id
         JOIN public.receptions r ON r.tenant_id=b.tenant_id AND r.id=b.reception_id
         JOIN public.privacy_consents c ON c.tenant_id=b.tenant_id AND c.id=b.privacy_consent_id

@@ -81,6 +81,13 @@ export async function captureReceptionSignature(context: TenantRequestContext, r
     const code = (error as { code?: string }).code;
     if (code === 'MEDIA_ASSET_NOT_FOUND') throw mediaNotFound();
     if (code === 'MEDIA_ASSOCIATION_CONFLICT') {
+      // The incoming reception is already locked by B05. A concurrent close
+      // can introduce order lineage during discovery; preserve lifecycle error
+      // priority before considering single-use media. No new parent lock here.
+      const [parent] = await sql`SELECT status FROM public.receptions
+        WHERE tenant_id=${tenant.tenantId} AND id=${receptionId}`;
+      if (parent?.status !== 'open')
+        throw new ApiError(409, 'RECEPTION_NOT_EDITABLE', 'The reception cannot be edited.');
       const [used] = await sql`SELECT id FROM public.signatures
         WHERE tenant_id=${tenant.tenantId} AND signature_media_id=${input.signatureMediaId}`;
       if (used) throw mediaUsed();

@@ -89,7 +89,7 @@ async function auditBarrier(action) {
     async release() { await holder`ROLLBACK`; holder.release(); },
     async cleanup() { await h.admin.unsafe(`DROP TRIGGER ${name} ON audit_logs; DROP FUNCTION public.${name}();`); } };
 }
-for (const [target, type] of [['reception','photo'],['reception','video'],['reception','video360'],['damage','photo'],['damage','video']]) {
+for (const [target, type] of [['reception','photo'],['reception','video'],['reception','video360'],['damage','photo'],['damage','video'],['damage','video360']]) {
   test(`new ${target} ${type}: verified binding, PUT, safe audit and no association/retention clock`, async () => {
     const p = await parent(a), body = payload(p, { operationalContext: context(p,target), mediaType: type,
       mimeType: type === 'photo' ? 'image/png' : 'video/mp4' });
@@ -101,7 +101,7 @@ for (const [target, type] of [['reception','photo'],['reception','video'],['rece
     const [audit] = await h.admin`SELECT metadata_json FROM audit_logs WHERE entity_id=${s.mediaAssetId}`;
     assert.deepEqual(audit.metadata_json,{ upload_session_id:s.uploadSessionId,context_type:target,reception_id:p.reception,
       privacy_consent_id:p.consent,...(target==='damage'?{damage_id:p.damage}:{}) });
-    const [links] = await h.admin`SELECT (SELECT count(*) FROM reception_media)+(SELECT count(*) FROM damage_media) AS n`;
+    const [links] = await h.admin`SELECT (SELECT count(*) FROM reception_media WHERE tenant_id=${a.tenantId})+(SELECT count(*) FROM damage_media WHERE tenant_id=${a.tenantId}) AS n`;
     assert.equal(Number(links.n),0);
     for(const secret of [s.uploadUrl,s.objectKey,f.r2.bucket]) assert.equal(JSON.stringify(audit).includes(secret),false);
   });
@@ -134,9 +134,6 @@ for(const target of ['reception','damage']) test(`${target}: foreign and missing
   error(foreign,404,target==='reception'?'RECEPTION_NOT_FOUND':'DAMAGE_NOT_FOUND');
   assert.deepEqual({...foreign.body.error,request_id:null},{...missing.body.error,request_id:null});
   await rejected(body,target==='reception'?'RECEPTION_NOT_FOUND':'DAMAGE_NOT_FOUND',404);
-});
-test('damage video360 stays outside B01 matrix',async()=>{
-  const p=await parent(a); await rejected(payload(p,{mediaType:'video360',mimeType:'video/mp4',operationalContext:context(p,'damage')}),'MEDIA_ASSOCIATION_CONFLICT');
 });
 for(const target of ['reception','damage']) test(`closed parent rejects new ${target} create`,async()=>{
   const p=await parent(a); assert.equal((await close(p)).status,200);
@@ -317,20 +314,19 @@ async function directState(sessions) {
   return {rows,audits:audit.n};
 }
 for(const invalid of ['forged-tenant','foreign-session','foreign-reception','foreign-consent','signature','document',
-  'damage-video360','wrong-damage-parent','revoked-consent','closed-reception']) test(`API-role direct INSERT rejects ${invalid} without side effects`,async()=>{
+  'wrong-damage-parent','revoked-consent','closed-reception']) test(`API-role direct INSERT rejects ${invalid} without side effects`,async()=>{
   const p=await parent(a),q=await parent(a),foreign=await parent(b);
-  const type=['signature','document'].includes(invalid)?invalid:invalid==='damage-video360'?'video360':'photo';
+  const type=['signature','document'].includes(invalid)?invalid:'photo';
   const own=await directSession(a,type),other=await directSession(b),options={};let upload=own;
   if(invalid==='forged-tenant')options.tenantId=b.tenantId;
   if(invalid==='foreign-session')upload=other;
   if(invalid==='foreign-reception')options.receptionId=foreign.reception;
   if(invalid==='foreign-consent')options.consentId=foreign.consent;
-  if(invalid==='damage-video360')options.damageId=p.damage;
   if(invalid==='wrong-damage-parent')options.damageId=q.damage;
   if(invalid==='revoked-consent')await revoke(p);
   if(invalid==='closed-reception')assert.equal((await close(p)).status,200);
   const before=await directState([own,other]);
-  const failure=['signature','document','foreign-session','damage-video360'].includes(invalid)?'invalid operational session':
+  const failure=['signature','document','foreign-session'].includes(invalid)?'invalid operational session':
     invalid==='wrong-damage-parent'?'invalid damage lineage':invalid==='revoked-consent'?'invalid initial consent authorization':'invalid operational parent';
   await assert.rejects(directBinding(upload,p,options),e=>{
     assert.equal(e.code,'23514');assert.equal(e.constraint_name,'media_upload_bindings_initial_authorization_guard');
@@ -339,7 +335,7 @@ for(const invalid of ['forged-tenant','foreign-session','foreign-reception','for
   assert.deepEqual(await directState([own,other]),before);
   for(const upload of [own,other])assert.equal((await snapshot(upload)).binding,null,'no binding inserted');
 });
-for(const [target,type] of [['reception','photo'],['reception','video360'],['damage','photo'],['damage','video']]) {
+for(const [target,type] of [['reception','photo'],['reception','video360'],['damage','photo'],['damage','video'],['damage','video360']]) {
   test(`API-role direct valid ${target} ${type} INSERT owns timestamps and prevents retarget/mutation`,async()=>{
     const p=await parent(a),q=await parent(a),upload=await directSession(a,type),before=await directState([upload]);
     const [start]=await h.admin`SELECT clock_timestamp() AS time`;

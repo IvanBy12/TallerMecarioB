@@ -91,8 +91,9 @@ Privileged writers bypassing this protocol cannot be made safe by one snapshot.
 
 `evaluateMediaRetention` performs a locked decision; `recalculateMediaRetention`
 adds persistence/audit. For B04 Phase B: lock authorized parent graph, attach, then
-`recalculateLockedMediaRetention` before committing. PURPOSE_CATALOG_UNRESOLVED
-remains; no attach/gallery/reorder route is enabled.
+`recalculateLockedMediaRetention` before committing. Phase B implements reception/
+damage attach and list with server-owned purposes;
+reorder remains deferred. See [B04 Phase B](S4-B04-media-associations.md).
 
 For a future terminal command, call `lockOrderMediaRetention` **before** changing
 order state, then mutate status/closed_at and recalculate its returned asset IDs
@@ -111,16 +112,17 @@ expired capabilities and closed receptions cannot finish this operation and thei
 binding alone is not a perpetual hold. Quarantined failed uploads use the 7-day
 floor, unless another real source/hold/committed floor protects them.
 
-**B04_BINDING_RELEASE_PENDING_PHASE_B**: a completed active asset with an eligible
-open reception and no final association remains protected temporarily, potentially indefinitely
-while the reception stays open. Pending valid sessions protect; failed/expired
-sessions stop independent binding protection, and closed/ineligible receptions
-stop in-progress protection under current evaluator rules. Phase B must create
-canonical reception_media/damage_media and recalculate retention atomically;
-the canonical final link must then become authoritative and binding must no longer
-serve as an indefinite substitute. B05 deliberately retains its fail-safe evaluator;
-this release and Phase B associations are not implemented. PURPOSE_CATALOG_UNRESOLVED
-still blocks public attach/gallery/reorder; no purpose is fabricated.
+**B04_BINDING_RELEASE_PENDING_PHASE_B — resolved by Phase B**: a completed active
+asset with an eligible open reception and no matching canonical association is
+still protected temporarily. Matching reception_media/intake_evidence with NULL
+damage context, or damage_media/damage_evidence with exact damage/reception lineage,
+releases only the completed binding's independent UNRESOLVED_PROTECTION. The
+binding row remains durable historical authorization evidence; the final association
+becomes authoritative. Pending valid sessions still protect independently, and
+failed/expired sessions do not. Attach recalculates retention atomically under the
+same B05 lock proof. Privacy evidence, legal holds and no-shortening are unchanged.
+The resolved catalogue is limited to these two MVP tables; future purposes remain
+reserved. See [B04 Phase B](S4-B04-media-associations.md).
 
 legal_hold_until > current PostgreSQL clock blocks automatic purge, including
 when retention is expired. Expiry requires all ordinary rules to be reevaluated;
@@ -157,7 +159,7 @@ and both longer-floor orderings, changing lineage and transaction proof expiry.
 Existing media/reception suites verify completion, checksum, quarantine, replay,
 binding and signature compatibility. Migration coverage now includes fresh through
 0027, 0026→0027 with historical-v0/later floor/future hold and signature/session/
-binding/audit preservation, and framework rerun. Ledger: **28 entries**.
+binding/audit preservation, and framework rerun. Ledger after B04 Phase B: **29 entries**.
 
 All review-fix validation is recorded in the final S4-B05 Review Fix Report.
 Nothing is committed or pushed. Temporary DBs/logins and test infrastructure are

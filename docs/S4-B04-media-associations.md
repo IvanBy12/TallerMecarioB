@@ -1,4 +1,4 @@
-# S4-B04 — Operational media binding, Phase A
+# S4-B04 — Operational upload binding and reception/damage associations
 
 Implemented against [B01 §§3–6/12.1](S4-B01-media-contract.md),
 [B02](S4-B02-media-integrity.md), [B03](S4-B03-media-idempotency.md), the
@@ -17,7 +17,8 @@ contract. Baseline: `task/s4-b04-media-associations`, clean,
 It must be absent for `signature`, `quote_pdf`, `document`. Both objects and the
 body reject extra properties. No client tenant/customer/order/consent/purpose or
 authorization timestamp. Structural errors: `400 REQUEST_VALIDATION_FAILED`.
-Damage permits photo/video only; video360 gives `409 MEDIA_ASSOCIATION_CONFLICT`.
+Damage permits photo, video and video360. The supplied Phase B canonical decision
+supersedes the earlier accidental video360 exclusion in Phase A/B01.
 Existing MIME, size, write-once PUT and URL lifetime rules are preserved.
 
 The authenticated TenantContext and current tenant-wide `media.upload` permission
@@ -83,26 +84,139 @@ closure during R2 is checked again in Phase C. Binding identity is compared acro
 phases, including completed replay. B02 integrity and B03 checksum replay/audit
 semantics remain unchanged.
 
-## Boundaries and remaining blocker
+## Phase B — implemented
 
-**PURPOSE_CATALOG_UNRESOLVED**. Diccionario 03 defines varchar(48), NOT NULL and
-partial PK semantics but provides no canonical purpose strings. B01 records this
-reservation; the supplied Phase A contract confirms it. No Notion access occurred.
+Implemented on `task/s4-b04-phase-b-associations`, base
+`03a3af33667d1fe627bc6943b6a6c115a2f90869`, against the user-supplied Phase B
+canonical decision (2026-10-08). No direct Notion access. The complete Diccionario
+03/ADR-003 exports remain absent locally; the supplied decision resolves only
+this MVP catalogue. **PURPOSE_CATALOG_UNRESOLVED is closed for reception_media and
+damage_media only**; future link families remain reserved.
 
-No public reception_media/damage_media attach route was enabled because no
-canonical purpose strings exist in the approved sources.
+| Target | Server-owned purpose | Operational types |
+| --- | --- | --- |
+| reception_media | `intake_evidence`: general vehicle-condition evidence at intake | photo, video, video360 |
+| damage_media | `damage_evidence`: evidence for a recorded damage | photo, video, video360 |
 
-No reception_media/damage_media INSERT, gallery, reorder or quantity limit.
-Existing sort_order is integer 0…2147483647, default 0, ties allowed; future stable
-read order remains sort_order, media_asset_id, purpose.
+Purpose expresses business semantics, never MIME/file format. **Damage + video360
+is valid**, including new binding, completion, attach and direct runtime INSERT.
+No aliases/free text/custom purposes or second purpose per target are exposed.
 
-Owner/admin/service_advisor remain tenant-wide. Technician remains fail-closed
-pending B07; binding is not a general download/read capability. B05 retention
-remains pending: binding is protective in-progress evidence, not the final domain
-association or a terminal-order event. No retention_until or 12-month clock starts
-from authorization/upload/session/reception-close. Future cleanup must account for
-binding protection. B06/B08, offline exceptions and duration policy remain outside
-Phase A. S4-B04 is not fully closed while the purpose catalogue is unresolved.
+### Attach and list API
 
-Behavioral tests run through the existing media API gate; migration coverage runs
-through the media upgrade gate. Both are included in the normal CI validate job.
+| Method | Route | Permission | Response |
+| --- | --- | --- | --- |
+| POST | `/api/v1/receptions/:receptionId/media` | media.upload, tenant | 201 `{ media: MediaDto }` |
+| GET | `/api/v1/receptions/:receptionId/media` | media.read, tenant | 200 `{ media: MediaDto[] }` |
+| POST | `/api/v1/receptions/:receptionId/damages/:damageId/media` | media.upload, tenant | 201 `{ media: MediaDto }` |
+| GET | `/api/v1/receptions/:receptionId/damages/:damageId/media` | media.read, tenant | 200 `{ media: MediaDto[] }` |
+
+POST requires JSON `{ "mediaAssetId": "uuid", "sortOrder": 0 }`; sortOrder is
+optional/default 0, integer 0…2147483647, ties allowed. Additional properties are
+rejected: no client purpose, tenant, consent, session, retention or authorization
+clock. UUIDs canonicalize to lowercase; malformed route IDs use anti-enumeration
+404. No query parameters/pagination. Bodies ≤2 KiB. Business replies use no-store.
+
+MediaDto contains exactly mediaAssetId, mediaType, mimeType, sizeBytes (number or
+null), capturedAt, uploadedAt (UTC microsecond strings or null), purpose and
+sortOrder. No bucket/key/checksum/URL/hold/retention blockers. The existing signed
+`GET /api/v1/media/:id/download-url` remains the download path and checks active,
+tenant and all deletion markers.
+
+Owner/admin/service_advisor use current tenant-wide media permissions.
+**B07 assigned technician remains deferred/fail-closed**, even when a technician
+knows a valid target/media ID. Reads allow historical/closed parents; they do not
+require the reception to remain open. Damage routes additionally verify the
+route reception is the damage's actual tenant-scoped parent.
+
+### Invariants and replay
+
+Attach requires an open tenant reception, or tenant damage with that exact open
+reception; foreign/missing targets are indistinguishable 404. Closed targets give
+409 RECEPTION_NOT_EDITABLE. Asset must be tenant-owned, active, operational,
+photo/video/video360, with no deletion_requested_at/deleted_at/purged_at. Other
+lifecycle/type/class combinations give 409 MEDIA_ASSET_NOT_ELIGIBLE; foreign/missing
+assets give 404 MEDIA_ASSET_NOT_FOUND. No implicit reactivation.
+
+All asset sessions are examined in deterministic ID order. Each must be completed
+with completed_at and durable valid Phase-A evidence matching exactly the incoming
+reception with damage_id NULL, or incoming damage and its actual reception.
+Equivalent multiple proofs are valid; missing/unbound/conflicting/pending/failed/
+expired evidence gives 409 MEDIA_ASSOCIATION_CONTEXT_MISMATCH. No arbitrary
+session selection or retargeting. Initial consent authorization is revalidated
+historically; a later revocation does not invalidate the same authorized operation.
+
+Natural link identity remains `(tenant_id,target_id,media_asset_id,purpose)`.
+Same identity and sort returns the persisted 201 body without another row, audit
+or recalculation. Different sort gives 409 MEDIA_ASSOCIATION_CONFLICT; no UPDATE,
+implicit reorder or deletion command. Reads always order exactly by
+`sort_order ASC, media_asset_id ASC, purpose ASC`, including ties.
+
+### Locks, retention transition and auditing
+
+First attach uses one verified transaction: validate/discover target →
+`lockMediaRetention` with incoming reception/damage → repeat lifecycle/binding
+validation → INSERT → `recalculateLockedMediaRetention` → safe audit → commit.
+Global sorted lock tiers: reception → damage → service order → every upload
+session → media asset. Existing reception orders enter the graph before asset
+locks, including when discovered only through a binding. A new order/parent/session
+appearing during discovery rolls back and retries the **whole** request transaction
+(up to 3 attempts) with fresh identity/membership/RBAC/GUCs; business conflicts do
+not retry. No late parent locks. No R2 I/O occurs in attach transactions.
+
+Attach and close serialize on the reception. Close wins: 409/no link or association
+audit. Attach wins: link/retention/audit commit together before close proceeds.
+An insert, retention or audit failure rolls back all effects.
+
+Completed active binding without a matching final association temporarily retains
+UNRESOLVED_PROTECTION while its parent is eligible/open. After matching canonical
+association, the binding remains durable authorization history but **stops adding
+an independent unresolved blocker**. Pending valid binding still protects; failed/
+expired binding does not. The final association becomes the domain source:
+no order → CLOCK_NOT_STARTED; nonterminal order → DOMAIN_LINK_NONTERMINAL;
+delivered/cancelled → order.closed_at + 12 UTC calendar months. Association,
+upload, authorization and reception-close dates never start that clock. Known
+floors extend atomically; committed floors, historical policy versions, privacy
+protection and legal holds remain preserved.
+
+First successful attach emits exactly one `media.associated`, entity media_asset,
+metadata only `{target_type,target_id,purpose,sort_order}`. Replay emits none.
+A real retention extension may also emit the existing `media.retention_updated`;
+no extension means no retention audit. Storage keys/capabilities and customer/
+vehicle/damage/consent content never enter association metadata.
+
+### Migration 0028 and privileges
+
+Existing tables/PKs/tenant FKs/indexes remain; no polymorphic link, new association
+table or historical backfill. Purpose CHECKs constrain reception_media to
+intake_evidence and damage_media to damage_evidence. Under exclusive table locks,
+owner-only temporary SELECT policies let the preflight inspect all tenant history
+while **FORCE RLS remains enabled**. They are removed in the same migration
+transaction; incompatible purposes abort with 23514 and the corresponding
+`*_purpose_preflight` identifier, without coercion/data/ledger changes.
+
+A narrow schema-owner-owned **SECURITY INVOKER**, fixed search_path=pg_catalog
+INSERT guard checks parent/lineage, purpose/sort, asset lifecycle/class/type/markers
+and all completed matching binding evidence under the global lock order.
+Failures use stable 23514 constraint identifiers. 0028 replaces the Phase-A binding
+function solely to remove the accidental damage-video360 restriction; 0026 is
+unchanged. No SECURITY DEFINER, BYPASSRLS or relaxed tenant predicates.
+
+API has SELECT/INSERT only in both association tables; UPDATE/DELETE/TRUNCATE are
+revoked. Worker has no access, including SELECT: current production worker has no
+association read/write path. Tenant policies are explicitly API-only SELECT/INSERT,
+with no UPDATE policy. Sprint-0's global policy and privilege gate pins this matrix.
+
+### Verification and deferrals
+
+Phase-B HTTP/direct runtime SQL tests, all six type/target combinations, replay,
+ties, RBAC, cross-tenant, fail-safe historical evidence, atomic rollback and real
+PostgreSQL lock/audit barriers run automatically in `test:media:api:ci`. Upgrade
+coverage in `test:media:upgrade:ci` includes fresh install, 0027→0028 preserving
+associations/bindings/assets/sessions/audits, framework rerun, and both incompatible
+purpose preflight aborts. Existing CI validate already invokes both gates.
+
+B06 delete/purge, legal-hold mutation, R2 DELETE/credentials; B07 assignment;
+B08 reconciliation; offline first-upload-after-revocation and numeric duration
+policy remain deferred. No finding/work_activity/quality_check/delivery/quote
+association APIs. No commit/push.

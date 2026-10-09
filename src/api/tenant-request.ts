@@ -1,3 +1,4 @@
+import { MediaLineageChangedError } from '../media/errors.js';
 /**
  * S1-02 tenant request lifecycle (Fastify integration of the TenantContext
  * core, src/tenancy/*, and the RBAC core, src/authz/*).
@@ -301,6 +302,31 @@ async function endTransaction(state: TenantRequestState, action: 'COMMIT' | 'ROL
 export async function rollbackTenantRequest(request: FastifyRequest): Promise<void> {
   const state = tenantRequestStates.get(request);
   if (state) await endTransaction(state, 'ROLLBACK').catch(() => undefined);
+}
+
+/** B04 attach retries the whole transaction with fresh membership/RBAC/GUCs.
+ * Only lock-graph changes are retryable; business conflicts are returned. */
+export async function runMediaAssociationTransaction<T>(request: FastifyRequest,
+  work: (context: TenantRequestContext) => Promise<T>): Promise<T> {
+  if (request.method !== 'POST' || request.routeOptions.config.permission !== 'media.upload'
+    || !['/api/v1/receptions/:receptionId/media', '/api/v1/receptions/:receptionId/damages/:damageId/media'].includes(request.routeOptions.url ?? ''))
+    throw new Error('MEDIA_ASSOCIATION_RETRY_ROUTE_INVALID');
+  for (let attempt = 0; ; attempt++) {
+    const state = tenantRequestStates.get(request);
+    if (state?.status !== 'open' || !state.reopen) throw new Error('TENANT_CONTEXT_UNAVAILABLE');
+    try { return await work(state.context); } catch (error) {
+      if (!(error instanceof MediaLineageChangedError) || attempt >= 2) throw error;
+      await endTransaction(state, 'ROLLBACK');
+      const next = await state.reopen();
+      const before = state.context.tenant, after = next.context.tenant;
+      if (before.tenantId !== after.tenantId || before.userId !== after.userId || before.membershipId !== after.membershipId) {
+        await endTransaction(next, 'ROLLBACK');
+        throw new TenantAccessDeniedError();
+      }
+      next.routeStarted = true;
+      tenantRequestStates.set(request, { ...next, reopen: state.reopen });
+    }
+  }
 }
 
 /** Phase A is read-only and rolled back/released before any external work.

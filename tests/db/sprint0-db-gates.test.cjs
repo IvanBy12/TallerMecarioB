@@ -24,6 +24,8 @@ const DEFAULT_TENANT_POLICY_ROLES = {
 // Initial upload authorization belongs to the API. The worker has no binding
 // access; this changes expected policy scope, never tenant-table coverage.
 const TENANT_POLICY_ROLE_OVERRIDES = {
+  reception_media: { SELECT: ['tallermecario_api'], INSERT: ['tallermecario_api'] },
+  damage_media: { SELECT: ['tallermecario_api'], INSERT: ['tallermecario_api'] },
   media_upload_bindings: {
     SELECT: ['tallermecario_api'],
     INSERT: ['tallermecario_api'],
@@ -240,6 +242,20 @@ test.describe('RLS catalog and transaction-local context', () => {
           && (!override || policy.roles.length === roles.length)));
     });
     assert.equal(missingPolicies.length, 0, JSON.stringify(missingPolicies));
+  });
+
+  test('B04 associations are API SELECT/INSERT only; worker has no access', async () => {
+    for (const table of ['reception_media','damage_media']) {
+      for (const role of ['tallermecario_api','tallermecario_worker']) {
+        for (const privilege of ['SELECT','INSERT','UPDATE','DELETE','TRUNCATE']) {
+          const [row] = await admin`SELECT has_table_privilege(${role},${'public.'+table},${privilege}) allowed`;
+          assert.equal(row.allowed, role==='tallermecario_api' && ['SELECT','INSERT'].includes(privilege), `${role}.${table}.${privilege}`);
+        }
+      }
+      const policies = await admin`SELECT cmd,roles FROM pg_policies WHERE schemaname='public' AND tablename=${table}`;
+      assert.equal(policies.length,2);
+      assert.ok(policies.every(p=>['SELECT','INSERT'].includes(p.cmd) && p.roles.length===1 && p.roles[0]==='tallermecario_api'));
+    }
   });
 
   test('media_assets UPDATE intentionally uses API-only column privileges, with forced tenant RLS', async () => {
