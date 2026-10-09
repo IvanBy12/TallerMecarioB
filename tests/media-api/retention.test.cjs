@@ -38,7 +38,7 @@ async function order(status = 'delivered', closedAt = '2024-02-29T10:15:30.12345
   // Constraints/FKs remain enabled for every media source and runtime operation.
   await h.admin.begin(async (tx) => {
     await tx`SET LOCAL session_replication_role=replica`;
-    await tx`UPDATE receptions SET status='closed',closed_at='2020-01-01' WHERE id=${p.reception}`;
+    await tx`UPDATE receptions SET status='closed',closed_at='2020-01-01T00:00:00Z' WHERE id=${p.reception}`;
     await tx`INSERT INTO service_orders(id,tenant_id,reception_id,vehicle_id,customer_id,order_number,
       created_by_membership_id,status,closed_at) VALUES (${id},${tenant.tenantId},${p.reception},${p.vehicle},${p.customer},
         ${BigInt('0x'+id.replaceAll('-','').slice(0,12))},${tenant.owner.membershipId},${status},
@@ -50,10 +50,16 @@ async function order(status = 'delivered', closedAt = '2024-02-29T10:15:30.12345
 }
 async function link(id, o, kind = 'reception_media', tenant = a) {
   const tx = h.admin, linked = randomUUID();
-  if (kind === 'reception_media') await tx`INSERT INTO reception_media(tenant_id,reception_id,media_asset_id,purpose)
-    VALUES (${tenant.tenantId},${o.reception},${id},'TEST-ONLY')`;
-  if (kind === 'damage_media') await tx`INSERT INTO damage_media(tenant_id,damage_id,media_asset_id,purpose)
-    VALUES (${tenant.tenantId},${o.damage},${id},'TEST-ONLY')`;
+  // Historical/future retention inventory fixtures deliberately bypass INSERT
+  // lifecycle guards as superuser only. Canonical purpose CHECKs remain on; runtime FK coverage is separate.
+  // Phase-B runtime guard behavior has its own nonprivileged suite.
+  if (kind === 'reception_media' || kind === 'damage_media') await h.admin.begin(async fixture => {
+    await fixture`SET LOCAL session_replication_role=replica`;
+    if (kind === 'reception_media') await fixture`INSERT INTO reception_media(tenant_id,reception_id,media_asset_id,purpose)
+      VALUES (${tenant.tenantId},${o.reception},${id},'intake_evidence')`;
+    else await fixture`INSERT INTO damage_media(tenant_id,damage_id,media_asset_id,purpose)
+      VALUES (${tenant.tenantId},${o.damage},${id},'damage_evidence')`;
+  });
   if (kind === 'finding_media') {
     const diagnostic = randomUUID();
     await tx`INSERT INTO diagnostics(id,tenant_id,order_id,diagnosed_by_membership_id)
@@ -110,7 +116,7 @@ async function privacy(id, tenant = a) {
     authorization_text_version,authorization_text_hash,controller_notice_snapshot,channel,captured_at,evidence_media_id)
     VALUES (${consent},${tenant.tenantId},${customer.id},'service_provision','TEST','TEST',${'f'.repeat(64)},
       ${h.admin.json({legalName:'TEST',address:'TEST',phone:'+5700000000',email:null,rightsChannel:'TEST'})},
-      'in_person','2020-01-01',${id})`;
+      'in_person','2020-01-01T00:00:00Z',${id})`;
   return consent;
 }
 const row = async (id) => (await h.admin`SELECT * FROM media_assets WHERE id=${id}`)[0];
@@ -171,7 +177,7 @@ test('historical quarantine without a timestamp is protected; no fabricated date
   assert.equal(d.knownRetentionUntil,null); assert.equal(d.blocksAutomaticPurge,true);
 });
 test('quarantine cannot shorten committed retention and active legal hold blocks', async () => {
-  const id=await asset({status:'quarantined',quarantined_at:'2020-01-01',retention_until:'2035-01-01',legal_hold_until:'2036-01-01'});
+  const id=await asset({status:'quarantined',quarantined_at:'2020-01-01T00:00:00Z',retention_until:'2035-01-01T00:00:00Z',legal_hold_until:'2036-01-01T00:00:00Z'});
   const d=await recalculate(id); assert.equal(d.knownRetentionUntil,'2035-01-01T00:00:00.000000Z');
   assert.equal(d.eligibility,'NOT_ELIGIBLE_LEGAL_HOLD'); assert.equal((await audits(id)).length,0);
 });
@@ -193,29 +199,29 @@ test('warranty exact work-activity item extends floor by 90 days; longest wins',
   assert.ok(d.sources.some((s)=>s.kind==='warranty_item'&&s.id===o.item));
 });
 test('warranty shorter than operational floor loses',async()=>{
-  const id=await asset(),o=await order(); o.item=await warranty(o,'2024-01-01'); await link(id,o,'work_activity_media');
+  const id=await asset(),o=await order(); o.item=await warranty(o,'2024-01-01T00:00:00Z'); await link(id,o,'work_activity_media');
   assert.equal((await recalculate(id)).knownRetentionUntil,'2025-02-28T10:15:30.123456Z');
 });
 test('warranty without expiry is protective; nonterminal order still blocks with known warranty',async()=>{
-  for (const expires of [null,'2032-01-01']) {
+  for (const expires of [null,'2032-01-01T00:00:00Z']) {
     const id=await asset(),o=await order('in_progress');o.item=await warranty(o,expires);await link(id,o,'work_activity_media');
     const d=await recalculate(id); assert.ok(d.blockers.includes('DOMAIN_LINK_NONTERMINAL'));
     if(expires===null) assert.ok(d.blockers.includes('UNRESOLVED_PROTECTION'));
   }
 });
 test('warranty is not inferred from another item/order sharing a reception lineage',async()=>{
-  const id=await asset(),o=await order(); await warranty(o,'2038-01-01');await link(id,o);
+  const id=await asset(),o=await order(); await warranty(o,'2038-01-01T00:00:00Z');await link(id,o);
   const d=await recalculate(id);assert.equal(d.knownRetentionUntil,'2025-02-28T10:15:30.123456Z');
   assert.equal(d.sources.some((s)=>s.kind==='warranty_item'),false);
 });
 test('multiple known links choose later terminal date; existing later floor never shortens',async()=>{
-  const id=await asset({retention_until:'2035-01-01'}),one=await order(),two=await order('cancelled','2030-01-31');
+  const id=await asset({retention_until:'2035-01-01T00:00:00Z'}),one=await order(),two=await order('cancelled','2030-01-31T00:00:00Z');
   await link(id,one);await link(id,two,'damage_media');
   const d=await recalculate(id);assert.equal(d.knownRetentionUntil,'2035-01-01T00:00:00.000000Z');
   assert.equal((await audits(id)).length,0);
 });
 test('multiple links without committed floor choose later, with nonterminal link still protective',async()=>{
-  const id=await asset(),one=await order(),two=await order('cancelled','2030-01-31'),three=await order('in_progress');
+  const id=await asset(),one=await order(),two=await order('cancelled','2030-01-31T00:00:00Z'),three=await order('in_progress');
   await link(id,one);await link(id,two,'damage_media');await link(id,three);
   const d=await recalculate(id);assert.equal(d.knownRetentionUntil,'2031-01-31T00:00:00.000000Z');
   assert.ok(d.blockers.includes('DOMAIN_LINK_NONTERMINAL'));
@@ -229,7 +235,7 @@ test('signature signed_at is the 36-month clock, even while quarantined',async()
   const p=await parent(a),id=await asset({media_type:'signature',retention_class:'authorization_evidence'});
   await h.admin`INSERT INTO signatures(id,tenant_id,reception_id,signature_media_id,signed_by_name,document_version,document_hash,signed_at)
     VALUES (${randomUUID()},${a.tenantId},${p.reception},${id},'TEST','TEST','TEST','2024-02-29T10:15:30.123456Z')`;
-  await h.admin`UPDATE media_assets SET status='quarantined',quarantined_at='2024-03-01' WHERE id=${id}`;
+  await h.admin`UPDATE media_assets SET status='quarantined',quarantined_at='2024-03-01T00:00:00Z' WHERE id=${id}`;
   assert.equal((await recalculate(id)).knownRetentionUntil,'2027-02-28T10:15:30.123456Z');
 });
 test('delivery evidence uses completed delivered_at + 36 months; pending delivery clock not started',async()=>{
@@ -246,13 +252,13 @@ test('generic linked document and quote evidence clocks stay unresolved',async()
   }
 });
 for(const future of [true,false]) test(`${future?'future':'expired'} legal hold reevaluates normal retention without lifecycle writes`,async()=>{
-  const id=await asset({legal_hold_until:future?'2040-01-01':'2020-01-01'}),before=await row(id),d=await recalculate(id);
+  const id=await asset({legal_hold_until:future?'2040-01-01T00:00:00Z':'2020-01-01T00:00:00Z'}),before=await row(id),d=await recalculate(id);
   assert.equal(d.eligibility,future?'NOT_ELIGIBLE_LEGAL_HOLD':'ELIGIBLE_AFTER_DATE');
   const after=await row(id);
   for(const field of ['status','deletion_requested_at','deleted_at','purged_at','legal_hold_until'])assert.deepEqual(after[field],before[field]);
 });
 test('hold plus unresolved privacy and expired known floor stays blocked',async()=>{
-  const id=await asset({retention_until:'2020-01-01',legal_hold_until:'2040-01-01'});await privacy(id);
+  const id=await asset({retention_until:'2020-01-01T00:00:00Z',legal_hold_until:'2040-01-01T00:00:00Z'});await privacy(id);
   const d=await recalculate(id);assert.ok(d.blockers.includes('LEGAL_HOLD'));assert.ok(d.blockers.includes('UNRESOLVED_PROTECTION'));
 });
 test('cross-tenant decisions, recalculation, order scope and direct FK influence are denied',async()=>{
@@ -263,14 +269,14 @@ test('cross-tenant decisions, recalculation, order scope and direct FK influence
   await assert.rejects(run(a,(sql)=>retention.recalculateOrderMediaRetention(sql,a.tenantId,o.id)),(e)=>e.code==='SERVICE_ORDER_NOT_FOUND');
   const local=await asset();
   await assert.rejects(run(a,(sql)=>sql`INSERT INTO reception_media(tenant_id,reception_id,media_asset_id,purpose)
-    VALUES (${a.tenantId},${o.reception},${local},'TEST-ONLY')`),(e)=>e.code==='23503');
+    VALUES (${a.tenantId},${o.reception},${local},'intake_evidence')`),(e)=>e.code==='23514'&&e.constraint_name==='media_association_parent_guard');
   assert.deepEqual(await row(id),before);assert.equal((await audits(id)).length,0);
 });
 const API_MEDIA_UPDATE_COLUMNS = ['status','size_bytes','checksum_sha256','uploaded_at',
   'quarantined_at','integrity_failure_code','updated_at','retention_until'];
 for (const [role,pool] of [['tallermecario_api',h.apiPool],['tallermecario_worker',h.workerPool]]) {
   test(`${role}: exact column UPDATE matrix and forbidden raw mutations`,async()=>{
-    const id=await asset({legal_hold_until:'2040-01-01',retention_policy_version:'historical-v0'}),before=await row(id);
+    const id=await asset({legal_hold_until:'2040-01-01T00:00:00Z',retention_policy_version:'historical-v0'}),before=await row(id);
     const columns=Object.keys(before);
     await h.asRuntime(pool,{tenantId:a.tenantId},async(sql)=>{
       const [identity]=await sql`SELECT current_user role,has_table_privilege(current_user,'public.media_assets','UPDATE') broad`;
@@ -290,7 +296,7 @@ for (const [role,pool] of [['tallermecario_api',h.apiPool],['tallermecario_worke
 test('API retention monotonicity is DB enforced, including rejected transaction audit rollback',async()=>{
   const id=await asset();
   for(const date of ['2030-01-01','2040-01-01','2040-01-01']) {
-    await run(a,sql=>sql`UPDATE media_assets SET retention_until=${date}::text::timestamptz WHERE tenant_id=${a.tenantId} AND id=${id}`);
+    await run(a,sql=>sql`UPDATE media_assets SET retention_until=${date===null?null:date+"T00:00:00Z"}::text::timestamptz WHERE tenant_id=${a.tenantId} AND id=${id}`);
     assert.equal((await row(id)).retention_until.toISOString(),date+'T00:00:00.000Z');
   }
   const snapshot=await row(id);
@@ -300,7 +306,7 @@ test('API retention monotonicity is DB enforced, including rejected transaction 
       await sql`INSERT INTO audit_logs(id,tenant_id,actor_type,actor_user_id,actor_membership_id,
         action,outcome,entity_type,entity_id,request_id) VALUES(${randomUUID()},${a.tenantId},'user',
         ${a.owner.user.id},${a.owner.membershipId},'media.retention_updated','success','media_asset',${id},current_setting('app.request_id')::uuid)`;
-      await sql`UPDATE media_assets SET retention_until=${date}::text::timestamptz WHERE tenant_id=${a.tenantId} AND id=${id}`;
+      await sql`UPDATE media_assets SET retention_until=${date===null?null:date+"T00:00:00Z"}::text::timestamptz WHERE tenant_id=${a.tenantId} AND id=${id}`;
     }),e=>e.code==='23514'&&e.constraint_name==='media_assets_retention_monotonic_guard');
     assert.deepEqual(await row(id),snapshot);assert.equal((await audits(id)).length,0);
   }
@@ -324,7 +330,7 @@ test('recalculation writes one safe audit only on extension; preserves historica
   assert.deepEqual(await row(id),snapshot);const events=await audits(id);assert.equal(events.length,1);
   assert.deepEqual(events[0].after_json,{retention_until:'2024-03-01T10:15:30.123456Z',retention_policy_version:'v1'});
   assert.equal(JSON.stringify(events).includes(snapshot.object_key),false);
-  const historical=await asset({retention_until:'2040-01-01',retention_policy_version:'historical'});
+  const historical=await asset({retention_until:'2040-01-01T00:00:00Z',retention_policy_version:'historical'});
   await recalculate(historical);assert.equal((await row(historical)).retention_policy_version,'historical');
 });
 test('audit failure rolls back extension, with no partial retention commit',async()=>{
@@ -347,7 +353,7 @@ test('real concurrent recalculations serialize; committed later extension wins o
   const gate=new Promise((resolve)=>{release=resolve;}),ready=new Promise((resolve)=>{locked=resolve;});
   const first=run(a,async(sql)=>{
     const token=await retention.lockMediaRetention(sql,a.tenantId,[id]);
-    await sql`UPDATE service_orders SET closed_at='2035-01-31' WHERE tenant_id=${a.tenantId} AND id=${o.id}`;
+    await sql`UPDATE service_orders SET closed_at='2035-01-31T00:00:00Z' WHERE tenant_id=${a.tenantId} AND id=${o.id}`;
     await retention.recalculateLockedMediaRetention(token,id);
     const [p]=await sql`SELECT pg_backend_pid() pid`;locked(p.pid);await gate;
   });
@@ -356,7 +362,7 @@ test('real concurrent recalculations serialize; committed later extension wins o
   try{await blocked(pid);}finally{release();}
   await Promise.all([first,second]);
   assert.equal((await evaluate(id)).knownRetentionUntil,'2036-01-31T00:00:00.000000Z');
-  await h.admin`UPDATE service_orders SET closed_at='2024-01-31' WHERE id=${o.id}`;
+  await h.admin`UPDATE service_orders SET closed_at='2024-01-31T00:00:00Z' WHERE id=${o.id}`;
   assert.equal((await recalculate(id)).knownRetentionUntil,'2036-01-31T00:00:00.000000Z');
   assert.equal((await audits(id)).length,1);
 });
@@ -381,7 +387,7 @@ for(const longerFirst of [false,true]) test(`shorter/longer overlap: longer firs
     await sql`UPDATE service_orders SET closed_at=${date}::text::timestamptz WHERE tenant_id=${a.tenantId} AND id=${o.id}`;
     return retention.recalculateLockedMediaRetention(token,id);
   };
-  const results=await overlap(extend(longerFirst?'2035-01-31':'2030-01-31'),extend(longerFirst?'2030-01-31':'2035-01-31'));
+  const results=await overlap(extend(longerFirst?'2035-01-31T00:00:00Z':'2030-01-31T00:00:00Z'),extend(longerFirst?'2030-01-31T00:00:00Z':'2035-01-31T00:00:00Z'));
   assert.ok(results.every(r=>r.status==='fulfilled'),JSON.stringify(results));
   assert.equal((await evaluate(id)).knownRetentionUntil,'2036-01-31T00:00:00.000000Z');
   assert.equal((await audits(id)).length,longerFirst?1:2);
@@ -389,7 +395,7 @@ for(const longerFirst of [false,true]) test(`shorter/longer overlap: longer firs
 const mediaService=h.load('media/service.js');
 for(const quarantineFirst of [false,true]) test(`production quarantine/recalculation overlap: quarantine first=${quarantineFirst}`,async()=>{
   const id=await asset({media_type:'signature',retention_class:'authorization_evidence',status:'pending_upload',
-    uploaded_at:null,retention_until:'2040-01-01'});
+    uploaded_at:null,retention_until:'2040-01-01T00:00:00Z'});
   const s=await session(id,{created_at:new Date(),expires_at:new Date(Date.now()+900000)});
   const plan=await run(a,sql=>mediaService.prepareUploadCompletion(sql,a.tenantId,s.id));
   const quarantine=sql=>mediaService.completeUploadSession(sql,a.tenantId,s.id,plan,
@@ -437,7 +443,7 @@ test('order-terminal primitive computes full graph in the same transaction and n
   await run(a,async(sql)=>{
     const scope=await retention.lockOrderMediaRetention(sql,a.tenantId,o.id);
     assert.deepEqual(scope.assetIds,[...ids].sort());
-    await sql`UPDATE service_orders SET status='cancelled',closed_at='2025-03-31' WHERE tenant_id=${a.tenantId} AND id=${o.id}`;
+    await sql`UPDATE service_orders SET status='cancelled',closed_at='2025-03-31T00:00:00Z' WHERE tenant_id=${a.tenantId} AND id=${o.id}`;
     for(const id of scope.assetIds)assert.equal((await retention.recalculateLockedMediaRetention(scope.lock,id)).knownRetentionUntil,'2026-03-31T00:00:00.000000Z');
   });
   const results=await run(a,(sql)=>retention.recalculateOrderMediaRetention(sql,a.tenantId,o.id));assert.equal(results.length,2);
@@ -482,29 +488,33 @@ test('UTC calendar decisions do not depend on session timezone or daylight-savin
   for(const d of decisions)assert.equal(d.knownRetentionUntil,'2024-03-31T12:00:00.999999Z');
 });
 test('future retention is not eligible; expired hold cannot bypass a future committed floor',async()=>{
-  const id=await asset({retention_until:'2040-01-01',legal_hold_until:'2020-01-01'}),d=await evaluate(id);
+  const id=await asset({retention_until:'2040-01-01T00:00:00Z',legal_hold_until:'2020-01-01T00:00:00Z'}),d=await evaluate(id);
   assert.equal(d.eligibility,'NOT_ELIGIBLE_RETENTION_NOT_EXPIRED');assert.equal(d.blocksAutomaticPurge,true);
 });
 test('quarantine with a nonterminal domain or unresolved evidence never becomes age-only eligible',async()=>{
-  const id=await asset({status:'quarantined',quarantined_at:'2020-01-01'}),o=await order('in_progress');await link(id,o);
+  const id=await asset({status:'quarantined',quarantined_at:'2020-01-01T00:00:00Z'}),o=await order('in_progress');await link(id,o);
   const d=await evaluate(id);assert.equal(d.knownRetentionUntil,'2020-01-08T00:00:00.000000Z');
   assert.ok(d.blockers.includes('DOMAIN_LINK_NONTERMINAL'));assert.equal(d.blocksAutomaticPurge,true);
 });
 test('deleted lifecycle is never an automatic eligibility authorization',async()=>{
-  const id=await asset({status:'deleted',retention_until:'2020-01-01'}),before=await row(id),d=await evaluate(id);
+  const id=await asset({status:'deleted',retention_until:'2020-01-01T00:00:00Z'}),before=await row(id),d=await evaluate(id);
   assert.equal(d.eligibility,'NOT_ELIGIBLE_LIFECYCLE_UNAVAILABLE');assert.deepEqual(await row(id),before);
 });
 test('foreign warranty item cannot enter a local activity retention lineage',async()=>{
-  const local=await order(),foreign=await order('delivered',undefined,b),item=await warranty(foreign,'2040-01-01',b);
+  const local=await order(),foreign=await order('delivered',undefined,b),item=await warranty(foreign,'2040-01-01T00:00:00Z',b);
   await assert.rejects(run(a,(sql)=>sql`INSERT INTO work_activities(id,tenant_id,order_id,service_order_item_id,title)
     VALUES (${randomUUID()},${a.tenantId},${local.id},${item},'TEST')`),(e)=>e.code==='23503');
 });
 test('future damage attach can reserve its server-resolved parent before association and recalculate atomically',async()=>{
-  const id=await asset(),p=await parent(a);
+  const id=await asset({status:'pending_upload'}),p=await parent(a),us=await session(id,{expires_at:'2040-01-01T00:00:00Z'});
+  await h.admin`INSERT INTO media_upload_bindings(tenant_id,upload_session_id,reception_id,damage_id,privacy_consent_id)
+    VALUES(${a.tenantId},${us.id},${p.reception},${p.damage},${p.consent})`;
+  await h.admin`UPDATE upload_sessions SET status='completed',completed_at=now() WHERE id=${us.id}`;
+  await h.admin`UPDATE media_assets SET status='active' WHERE id=${id}`;
   await run(a,async(sql)=>{
     const token=await retention.lockMediaRetention(sql,a.tenantId,[id],{damageIds:[p.damage]});
     await sql`INSERT INTO damage_media(tenant_id,damage_id,media_asset_id,purpose)
-      VALUES (${a.tenantId},${p.damage},${id},'TEST-ONLY')`;
+      VALUES (${a.tenantId},${p.damage},${id},'damage_evidence')`;
     const d=await retention.recalculateLockedMediaRetention(token,id);
     assert.equal(d.knownRetentionUntil,null);assert.ok(d.blockers.includes('CLOCK_NOT_STARTED'));
   });

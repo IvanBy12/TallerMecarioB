@@ -29,7 +29,7 @@ async function damage(sql: postgres.ReservedSql, tenantId: string, id: string, p
 
 /** Parent first, then damage, then consent FOR SHARE; serialize close/revoke. */
 export async function authorizeOperationalCreate(sql: postgres.ReservedSql, tenantId: string,
-  context: OperationalContext, mediaType: string): Promise<UploadBinding> {
+  context: OperationalContext, _mediaType: string): Promise<UploadBinding> {
   let parentId: string;
   if (context.type === 'damage') {
     // Discovery only, no child lock before its parent. Recheck lineage under locks.
@@ -42,7 +42,6 @@ export async function authorizeOperationalCreate(sql: postgres.ReservedSql, tena
   const damageId = context.type === 'damage' ? context.damageId : null;
   if (damageId) {
     await damage(sql, tenantId, damageId, parent.id, true);
-    if (mediaType === 'video360') throw conflict();
   }
   const [consent] = await sql<{ eligible: boolean }[]>`SELECT
     (customer_id=${parent.customer_id} AND purpose_code='service_provision' AND status='granted'
@@ -65,12 +64,11 @@ export function bindingMatchesContext(binding: UploadBinding, context: Operation
 }
 /** Historical initial evidence, never current granted/revoked state. */
 export async function revalidateUploadBinding(sql: postgres.ReservedSql, tenantId: string,
-  sessionId: string, mediaType: string, lock: boolean): Promise<UploadBinding> {
+  sessionId: string, _mediaType: string, lock: boolean): Promise<UploadBinding> {
   const binding = await readUploadBinding(sql, tenantId, sessionId);
   const parent = await reception(sql, tenantId, binding.reception_id, lock);
   if (binding.damage_id) {
     await damage(sql, tenantId, binding.damage_id, parent.id, lock);
-    if (mediaType === 'video360') throw conflict();
   }
   if (parent.privacy_consent_id !== binding.privacy_consent_id) throw conflict();
   const [evidence] = await sql<{ eligible: boolean }[]>`SELECT
