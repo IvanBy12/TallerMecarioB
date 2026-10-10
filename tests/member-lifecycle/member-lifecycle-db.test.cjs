@@ -68,7 +68,7 @@ test('0015: RLS stays ENABLE+FORCE with the same tenant policies; no new functio
   const policies = (await h.admin`
     SELECT policyname FROM pg_catalog.pg_policies WHERE schemaname = 'public' AND tablename = 'memberships'
   `).map((row) => row.policyname).sort();
-  assert.deepEqual(policies, ['tenant_insert', 'tenant_select', 'tenant_update']);
+  assert.deepEqual(policies, ['media_lifecycle_select', 'tenant_insert', 'tenant_select', 'tenant_update']);
 
   const bypass = (await h.admin`
     SELECT rolname FROM pg_catalog.pg_roles WHERE rolbypassrls AND NOT rolsuper AND rolname LIKE 'tallermecario%'

@@ -21,6 +21,7 @@ const migrations = new Map([
   ['0024_reception_close_without_signature.sql',
     readFileSync('drizzle/0024_reception_close_without_signature.sql', 'utf8').replace(/\r\n/gu, '\n')],
 ]);
+migrations.set('0029_s4_b06_media_delete_purge.sql',readFileSync('drizzle/0029_s4_b06_media_delete_purge.sql','utf8').replace(/\r\n/gu,'\n'));
 const { cases, replaceMigration } = require('./reception-db-mutations.cjs');
 
 const temporary = mkdtempSync(join(tmpdir(), 'tm-reception-mutants-'));

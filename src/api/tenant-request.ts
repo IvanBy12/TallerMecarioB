@@ -308,8 +308,10 @@ export async function rollbackTenantRequest(request: FastifyRequest): Promise<vo
  * Only lock-graph changes are retryable; business conflicts are returned. */
 export async function runMediaAssociationTransaction<T>(request: FastifyRequest,
   work: (context: TenantRequestContext) => Promise<T>): Promise<T> {
-  if (request.method !== 'POST' || request.routeOptions.config.permission !== 'media.upload'
-    || !['/api/v1/receptions/:receptionId/media', '/api/v1/receptions/:receptionId/damages/:damageId/media'].includes(request.routeOptions.url ?? ''))
+  if (request.method !== 'POST' || !((request.routeOptions.config.permission === 'media.upload'
+    && ['/api/v1/receptions/:receptionId/media', '/api/v1/receptions/:receptionId/damages/:damageId/media'].includes(request.routeOptions.url ?? ''))
+    || (request.routeOptions.config.permission === 'media.remove_unattached'
+      && request.routeOptions.url === '/api/v1/media/:mediaAssetId/remove-unattached')))
     throw new Error('MEDIA_ASSOCIATION_RETRY_ROUTE_INVALID');
   for (let attempt = 0; ; attempt++) {
     const state = tenantRequestStates.get(request);

@@ -162,7 +162,7 @@ async function main() {
                   OR has_function_privilege('tallermecario_worker', p.oid, 'EXECUTE'))) AS runtime_owner_functions
         `;
         assert.deepEqual({ ...objects[0] }, {
-          triggers: 4, policies: ['tenant_delete', 'tenant_insert', 'tenant_select'], api_update: false, api_delete: true,
+          triggers: 4, policies: ['media_lifecycle_select', 'tenant_delete', 'tenant_insert', 'tenant_select'], api_update: false, api_delete: true,
           gate: true, runtime_owner_functions: ['app.lock_current_tenant_owner_set()'],
         }, `${head}: HEAD objects`);
 

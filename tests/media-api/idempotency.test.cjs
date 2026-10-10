@@ -223,9 +223,9 @@ for (const [field, code] of [['status', 'MEDIA_ASSET_NOT_ACTIVE'], ['deletion_re
       const s = await session(); globalThis.fetch = f.objectFetch(f.png, 'image/png');
       assert.equal((await complete(s, { checksumSha256: 'a'.repeat(64) })).status, 200);
       if (field === 'status') await h.admin`UPDATE media_assets SET status='quarantined' WHERE id=${s.mediaAssetId}`;
-      if (field === 'deletion_requested_at') await h.admin`UPDATE media_assets SET deletion_requested_at=now() WHERE id=${s.mediaAssetId}`;
-      if (field === 'deleted_at') await h.admin`UPDATE media_assets SET deleted_at=now() WHERE id=${s.mediaAssetId}`;
-      if (field === 'purged_at') await h.admin`UPDATE media_assets SET deleted_at=now(),purged_at=now() WHERE id=${s.mediaAssetId}`;
+      if (field === 'deletion_requested_at') await h.admin.begin(async tx=>{await tx`SET LOCAL session_replication_role=replica`;await tx`UPDATE media_assets SET deletion_requested_at=now() WHERE id=${s.mediaAssetId}`;});
+      if (field === 'deleted_at') await h.admin.begin(async tx=>{await tx`SET LOCAL session_replication_role=replica`;await tx`UPDATE media_assets SET deleted_at=now() WHERE id=${s.mediaAssetId}`;});
+      if (field === 'purged_at') await h.admin.begin(async tx=>{await tx`SET LOCAL session_replication_role=replica`;await tx`UPDATE media_assets SET deleted_at=now(),purged_at=now() WHERE id=${s.mediaAssetId}`;});
       const before = await snapshot(s), auditsBefore = await auditCount(s, 'media.upload_completed');
       assert.equal(before.session.status, 'completed'); assert.equal(before.asset.checksum_sha256, 'a'.repeat(64));
       assert.equal(auditsBefore, 1);

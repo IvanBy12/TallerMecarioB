@@ -342,7 +342,7 @@ for (const mutation of ['mime', 'expiry', 'delete', 'membership']) test(`Phase C
       changed = true;
       if (mutation === 'mime') await h.admin`UPDATE media_assets SET mime_type='image/jpeg' WHERE id=${s.mediaAssetId}`;
       if (mutation === 'expiry') await h.admin`UPDATE upload_sessions SET expires_at=now()-interval '1 second' WHERE id=${s.uploadSessionId}`;
-      if (mutation === 'delete') await h.admin`UPDATE media_assets SET deletion_requested_at=now() WHERE id=${s.mediaAssetId}`;
+      if (mutation === 'delete') await h.admin.begin(async tx=>{await tx`SET LOCAL session_replication_role=replica`;await tx`UPDATE media_assets SET deletion_requested_at=now() WHERE id=${s.mediaAssetId}`;});
       if (mutation === 'membership') await h.admin`UPDATE memberships SET status='suspended', suspended_at=now() WHERE id=${actor.owner.membershipId}`;
     }
     return fetchObject(url, init);

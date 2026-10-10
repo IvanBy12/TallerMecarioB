@@ -39,7 +39,8 @@ async function read(sql: postgres.ReservedSql, tenantId: string, target: Associa
   const d = definition(target);
   return sql.unsafe<AssociationDto[]>(`SELECT ${projection} FROM public.${d.table} l
     JOIN public.media_assets m ON m.tenant_id=l.tenant_id AND m.id=l.media_asset_id
-    WHERE l.tenant_id=$1 AND l.${d.column}=$2 ${assetId ? 'AND l.media_asset_id=$3' : ''}
+    WHERE l.tenant_id=$1 AND l.${d.column}=$2
+    AND m.status<>'deleted' AND m.deletion_requested_at IS NULL AND m.deleted_at IS NULL AND m.purged_at IS NULL ${assetId ? 'AND l.media_asset_id=$3' : ''}
     ORDER BY l.sort_order ASC,l.media_asset_id ASC,l.purpose ASC`, assetId ? [tenantId,d.id,assetId] : [tenantId,d.id]);
 }
 export async function listAssociatedMedia(sql: postgres.ReservedSql, tenantId: string,

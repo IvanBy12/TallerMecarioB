@@ -19,7 +19,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY drizzle ./drizzle
-COPY scripts/migrate.cjs scripts/provision-staging-runtime-login.cjs ./scripts/
+COPY scripts/migrate.cjs scripts/provision-staging-runtime-login.cjs scripts/provision-media-purger-login.cjs ./scripts/
 
 RUN addgroup -S app && adduser -S app -G app
 USER app

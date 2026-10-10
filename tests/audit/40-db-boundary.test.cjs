@@ -120,6 +120,8 @@ describe('catalog: privileges, policies, triggers, functions', () => {
       SELECT policyname, cmd, roles::text[] AS roles, qual, with_check FROM pg_policies
       WHERE schemaname = 'public' AND tablename = 'audit_logs' ORDER BY policyname`;
     assert.deepEqual(policies.map((row) => ({ ...row })), [
+      { policyname: 'media_lifecycle_insert', cmd: 'INSERT', roles: ['tallermecario_media_lifecycle'], qual: null, with_check: '(tenant_id = app.current_tenant_id())' },
+      { policyname: 'media_lifecycle_select', cmd: 'SELECT', roles: ['tallermecario_media_lifecycle'], qual: '(tenant_id = app.current_tenant_id())', with_check: null },
       { policyname: 'tenant_insert', cmd: 'INSERT', roles: ['tallermecario_api', 'tallermecario_worker'], qual: null, with_check: '(tenant_id = app.current_tenant_id())' },
       { policyname: 'tenant_select', cmd: 'SELECT', roles: ['tallermecario_api', 'tallermecario_worker'], qual: '(tenant_id = app.current_tenant_id())', with_check: null },
     ]);
@@ -140,19 +142,23 @@ describe('catalog: privileges, policies, triggers, functions', () => {
     assert.deepEqual({ ...fn }, { prosecdef: false, owner: 'tallermecario_schema_owner', proconfig: ['search_path=pg_catalog'], api: false, worker: false, public: false });
   });
 
-  test('only two allowlisted SECURITY DEFINER writers; runtime/PUBLIC reach only the one granted to them', async () => {
+  test('only four allowlisted SECURITY DEFINER writers; runtimes reach only their reviewed entrypoints', async () => {
     const writers = await admin`
       SELECT p.oid::regprocedure::text AS fn, pg_get_userbyid(p.proowner) AS owner, p.prosecdef,
         has_function_privilege('tallermecario_api', p.oid, 'EXECUTE') AS api,
         has_function_privilege('tallermecario_worker', p.oid, 'EXECUTE') AS worker,
         has_function_privilege('tallermecario_identity_sync', p.oid, 'EXECUTE') AS identity_sync,
+        has_function_privilege('tallermecario_media_purger', p.oid, 'EXECUTE') AS purger,
         EXISTS (SELECT 1 FROM aclexplode(p.proacl) x WHERE x.grantee = 0) AS public
       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE n.nspname = 'app' AND p.prosecdef AND p.prosrc ILIKE '%insert into public.audit_logs%'
       ORDER BY 1`;
     assert.deepEqual(writers.map((row) => ({ ...row })), [
-      { fn: 'app.bootstrap_append_identity_audit(text,text,text,uuid,jsonb,text)', owner: 'tallermecario_bootstrap_resolver', prosecdef: true, api: false, worker: false, identity_sync: true, public: false },
-      { fn: 'app.bootstrap_provision_user(text,text,uuid,text,text,text)', owner: 'tallermecario_bootstrap_resolver', prosecdef: true, api: true, worker: false, identity_sync: false, public: false },
+      { fn: 'app.bootstrap_append_identity_audit(text,text,text,uuid,jsonb,text)', owner: 'tallermecario_bootstrap_resolver', prosecdef: true, api: false, worker: false, identity_sync: true, purger: false, public: false },
+      { fn: 'app.bootstrap_provision_user(text,text,uuid,text,text,text)', owner: 'tallermecario_bootstrap_resolver', prosecdef: true, api: true, worker: false, identity_sync: false, purger: false, public: false },
+      { fn: 'app.claim_media_purge(uuid,uuid)',owner: 'tallermecario_media_lifecycle', prosecdef: true,api: false, worker: false, identity_sync: false, purger: true, public: false},
+      { fn: 'app.confirm_media_purge(uuid,uuid)', owner: 'tallermecario_media_lifecycle', prosecdef: true, api: false, worker: false, identity_sync: false, purger: true, public: false },
+      { fn: 'app.request_media_deletion(uuid,boolean)', owner: 'tallermecario_media_lifecycle', prosecdef: true, api: false, worker: false, identity_sync: false, purger: false, public: false },
     ]);
   });
 

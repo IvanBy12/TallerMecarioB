@@ -204,6 +204,13 @@
       "when": 1791590400000,
       "tag": "0028_s4_b04_media_associations",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1791676800000,
+      "tag": "0029_s4_b06_media_delete_purge",
+      "breakpoints": true
     }
   ]
 }

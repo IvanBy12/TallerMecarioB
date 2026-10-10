@@ -111,7 +111,9 @@
     "test:reception:contract:mutations:ci": "node scripts/test-reception-contract-mutations.cjs",
     "test:media:integrity": "npm run build && node --test tests/media/content.test.cjs tests/media/r2-integrity.test.cjs tests/media/idempotency.test.cjs",
     "test:media:api:ci": "node scripts/test-media-integrity-api.cjs",
-    "test:media:upgrade:ci": "npm run build && node scripts/test-media-integrity-upgrade.cjs"
+    "test:media:upgrade:ci": "npm run build && node scripts/test-media-integrity-upgrade.cjs",
+    "worker:media-purger": "node dist/worker/media-purger-run.js",
+    "test:media:purge:ci": "node scripts/test-media-purge.cjs"
   },
   "repository": {
     "type": "git",

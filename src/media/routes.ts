@@ -1,3 +1,4 @@
+import { removeUnattachedMedia } from './deletion.js';
 import { attachMedia, listAssociatedMedia, type AssociationTarget } from './associations.js';
 import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
 import type { FastifyInstance } from 'fastify';
@@ -22,6 +23,25 @@ function sendMediaError(request: { id: string }, reply: { code: (n: number) => {
 }
 
 export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
+  app.post('/api/v1/media/:mediaAssetId/remove-unattached', {
+    config: { permission: 'media.remove_unattached' }, bodyLimit: 2048,
+    onRequest: async (_request, reply) => { reply.header('cache-control', 'no-store'); },
+  }, async (request, reply) => {
+    try {
+      if (request.body !== undefined && (request.body === null || typeof request.body !== 'object'
+        || Array.isArray(request.body) || Object.keys(request.body as object).length))
+        throw new MediaError(400, 'REQUEST_VALIDATION_FAILED', 'The request body is invalid.');
+      if (Object.keys((request.query ?? {}) as object).length)
+        throw new MediaError(400, 'REQUEST_VALIDATION_FAILED', 'The request query is invalid.');
+      const id = parseCanonicalUuid((request.params as { mediaAssetId: string }).mediaAssetId);
+      if (!id) throw new MediaError(404, 'MEDIA_ASSET_NOT_FOUND', 'The media asset was not found.');
+      const result = await runMediaAssociationTransaction(request, context => removeUnattachedMedia(context.sql, id));
+      return reply.code(202).send(result);
+    } catch (error) {
+      if (error instanceof MediaError) return sendMediaError(request, reply, error);
+      throw error;
+    }
+  });
   for (const type of ['reception', 'damage'] as const) {
     const url = type === 'reception' ? '/api/v1/receptions/:receptionId/media'
       : '/api/v1/receptions/:receptionId/damages/:damageId/media';

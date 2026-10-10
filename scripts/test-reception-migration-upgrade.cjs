@@ -453,7 +453,7 @@ async function main() {
           assert.ok(afterSchema.rls.every((r) => r.relrowsecurity && r.relforcerowsecurity));
           // This scenario upgrades through HEAD: 0027 intentionally replaces only
           // media_assets API/worker broad UPDATE. All other grants remain intact.
-          assert.deepEqual(afterSchema.grants, beforeSchema.grants.filter(g => !(g.table_name==='media_assets'
+          assert.deepEqual(afterSchema.grants.filter(g=>g.grantee!=='tallermecario_media_lifecycle'), beforeSchema.grants.filter(g => !(g.table_name==='media_assets'
             && g.privilege_type==='UPDATE' && ['tallermecario_api','tallermecario_worker'].includes(g.grantee))));
           const columns = await sql`SELECT attname FROM pg_attribute WHERE attrelid='public.media_assets'::regclass
             AND attnum>0 AND NOT attisdropped`;
