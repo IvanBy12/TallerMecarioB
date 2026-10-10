@@ -187,7 +187,7 @@ test('V04/V05: audit_logs retains ENABLE + FORCE RLS and tenant-only runtime INS
     WHERE schemaname = 'public' AND tablename = 'audit_logs'
     ORDER BY policyname
   `;
-  const insert = policies.find((policy) => policy.cmd === 'INSERT');
+  const insert = policies.find((policy) => policy.policyname === 'tenant_insert');
   assert.deepEqual(insert.roles.sort(), ['tallermecario_api', 'tallermecario_worker']);
   assert.match(insert.with_check, /tenant_id = app\.current_tenant_id/);
 });

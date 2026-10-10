@@ -746,8 +746,36 @@ export const mediaAssets = pgTable(
       '"purged_at" IS NULL OR ("deleted_at" IS NOT NULL AND "purged_at" >= "deleted_at")',
     ),
     index('media_assets_tenant_created_idx').on(t.tenantId, t.createdAt.desc()),
+    index('media_assets_purge_scan_idx').on(t.tenantId, t.id).where(sql`${t.purgedAt} IS NULL AND ${t.status}<>'deleted' AND ${t.deletionRequestedAt} IS NULL AND ${t.deletedAt} IS NULL`),
   ],
 );
+
+/** B06 durable deletion lifecycle; lifecycle role/function code is trusted. */
+export const mediaPurgeJobs = pgTable('media_purge_jobs', {
+  tenantId: tenantId(), mediaAssetId: uuid('media_asset_id').notNull(),
+  id: uuid('id').notNull().defaultRandom(), priorStatus: varchar('prior_status', { length: 24 }).notNull(),
+  reason: varchar('reason', { length: 32 }).notNull(), state: varchar('state', { length: 32 }).notNull().default('queued'),
+  attempts: integer('attempts').notNull().default(0), claimId: uuid('claim_id'), claimBackend: integer('claim_backend'),
+  claimedAt: ts('claimed_at'), claimUntil: ts('claim_until'), nextAttemptAt: ts('next_attempt_at').notNull().default(sql`clock_timestamp()`),
+  claimStorageOutcome: varchar('claim_storage_outcome', { length: 16 }).notNull().default('not_attempted'),
+  storageOutcome: varchar('storage_outcome', { length: 16 }).notNull().default('not_attempted'),
+  lastResult: varchar('last_result', { length: 32 }), createdAt: ts('created_at').notNull().default(sql`clock_timestamp()`),
+  completedAt: ts('completed_at'),
+}, (t) => [
+  primaryKey({ columns: [t.tenantId,t.mediaAssetId] }), unique('media_purge_jobs_tenant_id_id_key').on(t.tenantId,t.id),
+  foreignKey({ columns: [t.tenantId], foreignColumns: [workshops.id] }),
+  foreignKey({ columns: [t.tenantId,t.mediaAssetId], foreignColumns: [mediaAssets.tenantId,mediaAssets.id] }),
+  enumCheck('media_purge_jobs_prior_status_check',t.priorStatus,['pending_upload','uploaded','active','quarantined']),
+  enumCheck('media_purge_jobs_reason_check',t.reason,['manual_unattached','retention_expired']),
+  enumCheck('media_purge_jobs_state_check',t.state,['queued','claimed','retryable_storage_failure','storage_deleted','storage_absent','db_confirmation_retry','suspended','reconciliation_required','completed']),
+  enumCheck('media_purge_jobs_claim_storage_outcome_check',t.claimStorageOutcome,['not_attempted','unknown','deleted','absent','failed']),
+  enumCheck('media_purge_jobs_storage_outcome_check',t.storageOutcome,['not_attempted','unknown','deleted','absent','failed']),
+  rawCheck('media_purge_jobs_attempts_check','"attempts">=0'),
+  enumCheck('media_purge_jobs_last_result_check',t.lastResult,['deleted','absent','storage_unavailable','confirmation_unavailable','eligibility_blocked']),
+  rawCheck('media_purge_jobs_check','("claim_id" IS NULL)=("claim_backend" IS NULL)'),
+  rawCheck('media_purge_jobs_check1',`("state"='completed')=("completed_at" IS NOT NULL)`),
+  index('media_purge_jobs_due_idx').on(t.tenantId,t.nextAttemptAt,t.mediaAssetId).where(sql`${t.state} NOT IN ('completed','reconciliation_required')`),
+]).enableRLS();
 
 export const uploadSessions = pgTable(
   'upload_sessions',

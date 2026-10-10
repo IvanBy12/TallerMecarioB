@@ -159,3 +159,4 @@ docs/*
 !docs/S4-B03-media-idempotency.md
 !docs/S4-B04-media-associations.md
 !docs/S4-B05-media-retention.md
+!docs/S4-B06-media-delete-purge.md

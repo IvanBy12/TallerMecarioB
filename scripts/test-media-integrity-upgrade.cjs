@@ -86,6 +86,7 @@ async function main() {
   const bindingPrevious = mkdtempSync(join(tmpdir(), 'tm-binding-upgrade-'));
   const retentionPrevious = mkdtempSync(join(tmpdir(), 'tm-retention-upgrade-'));
   const associationPrevious = mkdtempSync(join(tmpdir(), 'tm-association-upgrade-'));
+  const purgePrevious = mkdtempSync(join(tmpdir(), 'tm-purge-upgrade-'));
   const names = [];
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json', 'utf8'));
   const index0025 = journal.entries.findIndex(entry => entry.tag === '0025_s4_b02_media_integrity');
@@ -97,6 +98,8 @@ async function main() {
   assert.equal(index0027, index0026 + 1);
   const index0028=journal.entries.findIndex(entry=>entry.tag==='0028_s4_b04_media_associations');
   assert.equal(index0028,index0027+1);
+  const index0029=journal.entries.findIndex(entry=>entry.tag==='0029_s4_b06_media_delete_purge');
+  assert.equal(index0029,index0028+1);
   const latest = journal.entries.at(-1);
   assert.ok(latest, 'migration journal is not empty');
   const count = journal.entries.length;
@@ -108,13 +111,15 @@ async function main() {
   writeFileSync(join(retentionPrevious, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.slice(0, index0027) }));
   cpSync('drizzle', associationPrevious, { recursive:true });
   writeFileSync(join(associationPrevious,'meta/_journal.json'),JSON.stringify({...journal,entries:journal.entries.slice(0,index0028)}));
+  cpSync('drizzle',purgePrevious,{recursive:true});
+  writeFileSync(join(purgePrevious,'meta/_journal.json'),JSON.stringify({...journal,entries:journal.entries.slice(0,index0029)}));
   const migrate = (url, folder = 'drizzle') => {
     const result = spawnSync(process.execPath, ['scripts/migrate.cjs'], { encoding: 'utf8', timeout: 30000,
       env: { ...process.env, DATABASE_URL: url, MIGRATIONS_FOLDER: folder } });
     assert.equal(result.status, 0, result.stderr);
   };
   try {
-    for (const mode of ['fresh', 'upgrade', 'binding_upgrade', 'retention_upgrade', 'association_upgrade', 'association_incompatible_reception', 'association_incompatible_damage']) {
+    for (const mode of ['fresh', 'upgrade', 'binding_upgrade', 'retention_upgrade', 'association_upgrade', 'association_incompatible_reception', 'association_incompatible_damage','purge_upgrade','purge_role_invalid','purge_lifecycle_member','purge_lifecycle_indirect','purge_late_failure']) {
       const name = `tm_media_${mode}_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
       await maintenance.unsafe(`CREATE DATABASE ${name}`); names.push(name);
       const url = new URL(source); url.pathname = `/${name}`;
@@ -140,6 +145,10 @@ async function main() {
           }
         }
         let bindingBefore, retentionBefore, signedGuardBefore, associationBefore;
+        if(['purge_upgrade','purge_role_invalid','purge_lifecycle_member','purge_lifecycle_indirect','purge_late_failure'].includes(mode)){
+          migrate(url.toString(),purgePrevious);await seedAssociationUpgrade(sql);
+          associationBefore=await bindingHistorySnapshot(sql,true,true);
+        }
         if (mode === 'binding_upgrade') {
           migrate(url.toString(), bindingPrevious);
           await seedBindingUpgrade(sql);
@@ -148,6 +157,56 @@ async function main() {
         const signedGuard = async () => (await sql`SELECT pg_get_triggerdef(t.oid) trigger,
           pg_get_functiondef(t.tgfoid) function FROM pg_trigger t
           WHERE t.tgrelid='public.media_assets'::regclass AND t.tgname='media_signed_active_trg'`)[0];
+        if(mode==='purge_late_failure'){
+          const broken=mkdtempSync(join(tmpdir(),'tm-purge-late-failure-'));
+          try{
+            cpSync('drizzle',broken,{recursive:true});
+            const migration=join(broken,'0029_s4_b06_media_delete_purge.sql');
+            writeFileSync(migration,readFileSync(migration,'utf8')+'\n--> statement-breakpoint\nSELECT 1/0;\n');
+            const {drizzle}=require('drizzle-orm/postgres-js');
+            const {migrate:runMigration}=require('drizzle-orm/postgres-js/migrator');
+            await assert.rejects(runMigration(drizzle(sql),{migrationsFolder:broken}),e=>(e.cause??e).code==='22012');
+            assert.deepEqual(await bindingHistorySnapshot(sql,true,true),associationBefore);
+            assert.equal((await sql`SELECT count(*)::int n FROM drizzle.__drizzle_migrations`)[0].n,index0029);
+            assert.equal((await sql`SELECT to_regclass('public.media_purge_jobs') value`)[0].value,null);
+            assert.equal((await sql`SELECT count(*)::int n FROM pg_proc WHERE pronamespace='app'::regnamespace AND proname='guard_media_retention_source'`)[0].n,0);
+            assert.equal((await sql`SELECT has_column_privilege('tallermecario_api','media_assets','deleted_at','UPDATE') allowed`)[0].allowed,false);
+            assert.equal((await sql`SELECT count(*)::int n FROM pg_trigger WHERE tgrelid='media_assets'::regclass AND tgname='media_assets_delete_lifecycle_unavailable_trg'`)[0].n,1);
+            process.stdout.write('MEDIA_PURGE_LATE_FAILURE_ROLLBACK_PASS history, ledger, guards and grants preserved\n');
+          }finally{rmSync(broken,{recursive:true,force:true});}
+          continue;
+        }
+        if(['purge_role_invalid','purge_lifecycle_member','purge_lifecycle_indirect'].includes(mode)){
+          const {drizzle}=require('drizzle-orm/postgres-js');
+          const {migrate:runMigration}=require('drizzle-orm/postgres-js/migrator');
+          const [prior]=await sql`SELECT pg_get_triggerdef(oid) definition FROM pg_trigger WHERE tgrelid='public.media_assets'::regclass AND tgname='media_assets_delete_lifecycle_unavailable_trg'`;
+          const intermediate='tm_b06_path_'+randomUUID().replaceAll('-','');
+          if(mode==='purge_role_invalid')await sql`GRANT tallermecario_media_purger TO tallermecario_api`;
+          else if(mode==='purge_lifecycle_member')await sql`GRANT tallermecario_media_lifecycle TO tallermecario_worker`;
+          else {
+            await sql.unsafe(`CREATE ROLE ${intermediate} NOLOGIN NOINHERIT`);
+            await sql.unsafe(`GRANT tallermecario_media_lifecycle TO ${intermediate} WITH INHERIT TRUE, SET TRUE`);
+            await sql.unsafe(`GRANT ${intermediate} TO tallermecario_api WITH INHERIT FALSE, SET TRUE`);
+          }
+          try{
+            await assert.rejects(runMigration(drizzle(sql),{migrationsFolder:'drizzle'}),e=>{
+              assert.equal((e.cause??e).message,'media lifecycle role isolation invalid');return true;
+            });
+          }finally{
+            if(mode==='purge_role_invalid')await sql`REVOKE tallermecario_media_purger FROM tallermecario_api`;
+            else if(mode==='purge_lifecycle_member')await sql`REVOKE tallermecario_media_lifecycle FROM tallermecario_worker`;
+            else await sql.unsafe(`DROP ROLE ${intermediate}`);
+          }
+          assert.deepEqual(await bindingHistorySnapshot(sql,true,true),associationBefore);
+          const [state]=await sql`SELECT count(*)::int n FROM drizzle.__drizzle_migrations`;
+          assert.equal(state.n,index0029);
+          assert.equal((await sql`SELECT to_regclass('public.media_purge_jobs') value`)[0].value,null);
+          assert.deepEqual((await sql`SELECT pg_get_triggerdef(oid) definition FROM pg_trigger WHERE tgrelid='public.media_assets'::regclass AND tgname='media_assets_delete_lifecycle_unavailable_trg'`)[0],prior);
+          const [privilege]=await sql`SELECT has_column_privilege('tallermecario_api','media_assets','deleted_at','UPDATE') allowed`;
+          assert.equal(privilege.allowed,false);
+          process.stdout.write(`MEDIA_PURGE_ROLE_PREFLIGHT_FAIL_CLOSED_PASS ${mode} ledger=29; prior guards, grants and history preserved\n`);
+          continue;
+        }
         if (mode === 'retention_upgrade') {
           migrate(url.toString(), retentionPrevious);
           await seedBindingUpgrade(sql);
@@ -210,7 +269,7 @@ async function main() {
           process.stdout.write('MEDIA_PRE_BINDING_HISTORY_PRESERVED_PASS no fabricated authorization\n');
         }
         const [bindings] = await sql`SELECT count(*)::int AS n FROM media_upload_bindings`;
-        assert.equal(bindings.n, mode === 'association_upgrade' ? 2 : mode === 'retention_upgrade' ? 1 : 0, 'no fabricated historical binding/authorization');
+        assert.equal(bindings.n, ['association_upgrade','purge_upgrade'].includes(mode) ? 2 : mode === 'retention_upgrade' ? 1 : 0, 'no fabricated historical binding/authorization');
         for (const privilege of ['UPDATE', 'DELETE', 'TRUNCATE']) {
           const [grant] = await sql`SELECT has_table_privilege('tallermecario_api','public.media_upload_bindings',${privilege}) AS allowed`;
           assert.equal(grant.allowed, false);
@@ -220,7 +279,9 @@ async function main() {
         assert.equal(guard.prosecdef, false);
         if (retentionBefore) {
           assert.deepEqual(await bindingHistorySnapshot(sql, true), retentionBefore);
-          assert.deepEqual(await signedGuard(), signedGuardBefore);
+          assert.equal((await signedGuard()).trigger,signedGuardBefore.trigger);
+          assert.match((await signedGuard()).function,/tallermecario_media_lifecycle/);
+          assert.match((await signedGuard()).function,/signatures_media_guard/);
           const [historic] = await sql`SELECT retention_policy_version,retention_until::text,legal_hold_until::text
             FROM media_assets WHERE media_type='photo'`;
           assert.equal(historic.retention_policy_version,'historical-v0');
@@ -266,6 +327,7 @@ async function main() {
     }
   } finally {
     for (const name of names) await maintenance.unsafe(`DROP DATABASE ${name}`);
+    rmSync(purgePrevious,{recursive:true,force:true});
     rmSync(previous, { recursive: true, force: true });
     rmSync(bindingPrevious, { recursive: true, force: true });
     rmSync(retentionPrevious, { recursive: true, force: true });

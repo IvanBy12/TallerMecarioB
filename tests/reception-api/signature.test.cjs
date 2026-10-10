@@ -65,10 +65,13 @@ async function fixture(tenant) {
 }
 async function media(tenantId, type = 'signature', status = 'active', retention = 'authorization_evidence') {
   const id = randomUUID();
-  await h.admin`INSERT INTO public.media_assets
-    (id,tenant_id,bucket,object_key,media_type,mime_type,status,retention_class,retention_policy_version)
-    VALUES (${id},${tenantId},'test',${id},${type},'image/png',${status},
-      ${retention},'v1')`;
+  await h.admin.begin(async (tx) => {
+    // Only fabricate the invalid historical status used by the negative test.
+    if (status === 'deleted') await tx`SET LOCAL session_replication_role=replica`;
+    await tx`INSERT INTO public.media_assets
+      (id,tenant_id,bucket,object_key,media_type,mime_type,status,retention_class,retention_policy_version)
+      VALUES (${id},${tenantId},'test',${id},${type},'image/png',${status},${retention},'v1')`;
+  });
   return id;
 }
 const body = (signatureMediaId, extra = {}) => ({ signatureMediaId, signedByName: '  María Gómez  ',

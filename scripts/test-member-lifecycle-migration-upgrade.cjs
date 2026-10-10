@@ -198,7 +198,7 @@ async function scenario({ name, head, legacy }, context) {
     const policies = (await sql`
       SELECT policyname FROM pg_catalog.pg_policies WHERE schemaname = 'public' AND tablename = 'memberships'
     `).map((row) => row.policyname).sort();
-    assert.deepEqual(policies, ['tenant_insert', 'tenant_select', 'tenant_update']);
+    assert.deepEqual(policies, ['media_lifecycle_select', 'tenant_insert', 'tenant_select', 'tenant_update']);
 
     const login = { api: `tm_test_mlupa_${name}_${suffix}`, worker: `tm_test_mlupw_${name}_${suffix}` };
     const password = `rt_${randomUUID()}`;

@@ -284,11 +284,13 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
   // Historical delete fixtures use admin; normal runtime cannot write B06 fields.
   const deleted = await scoped(admin, a.tenant, async (c) => {
     const key = await media(c);
+    await c`SET LOCAL session_replication_role=replica`;
     await c`UPDATE media_assets SET deleted_at=now() WHERE id=${key}`;
     return key;
   });
   const purged = await scoped(admin, a.tenant, async (c) => {
     const key = await media(c);
+    await c`SET LOCAL session_replication_role=replica`;
     await c`UPDATE media_assets SET deleted_at=now(), purged_at=now() WHERE id=${key}`;
     return key;
   });
@@ -331,11 +333,11 @@ test('signature evidence, media guard, append-only and close lifecycle', async (
       `UPDATE media_assets SET ${column}=$1 WHERE id=$2`, [value, good])),
     ['status','checksum_sha256','size_bytes'].includes(column)
       ? failure('23514', column==='status' && value==='deleted'
-        ? 'media_assets_delete_lifecycle_unavailable_guard' : 'signatures_media_guard') : failure('42501'));
-    // Privileged writers still hit the unchanged signed evidence trigger.
+        ? 'media_destructive_lifecycle_guard' : 'signatures_media_guard') : failure('42501'));
+    // Privileged writers still hit the signed identity or lifecycle guard.
     if (!(column==='status' && value==='deleted')) await assert.rejects(admin.unsafe(
       `UPDATE media_assets SET ${column}=$1 WHERE id=$2`, [value, good]),
-    failure('23514', 'signatures_media_guard'));
+    failure('23514', ['deleted_at','purged_at'].includes(column)?'media_destructive_lifecycle_guard':'signatures_media_guard'));
   }
   await assert.rejects(admin`DELETE FROM media_assets WHERE id=${good}`,
     failure('23503', 'signatures_media_fk'));

@@ -162,7 +162,7 @@ for(const type of ['reception','damage']) for(const invalid of ['purpose','negat
     if(['signature','document','quote_pdf'].includes(invalid))await h.admin`UPDATE media_assets SET media_type=${invalid} WHERE id=${s.mediaAssetId}`;
     if(invalid==='mismatch')target=q;if(invalid==='foreign-target')target=await parent(b);
     if(['pending','failed','expired'].includes(invalid))await h.admin`UPDATE upload_sessions SET status=${invalid} WHERE id=${s.uploadSessionId}`;
-    if(['deletion_requested_at','deleted_at','purged_at'].includes(invalid))await h.admin.unsafe(`UPDATE media_assets SET ${invalid}=now()${invalid==='purged_at'?',deleted_at=now()':''} WHERE id=$1`,[s.mediaAssetId]);
+    if(['deletion_requested_at','deleted_at','purged_at'].includes(invalid))await h.admin.begin(async tx=>{await tx`SET LOCAL session_replication_role=replica`;await tx.unsafe(`UPDATE media_assets SET ${invalid}=now()${invalid==='purged_at'?',deleted_at=now()':''} WHERE id=$1`,[s.mediaAssetId]);});
     const before=await state(s);await assert.rejects(direct(target,s,type,purpose,sort),e=>{assert.equal(e.code,'23514');assert.equal(e.constraint_name,invalid==='purpose'?(type==='reception'?'reception_media_purpose_check':'damage_media_purpose_check'):invalid==='negative-sort'?'media_association_sort_order_guard':['closed','foreign-target'].includes(invalid)?'media_association_parent_guard':['mismatch','pending','failed','expired'].includes(invalid)?'media_association_context_guard':'media_association_asset_guard');return true;});assert.deepEqual(await state(s),before);
     assert.equal((await h.admin.unsafe(`SELECT count(*)::int n FROM ${t} WHERE media_asset_id=$1`,[s.mediaAssetId]))[0].n,0);
   });
@@ -175,7 +175,7 @@ for(const status of ['pending','failed','expired']) test(`active asset requires 
   const before=await state(s);error(await attach(p,s),409,'MEDIA_ASSOCIATION_CONTEXT_MISMATCH');assert.deepEqual(await state(s),before);
 });
 for(const marker of ['deletion_requested_at','deleted_at','purged_at']) test(`${marker} blocks attach and canonical download`,async()=>{
-  const p=await parent(a),s=await upload(p);await h.admin.unsafe(`UPDATE media_assets SET ${marker}=now()${marker==='purged_at'?',deleted_at=now()':''} WHERE id=$1`,[s.mediaAssetId]);
+  const p=await parent(a),s=await upload(p);await h.admin.begin(async tx=>{await tx`SET LOCAL session_replication_role=replica`;await tx.unsafe(`UPDATE media_assets SET ${marker}=now()${marker==='purged_at'?',deleted_at=now()':''} WHERE id=$1`,[s.mediaAssetId]);});
   error(await attach(p,s),409,'MEDIA_ASSET_NOT_ELIGIBLE');error(await call(`/api/v1/media/${s.mediaAssetId}/download-url`,undefined,'GET'),404,'MEDIA_ASSET_NOT_FOUND');
 });
 test('conflicting historical bindings for one asset fail safe; foreign binding FK cannot enter',async()=>{

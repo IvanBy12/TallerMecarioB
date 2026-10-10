@@ -408,7 +408,17 @@ describe('runtime role, bootstrap ACL and catalog prerequisites', () => {
       const predicate = table === 'workshops'
         ? '(id = app.current_tenant_id())'
         : '(tenant_id = app.current_tenant_id())';
-      const own = policies.filter((policy) => policy.tablename === table);
+      const tablePolicies = policies.filter((policy) => policy.tablename === table);
+      const lifecycle = tablePolicies.filter((policy) => policy.policyname === 'media_lifecycle_select');
+      assert.equal(lifecycle.length, ['memberships', 'membership_roles'].includes(table) ? 1 : 0, `${table} lifecycle policy`);
+      for (const policy of lifecycle) {
+        assert.equal(policy.permissive, 'PERMISSIVE');
+        assert.deepEqual([...policy.roles], ['tallermecario_media_lifecycle']);
+        assert.equal(policy.cmd, 'SELECT');
+        assert.equal(policy.qual, predicate);
+        assert.equal(policy.with_check, null);
+      }
+      const own = tablePolicies.filter((policy) => policy.policyname !== 'media_lifecycle_select');
       // S1-05 (0011): membership_roles changes only by INSERT/DELETE; DELETE is api-only.
       const expectedNames = table === 'membership_roles'
         ? ['tenant_delete', 'tenant_insert', 'tenant_select']

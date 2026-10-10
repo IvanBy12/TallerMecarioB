@@ -314,7 +314,7 @@ test('API retention monotonicity is DB enforced, including rejected transaction 
 test('API status grant cannot enter deleted lifecycle on unsigned media',async()=>{
   const id=await asset(),before=await row(id);
   await assert.rejects(run(a,sql=>sql`UPDATE media_assets SET status='deleted' WHERE tenant_id=${a.tenantId} AND id=${id}`),
-    e=>e.code==='23514'&&e.constraint_name==='media_assets_delete_lifecycle_unavailable_guard');
+    e=>e.code==='23514'&&e.constraint_name==='media_destructive_lifecycle_guard');
   assert.deepEqual(await row(id),before);
 });
 test('historical-v0 survives actual extension and no-op, including truthful audit version',async()=>{
@@ -497,7 +497,9 @@ test('quarantine with a nonterminal domain or unresolved evidence never becomes 
   assert.ok(d.blockers.includes('DOMAIN_LINK_NONTERMINAL'));assert.equal(d.blocksAutomaticPurge,true);
 });
 test('deleted lifecycle is never an automatic eligibility authorization',async()=>{
-  const id=await asset({status:'deleted',retention_until:'2020-01-01T00:00:00Z'}),before=await row(id),d=await evaluate(id);
+  const id=await asset({retention_until:'2020-01-01T00:00:00Z'});
+  await h.admin.begin(async tx=>{await tx`SET LOCAL session_replication_role=replica`;await tx`UPDATE media_assets SET status='deleted' WHERE id=${id}`;});
+  const before=await row(id),d=await evaluate(id);
   assert.equal(d.eligibility,'NOT_ELIGIBLE_LIFECYCLE_UNAVAILABLE');assert.deepEqual(await row(id),before);
 });
 test('foreign warranty item cannot enter a local activity retention lineage',async()=>{

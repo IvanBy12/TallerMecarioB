@@ -252,7 +252,7 @@ test.describe('RLS catalog and transaction-local context', () => {
           assert.equal(row.allowed, role==='tallermecario_api' && ['SELECT','INSERT'].includes(privilege), `${role}.${table}.${privilege}`);
         }
       }
-      const policies = await admin`SELECT cmd,roles FROM pg_policies WHERE schemaname='public' AND tablename=${table}`;
+      const policies = await admin`SELECT cmd,roles FROM pg_policies WHERE schemaname='public' AND tablename=${table} AND policyname LIKE 'tenant_%'`;
       assert.equal(policies.length,2);
       assert.ok(policies.every(p=>['SELECT','INSERT'].includes(p.cmd) && p.roles.length===1 && p.roles[0]==='tallermecario_api'));
     }
@@ -287,7 +287,7 @@ test.describe('RLS catalog and transaction-local context', () => {
     const policies = await admin`
       SELECT policyname, cmd, roles, with_check
       FROM pg_catalog.pg_policies
-      WHERE schemaname = 'public' AND tablename = 'media_upload_bindings'
+      WHERE schemaname = 'public' AND tablename = 'media_upload_bindings' AND policyname LIKE 'tenant_%'
       ORDER BY policyname
     `;
     assert.deepEqual(policies.map((policy) => [policy.policyname, policy.cmd]),

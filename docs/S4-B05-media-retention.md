@@ -34,7 +34,7 @@ already has a known floor. A class/type alone never proves a business link.
 
 ## Decision and persistence
 
-`src/media/retention.ts` returns knownRetentionUntil, blocksAutomaticPurge,
+`src/media/retention.ts` (using the shared B06 SQL evaluator under its existing lock proof) returns knownRetentionUntil, blocksAutomaticPurge,
 blockers, sources, policyVersion and eligibility. NULL never means eligible.
 CLOCK_NOT_STARTED means a defined canonical event has not occurred: operational
 reception/damage media without an order, or pending delivery. DOMAIN_LINK_NONTERMINAL
@@ -135,17 +135,14 @@ only explicit media-level legal hold and real protective references are evaluate
 
 Normal API/worker cannot UPDATE legal_hold_until, deletion_requested_at, deleted_at,
 purged_at, delete_reason, retention_policy_version or media identity columns.
-The API's necessary status grant cannot introduce status=deleted: the separate
-0027 SECURITY INVOKER guard rejects that transition with
-23514/media_assets_delete_lifecycle_unavailable_guard, including unsigned assets.
-A future approved B06 actor requires a reviewed migration; none is introduced.
+The API's necessary status grant still cannot enter status=deleted directly.
+The temporary 0027 prohibition is superseded by B06 migration 0029's authoritative
+media_destructive_lifecycle_guard and narrow tenant-scoped entry points.
+Normal runtime column grants remain unchanged; see [B06](S4-B06-media-delete-purge.md).
 
-B06 must reevaluate under this protocol immediately before its destructive
-transition, and design durable coordination across PostgreSQL/R2 as required by
-B01 §11. A decision returned after COMMIT is not a delete capability. B05 writes
+B06 reevaluates under this protocol before tombstoning and physical purge, with a durable job, lease and shared asset fence across PostgreSQL/R2 per B01 §11. A decision returned after COMMIT is not a delete capability. B05 writes
 none of deletion_requested_at/deleted_at/purged_at and performs no R2 DELETE,
-credential/lifecycle mutation or physical cleanup. Existing deletion markers
-produce NOT_ELIGIBLE_LIFECYCLE_UNAVAILABLE for automatic eligibility.
+credential/lifecycle mutation or physical cleanup. Ordinary B05 evaluation of deletion markers still produces NOT_ELIGIBLE_LIFECYCLE_UNAVAILABLE. Only B06's durable job can resume its recorded prior lifecycle for physical revalidation; no caller-provided policy/date override is accepted.
 
 ## Verification
 

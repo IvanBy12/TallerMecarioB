@@ -143,6 +143,7 @@ test('runtime privileges: api DELETE only via tenant policy, no UPDATE/TRUNCATE;
     WHERE schemaname = 'public' AND tablename = 'membership_roles' ORDER BY policyname
   `;
   assert.deepEqual(policies.map((row) => ({ ...row, roles: [...row.roles].sort() })), [
+    { policyname: 'media_lifecycle_select', cmd: 'SELECT', roles: ['tallermecario_media_lifecycle'], qual: '(tenant_id = app.current_tenant_id())', with_check: null },
     { policyname: 'tenant_delete', cmd: 'DELETE', roles: ['tallermecario_api'], qual: '(tenant_id = app.current_tenant_id())', with_check: null },
     { policyname: 'tenant_insert', cmd: 'INSERT', roles: ['tallermecario_api', 'tallermecario_worker'], qual: null, with_check: '(tenant_id = app.current_tenant_id())' },
     { policyname: 'tenant_select', cmd: 'SELECT', roles: ['tallermecario_api', 'tallermecario_worker'], qual: '(tenant_id = app.current_tenant_id())', with_check: null },

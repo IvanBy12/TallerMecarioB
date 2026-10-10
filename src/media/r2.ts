@@ -246,9 +246,25 @@ export async function readR2Range(config: R2Config, objectKey: string, size: num
   });
 }
 
-/** Test/cleanup helper -- production purge flow is documented separately (retention baseline). */
-export async function deleteR2Object(config: R2Config, objectKey: string): Promise<void> {
-  const url = presignR2Url(config, { method: 'DELETE', objectKey, expiresInSeconds: 60 });
-  const response = await fetch(url, { method: 'DELETE' });
-  if (!response.ok && response.status !== 404) throw new Error(`R2_DELETE_FAILED_${response.status}`);
+/** Transport only. Authority belongs to the dedicated DB lifecycle and purger.
+ * One bounded attempt; durable job backoff handles uncertain results. */
+export class R2DeleteRejectedError extends R2UnavailableError {}
+
+export async function deleteR2Object(config: R2Config, objectKey: string,
+  signal = AbortSignal.timeout(5000)): Promise<'deleted'> {
+  try {
+    if (signal.aborted) throw new R2UnavailableError();
+    const url = presignR2Url(config, { method: 'DELETE', objectKey, expiresInSeconds: 60 });
+    const response = await fetch(url, { method: 'DELETE', signal, redirect: 'error' });
+    await response.body?.cancel();
+    if (signal.aborted) throw new R2UnavailableError();
+    if (response.status === 200 || response.status === 204) return 'deleted';
+    // Explicit authorization rejection establishes this attempt did not delete.
+    // 404/5xx/timeouts remain ambiguous; no response body or URL is retained.
+    if (response.status === 401 || response.status === 403) throw new R2DeleteRejectedError();
+    throw new R2UnavailableError();
+  } catch (error) {
+    if (error instanceof R2DeleteRejectedError) throw error;
+    throw new R2UnavailableError();
+  }
 }
