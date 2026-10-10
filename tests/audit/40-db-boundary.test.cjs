@@ -156,6 +156,7 @@ describe('catalog: privileges, policies, triggers, functions', () => {
     assert.deepEqual(writers.map((row) => ({ ...row })), [
       { fn: 'app.bootstrap_append_identity_audit(text,text,text,uuid,jsonb,text)', owner: 'tallermecario_bootstrap_resolver', prosecdef: true, api: false, worker: false, identity_sync: true, purger: false, public: false },
       { fn: 'app.bootstrap_provision_user(text,text,uuid,text,text,text)', owner: 'tallermecario_bootstrap_resolver', prosecdef: true, api: true, worker: false, identity_sync: false, purger: false, public: false },
+      { fn: 'app.claim_media_purge(uuid,uuid)',owner: 'tallermecario_media_lifecycle', prosecdef: true,api: false, worker: false, identity_sync: false, purger: true, public: false},
       { fn: 'app.confirm_media_purge(uuid,uuid)', owner: 'tallermecario_media_lifecycle', prosecdef: true, api: false, worker: false, identity_sync: false, purger: true, public: false },
       { fn: 'app.request_media_deletion(uuid,boolean)', owner: 'tallermecario_media_lifecycle', prosecdef: true, api: false, worker: false, identity_sync: false, purger: false, public: false },
     ]);
