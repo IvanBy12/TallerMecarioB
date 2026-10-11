@@ -160,3 +160,4 @@ docs/*
 !docs/S4-B04-media-associations.md
 !docs/S4-B05-media-retention.md
 !docs/S4-B06-media-delete-purge.md
+!docs/S4-B07-assigned-media-authorization.md

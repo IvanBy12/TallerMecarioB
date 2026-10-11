@@ -228,6 +228,12 @@ jobs:
       - name: Reception complete mutation gate (S3-02 to S3-07)
         run: npm run test:reception:mutations:ci
 
+      - name: Assigned media mutation runner failure modes (S4-B07)
+        run: node --test tests/media-harness/assignment-mutations.test.cjs
+
+      - name: Assigned media authorization mutations (S4-B07)
+        run: npm run test:media:assigned:mutations:ci
+
       - name: CRM customer API mutations
         run: npm run test:crm:api:mutations:ci
 

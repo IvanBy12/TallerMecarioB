@@ -1,3 +1,4 @@
+import { listAssignedMedia, authorizeAssignedDownload } from './assigned-authorization.js';
 import { removeUnattachedMedia } from './deletion.js';
 import { attachMedia, listAssociatedMedia, type AssociationTarget } from './associations.js';
 import { parseCanonicalUuid } from '../tenancy/tenant-selection.js';
@@ -78,14 +79,16 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
         throw error;
       }
     });
-    app.get(url, { config: { permission: 'media.read' },
+    app.get(url, { config: { permission: 'media.read', permissionScope: 'resource' },
       onRequest: async (_request, reply) => { reply.header('cache-control', 'no-store'); },
     }, async (request, reply) => {
       try {
         if (Object.keys((request.query ?? {}) as object).length)
           throw new MediaError(400, 'REQUEST_VALIDATION_FAILED', 'The request query is invalid.');
         const context = getTenantRequestContext(request);
-        return reply.send({ media: await listAssociatedMedia(context.sql, context.tenant.tenantId, target(request.params)) });
+        return reply.send({ media: context.resourceAuthorization.grantedScopes.size > 0
+          ? await listAssignedMedia(context, target(request.params))
+          : await listAssociatedMedia(context.sql, context.tenant.tenantId, target(request.params)) });
       } catch (error) {
         if (error instanceof MediaError) return sendMediaError(request, reply, error);
         throw error;
@@ -99,7 +102,8 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
       // Security Baseline §10: uploads get a stricter per-route limit than
       // the global default (@fastify/rate-limit route-level override).
       // RBAC: tenant scope. Technician's `media.upload = assigned` stays
-      // denied until an order-assignment resource check exists (Sprint 2+).
+      // denied: B04 binds only open receptions; assignments require a closed
+      // reception's order. An order-level upload contract is still missing.
       config: {
         permission: 'media.upload',
         durableErrorCodes: ['UPLOAD_SESSION_EXPIRED'],
@@ -194,11 +198,16 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
     },
   );
 
-  app.get('/api/v1/media/:id/download-url', { config: { permission: 'media.read' } }, async (request, reply) => {
+  app.get('/api/v1/media/:id/download-url', { config: { permission: 'media.read', permissionScope: 'resource' },
+    onRequest: async (_request, reply) => { reply.header('cache-control', 'no-store'); },
+  }, async (request, reply) => {
     const context = getTenantRequestContext(request);
     const { id } = request.params as { id: string };
     try {
-      const result = await getMediaDownloadUrl(context.sql, r2, context.tenant.tenantId, id);
+      const mediaId = parseCanonicalUuid(id);
+      if (!mediaId) throw new MediaError(404, 'MEDIA_ASSET_NOT_FOUND', 'Media asset not found.');
+      if (context.resourceAuthorization.grantedScopes.size > 0) await authorizeAssignedDownload(context, mediaId);
+      const result = await getMediaDownloadUrl(context.sql, r2, context.tenant.tenantId, mediaId);
       return reply.send(result);
     } catch (error) {
       if (error instanceof MediaError) return sendMediaError(request, reply, error);
