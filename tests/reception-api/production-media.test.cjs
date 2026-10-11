@@ -101,7 +101,8 @@ test('production route composition registers all media paths, preserves RBAC, te
     for (const [method, url, payload] of [['POST', '/api/v1/media/upload-sessions', body],
       ['POST', complete, {}], ['GET', download, undefined]]) {
       const denied = await call(a.technician, a.tenantId, method, url, payload);
-      assert.equal(denied.status, 403); assert.equal(denied.json.error.code, 'PERMISSION_DENIED');
+      assert.equal(denied.status, method === 'GET' ? 404 : 403);
+      assert.equal(denied.json.error.code, method === 'GET' ? 'MEDIA_ASSET_NOT_FOUND' : 'PERMISSION_DENIED');
     }
     for (const [method, url, payload] of [['POST', complete, {}], ['GET', download, undefined]]) {
       const foreign = await call(a.owner, a.tenantId, method, url, payload);

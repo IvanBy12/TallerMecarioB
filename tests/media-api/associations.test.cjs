@@ -120,9 +120,9 @@ for(const actor of ['owner','admin','advisor']) test(`${actor} can attach/read r
   const p=await parent(a);
   for(const type of ['reception','damage']){const s=await upload(p,type);assert.equal((await attach(p,s,type,0,a,a[actor])).status,201);assert.equal((await list(p,type,a,a[actor])).status,200);}
 });
-for(const type of ['reception','damage']) test(`${type}: technician fails closed before malformed body/target lookup`,async()=>{
+for(const type of ['reception','damage']) test(`${type}: technician upload fails closed; unassigned read is non-disclosing`,async()=>{
   const p=await parent(a),s=await upload(p,type),before=await state(s);
-  error(await attach(p,s,type,0,a,a.technician),403,'PERMISSION_DENIED');error(await list(p,type,a,a.technician),403,'PERMISSION_DENIED');
+  error(await attach(p,s,type,0,a,a.technician),403,'PERMISSION_DENIED');error(await list(p,type,a,a.technician),404,type==='reception'?'RECEPTION_NOT_FOUND':'DAMAGE_NOT_FOUND');
   error(await call(path(p,type),{purpose:'other'},'POST',a,a.technician),403,'PERMISSION_DENIED');assert.deepEqual(await state(s),before);
 });
 for(const type of ['reception','damage']) test(`${type}: cross-tenant assets/targets/list and missing IDs have no writes/foreign audit`,async()=>{

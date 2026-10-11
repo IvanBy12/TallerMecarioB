@@ -113,7 +113,8 @@
     "test:media:api:ci": "node scripts/test-media-integrity-api.cjs",
     "test:media:upgrade:ci": "npm run build && node scripts/test-media-integrity-upgrade.cjs",
     "worker:media-purger": "node dist/worker/media-purger-run.js",
-    "test:media:purge:ci": "node scripts/test-media-purge.cjs"
+    "test:media:purge:ci": "node scripts/test-media-purge.cjs",
+    "test:media:assigned:mutations:ci": "node scripts/test-media-assignment-mutations.cjs"
   },
   "repository": {
     "type": "git",
