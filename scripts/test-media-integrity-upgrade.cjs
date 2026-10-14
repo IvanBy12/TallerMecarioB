@@ -86,6 +86,7 @@ async function main() {
   const bindingPrevious = mkdtempSync(join(tmpdir(), 'tm-binding-upgrade-'));
   const retentionPrevious = mkdtempSync(join(tmpdir(), 'tm-retention-upgrade-'));
   const associationPrevious = mkdtempSync(join(tmpdir(), 'tm-association-upgrade-'));
+  const reconciliationPrevious = mkdtempSync(join(tmpdir(), 'tm-reconciliation-upgrade-'));
   const purgePrevious = mkdtempSync(join(tmpdir(), 'tm-purge-upgrade-'));
   const names = [];
   const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json', 'utf8'));
@@ -100,6 +101,10 @@ async function main() {
   assert.equal(index0028,index0027+1);
   const index0029=journal.entries.findIndex(entry=>entry.tag==='0029_s4_b06_media_delete_purge');
   assert.equal(index0029,index0028+1);
+  const index0030=journal.entries.findIndex(entry=>entry.tag==='0030_s4_b08_media_reconciliation');
+  assert.equal(index0030,index0029+1);
+  cpSync('drizzle',reconciliationPrevious,{recursive:true});
+  writeFileSync(join(reconciliationPrevious,'meta/_journal.json'),JSON.stringify({...journal,entries:journal.entries.slice(0,index0030)}));
   const latest = journal.entries.at(-1);
   assert.ok(latest, 'migration journal is not empty');
   const count = journal.entries.length;
@@ -119,7 +124,7 @@ async function main() {
     assert.equal(result.status, 0, result.stderr);
   };
   try {
-    for (const mode of ['fresh', 'upgrade', 'binding_upgrade', 'retention_upgrade', 'association_upgrade', 'association_incompatible_reception', 'association_incompatible_damage','purge_upgrade','purge_role_invalid','purge_lifecycle_member','purge_lifecycle_indirect','purge_late_failure']) {
+    for (const mode of ['fresh', 'reconciliation_upgrade', 'reconciliation_role_invalid', 'reconciliation_owner_member', 'reconciliation_owner_read', 'reconciliation_late_failure', 'upgrade', 'binding_upgrade', 'retention_upgrade', 'association_upgrade', 'association_incompatible_reception', 'association_incompatible_damage','purge_upgrade','purge_role_invalid','purge_lifecycle_member','purge_lifecycle_indirect','purge_late_failure']) {
       const name = `tm_media_${mode}_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
       await maintenance.unsafe(`CREATE DATABASE ${name}`); names.push(name);
       const url = new URL(source); url.pathname = `/${name}`;
@@ -148,6 +153,51 @@ async function main() {
         if(['purge_upgrade','purge_role_invalid','purge_lifecycle_member','purge_lifecycle_indirect','purge_late_failure'].includes(mode)){
           migrate(url.toString(),purgePrevious);await seedAssociationUpgrade(sql);
           associationBefore=await bindingHistorySnapshot(sql,true,true);
+        }
+        if(mode.startsWith('reconciliation_')) {
+          migrate(url.toString(),reconciliationPrevious);
+          await seedAssociationUpgrade(sql);
+          const before=await bindingHistorySnapshot(sql,true,true);
+          if(mode==='reconciliation_upgrade') {
+            migrate(url.toString()); migrate(url.toString());
+            assert.deepEqual(await bindingHistorySnapshot(sql,true,true),before);
+            const [fn]=await sql`SELECT p.prosecdef,p.proconfig,p.proowner::regrole::text owner,has_function_privilege('tallermecario_worker',p.oid,'EXECUTE') worker,
+              has_function_privilege('tallermecario_media_reconciler',p.oid,'EXECUTE') reconciler
+              FROM pg_proc p WHERE p.oid='app.media_storage_metadata_exists(text,text[])'::regprocedure`;
+            assert.equal(fn.owner,'tallermecario_media_inventory_owner');
+            assert.equal((await sql`SELECT count(*)::int n FROM pg_auth_members WHERE roleid='tallermecario_media_inventory_owner'::regrole OR member='tallermecario_media_inventory_owner'::regrole`)[0].n,0);
+            assert.equal(fn.worker,false);assert.equal(fn.reconciler,true);assert.equal(fn.prosecdef,true);assert.deepEqual(fn.proconfig,['search_path=pg_catalog']);
+          } else {
+            const broken=mkdtempSync(join(tmpdir(),'tm-reconciliation-failure-'));
+            try {
+              cpSync('drizzle',broken,{recursive:true});
+              if(mode==='reconciliation_role_invalid')await sql`GRANT tallermecario_worker TO tallermecario_media_reconciler`;
+              else if(mode==='reconciliation_owner_member')await sql`GRANT tallermecario_media_inventory_owner TO tallermecario_worker`;
+              else if(mode==='reconciliation_owner_read')await sql`GRANT SELECT ON public.customers TO tallermecario_media_inventory_owner`;
+              else {
+                const file=join(broken,'0030_s4_b08_media_reconciliation.sql');
+                writeFileSync(file,readFileSync(file,'utf8')+'\n--> statement-breakpoint\nSELECT 1/0;\n');
+              }
+              const {drizzle}=require('drizzle-orm/postgres-js'),{migrate:runMigration}=require('drizzle-orm/postgres-js/migrator');
+              await assert.rejects(runMigration(drizzle(sql),{migrationsFolder:broken}),error=>{
+                const cause=error.cause??error;return mode==='reconciliation_role_invalid'
+                  ? cause.message==='media reconciliation role isolation invalid'
+                  : mode==='reconciliation_owner_member' ? cause.message==='media inventory owner isolation invalid'
+                  : mode==='reconciliation_owner_read' ? cause.message==='media inventory owner privileges invalid' : cause.code==='22012';
+              });
+              assert.equal((await sql`SELECT count(*)::int n FROM drizzle.__drizzle_migrations`)[0].n,index0030);
+              assert.equal((await sql`SELECT count(*)::int n FROM pg_proc WHERE pronamespace='app'::regnamespace AND proname='media_storage_metadata_exists'`)[0].n,0);
+              assert.equal((await sql`SELECT count(*)::int n FROM pg_policies WHERE policyname IN ('media_reconciler_select','media_inventory_owner_select')`)[0].n,0);
+              assert.deepEqual(await bindingHistorySnapshot(sql,true,true),before);
+            } finally {
+              if(mode==='reconciliation_role_invalid')await sql`REVOKE tallermecario_worker FROM tallermecario_media_reconciler`;
+              if(mode==='reconciliation_owner_member')await sql`REVOKE tallermecario_media_inventory_owner FROM tallermecario_worker`;
+              if(mode==='reconciliation_owner_read')await sql`REVOKE SELECT ON public.customers FROM tallermecario_media_inventory_owner`;
+              rmSync(broken,{recursive:true,force:true});
+            }
+            process.stdout.write(`MEDIA_${mode.toUpperCase()}_PASS rollback preserved data/ledger/privileges\n`);
+            continue;
+          }
         }
         if (mode === 'binding_upgrade') {
           migrate(url.toString(), bindingPrevious);
@@ -269,7 +319,7 @@ async function main() {
           process.stdout.write('MEDIA_PRE_BINDING_HISTORY_PRESERVED_PASS no fabricated authorization\n');
         }
         const [bindings] = await sql`SELECT count(*)::int AS n FROM media_upload_bindings`;
-        assert.equal(bindings.n, ['association_upgrade','purge_upgrade'].includes(mode) ? 2 : mode === 'retention_upgrade' ? 1 : 0, 'no fabricated historical binding/authorization');
+        assert.equal(bindings.n, ['association_upgrade','purge_upgrade','reconciliation_upgrade'].includes(mode) ? 2 : mode === 'retention_upgrade' ? 1 : 0, 'no fabricated historical binding/authorization');
         for (const privilege of ['UPDATE', 'DELETE', 'TRUNCATE']) {
           const [grant] = await sql`SELECT has_table_privilege('tallermecario_api','public.media_upload_bindings',${privilege}) AS allowed`;
           assert.equal(grant.allowed, false);
@@ -327,6 +377,7 @@ async function main() {
     }
   } finally {
     for (const name of names) await maintenance.unsafe(`DROP DATABASE ${name}`);
+    rmSync(reconciliationPrevious,{recursive:true,force:true});
     rmSync(purgePrevious,{recursive:true,force:true});
     rmSync(previous, { recursive: true, force: true });
     rmSync(bindingPrevious, { recursive: true, force: true });

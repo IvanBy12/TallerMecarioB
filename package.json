@@ -114,7 +114,10 @@
     "test:media:upgrade:ci": "npm run build && node scripts/test-media-integrity-upgrade.cjs",
     "worker:media-purger": "node dist/worker/media-purger-run.js",
     "test:media:purge:ci": "node scripts/test-media-purge.cjs",
-    "test:media:assigned:mutations:ci": "node scripts/test-media-assignment-mutations.cjs"
+    "test:media:assigned:mutations:ci": "node scripts/test-media-assignment-mutations.cjs",
+    "worker:media-reconciliation": "node dist/worker/media-reconciliation-run.js",
+    "test:media:reconciliation": "npm run build && node --test tests/media/reconciliation*.test.cjs",
+    "test:media:reconciliation:ci": "node scripts/test-media-reconciliation.cjs"
   },
   "repository": {
     "type": "git",

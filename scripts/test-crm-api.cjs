@@ -44,6 +44,8 @@ const CANONICAL_ROLES = [
   'tallermecario_identity_sync',
   'tallermecario_media_purger',
   'tallermecario_media_lifecycle',
+  'tallermecario_media_reconciler',
+  'tallermecario_media_inventory_owner',
 ];
 const COMPILE_PREFIX = 'tallermecario-crm-api-test-';
 
