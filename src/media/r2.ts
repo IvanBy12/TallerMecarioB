@@ -81,7 +81,7 @@ export function writeOnceUploadHeaders(contentType: string): Record<string, stri
 }
 
 /** Builds a presigned R2 URL (query-string SigV4, path-style bucket addressing). */
-export function presignR2Url(config: R2Config, options: PresignOptions): string {
+function presignR2Request(config: R2Config, options: PresignOptions, canonicalUri: string, extraQuery: Record<string, string> = {}): string {
   const now = options.now ?? new Date();
   const amz = amzDate(now);
   const dateStamp = amz.slice(0, 8);
@@ -89,10 +89,6 @@ export function presignR2Url(config: R2Config, options: PresignOptions): string 
   const credentialScope = `${dateStamp}/${config.region}/${service}/aws4_request`;
 
   const host = new URL(config.endpoint).host;
-  const canonicalUri = `/${uriEncode(config.bucket, false)}/${options.objectKey
-    .split('/')
-    .map((segment) => uriEncode(segment, false))
-    .join('/')}`;
 
   const extraHeaders = options.extraSignedHeaders ?? {};
   const headerValues: Record<string, string> = { host };
@@ -113,6 +109,7 @@ export function presignR2Url(config: R2Config, options: PresignOptions): string 
   const signedHeaders = signedHeaderNames.join(';');
 
   const queryParams: Record<string, string> = {
+    ...extraQuery,
     'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
     'X-Amz-Credential': `${config.accessKeyId}/${credentialScope}`,
     'X-Amz-Date': amz,
@@ -139,6 +136,18 @@ export function presignR2Url(config: R2Config, options: PresignOptions): string 
     .digest('hex');
 
   return `${config.endpoint}${canonicalUri}?${canonicalQueryString}&X-Amz-Signature=${signature}`;
+}
+
+export function presignR2Url(config: R2Config, options: PresignOptions): string {
+  const path = `/${uriEncode(config.bucket, false)}/${options.objectKey.split('/').map(segment => uriEncode(segment, false)).join('/')}`;
+  return presignR2Request(config, options, path);
+}
+
+/** Internal LIST capability; never return it in logs or operational reports. */
+export function presignR2ListUrl(config: R2Config, prefix: string, limit: number, token?: string): string {
+  return presignR2Request(config, { method: 'GET', objectKey: '', expiresInSeconds: 60 },
+    `/${uriEncode(config.bucket, true)}`, { 'list-type': '2', 'encoding-type': 'url',
+      prefix, 'max-keys': String(limit), ...(token ? { 'continuation-token': token } : {}) });
 }
 
 export interface R2ObjectHead {
