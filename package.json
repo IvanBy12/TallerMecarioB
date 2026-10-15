@@ -117,7 +117,9 @@
     "test:media:assigned:mutations:ci": "node scripts/test-media-assignment-mutations.cjs",
     "worker:media-reconciliation": "node dist/worker/media-reconciliation-run.js",
     "test:media:reconciliation": "npm run build && node --test tests/media/reconciliation*.test.cjs",
-    "test:media:reconciliation:ci": "node scripts/test-media-reconciliation.cjs"
+    "test:media:reconciliation:ci": "node scripts/test-media-reconciliation.cjs",
+    "test:s4:quality-gate": "node scripts/test-s4-quality-gate.cjs",
+    "test:s4:quality-gate:ci": "node scripts/test-s4-quality-gate.cjs --media-only"
   },
   "repository": {
     "type": "git",

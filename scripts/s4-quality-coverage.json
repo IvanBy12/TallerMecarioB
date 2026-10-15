@@ -1,0 +1,193 @@
+{
+  "typecheck": {
+    "kind": "exit"
+  },
+  "lint": {
+    "kind": "exit"
+  },
+  "build": {
+    "kind": "exit"
+  },
+  "security:secret-scan": {
+    "kind": "markers",
+    "lines": [
+      "SECRET_SCAN_PASS"
+    ]
+  },
+  "test": {
+    "kind": "tap",
+    "floors": [
+      26,
+      78,
+      20,
+      5,
+      76
+    ]
+  },
+  "test:db:sprint0:ci": {
+    "kind": "tap",
+    "floors": [
+      65
+    ]
+  },
+  "test:authz:db:ci": {
+    "kind": "tap",
+    "floors": [
+      4
+    ]
+  },
+  "test:tenant-context:db:ci": {
+    "kind": "tap",
+    "floors": [
+      27
+    ]
+  },
+  "test:api:multitenant:ci": {
+    "kind": "tap",
+    "floors": [
+      4
+    ]
+  },
+  "test:tenant-context:api:ci": {
+    "kind": "tap",
+    "floors": [
+      75
+    ]
+  },
+  "test:api:security:ci": {
+    "kind": "tap",
+    "floors": [
+      12
+    ]
+  },
+  "test:cross-tenant:final:ci": {
+    "kind": "tap",
+    "floors": [
+      25
+    ]
+  },
+  "test:reception:db:ci": {
+    "kind": "tap",
+    "floors": [
+      24
+    ]
+  },
+  "test:reception:api:ci": {
+    "kind": "tap",
+    "floors": [
+      123
+    ]
+  },
+  "test:media:api:ci": {
+    "kind": "tap",
+    "floors": [
+      621
+    ]
+  },
+  "test:media:upgrade:ci": {
+    "kind": "markers",
+    "lines": [
+      "MEDIA_FRESH_PASS ledger=31; rerun no-op; RLS retained",
+      "MEDIA_RECONCILIATION_UPGRADE_PASS ledger=31; rerun no-op; RLS retained",
+      "MEDIA_RECONCILIATION_ROLE_INVALID_PASS rollback preserved data/ledger/privileges",
+      "MEDIA_RECONCILIATION_OWNER_MEMBER_PASS rollback preserved data/ledger/privileges",
+      "MEDIA_RECONCILIATION_OWNER_READ_PASS rollback preserved data/ledger/privileges",
+      "MEDIA_RECONCILIATION_LATE_FAILURE_PASS rollback preserved data/ledger/privileges",
+      "MEDIA_UPGRADE_PASS ledger=31; rerun no-op; RLS retained",
+      "MEDIA_PRE_BINDING_HISTORY_PRESERVED_PASS no fabricated authorization",
+      "MEDIA_BINDING_UPGRADE_PASS ledger=31; rerun no-op; RLS retained",
+      "MEDIA_RETENTION_HISTORY_PRESERVED_PASS assets/signatures/sessions/bindings/audits unchanged",
+      "MEDIA_RETENTION_UPGRADE_PASS ledger=31; rerun no-op; RLS retained",
+      "MEDIA_ASSOCIATION_HISTORY_PRESERVED_PASS assets/associations/bindings/sessions/audits unchanged",
+      "MEDIA_ASSOCIATION_UPGRADE_PASS ledger=31; rerun no-op; RLS retained",
+      "MEDIA_ASSOCIATION_INCOMPATIBLE_RECEPTION_PASS clear preflight abort; no data/ledger/privilege rewrite",
+      "MEDIA_ASSOCIATION_INCOMPATIBLE_DAMAGE_PASS clear preflight abort; no data/ledger/privilege rewrite",
+      "MEDIA_PURGE_UPGRADE_PASS ledger=31; rerun no-op; RLS retained",
+      "MEDIA_PURGE_ROLE_PREFLIGHT_FAIL_CLOSED_PASS purge_role_invalid ledger=29; prior guards, grants and history preserved",
+      "MEDIA_PURGE_ROLE_PREFLIGHT_FAIL_CLOSED_PASS purge_lifecycle_member ledger=29; prior guards, grants and history preserved",
+      "MEDIA_PURGE_ROLE_PREFLIGHT_FAIL_CLOSED_PASS purge_lifecycle_indirect ledger=29; prior guards, grants and history preserved",
+      "MEDIA_PURGE_LATE_FAILURE_ROLLBACK_PASS history, ledger, guards and grants preserved",
+      "MEDIA_UPGRADE_CLEANUP_PASS databases=0",
+      "MEDIA_ASSOCIATION_HISTORY_PRESERVED_PASS assets/associations/bindings/sessions/audits unchanged"
+    ]
+  },
+  "test:reception:upgrade:ci": {
+    "kind": "markers",
+    "lines": [
+      "UPGRADE_VALID_PASS 0018 -> 0019; data unchanged; rerun no-op",
+      "UPGRADE_DUPLICATE_FAIL_CLOSED_PASS ledger=19; rollback complete",
+      "UPGRADE_SIGNATURE_FAIL_CLOSED_PASS ledger=19; rollback complete",
+      "UPGRADE_CLOSED_FAIL_CLOSED_PASS ledger=19; rollback complete",
+      "UPGRADE_ORDER_OPEN_FAIL_CLOSED_PASS ledger=19; rollback complete",
+      "UPGRADE_MISSING_HISTORY_FAIL_CLOSED_PASS ledger=19; rollback complete",
+      "UPGRADE_MILEAGE_FAIL_CLOSED_PASS ledger=19; rollback complete",
+      "UPGRADE_CANCELLED_FAIL_CLOSED_PASS ledger=19; rollback complete",
+      "UPGRADE_PRIVACY_CLEAN_PASS 0019 -> 0020; data unchanged; rerun no-op",
+      "UPGRADE_PRIVACY_LEGACY_RECEPTION_FAIL_CLOSED_PASS ledger=20; rollback complete",
+      "UPGRADE_PRIVACY_LEGACY_CONSENT_FAIL_CLOSED_PASS ledger=20; rollback complete",
+      "UPGRADE_PRIVACY_LEGACY_BOTH_FAIL_CLOSED_PASS ledger=20; rollback complete",
+      "UPGRADE_SINGLE_USE_CLEAN_PASS 0020 -> 0022; rows intact; rerun no-op",
+      "UPGRADE_SINGLE_USE_DUPLICATE_FAIL_CLOSED_PASS ledger=21; rows intact; rollback complete",
+      "UPGRADE_RETENTION_CLEAN_PASS ledger=31; evidence unchanged",
+      "UPGRADE_RETENTION_VALID_PASS ledger=31; evidence unchanged",
+      "UPGRADE_RETENTION_WRONG_PASS ledger=23; evidence unchanged",
+      "UPGRADE_RETENTION_QUARANTINED_PASS ledger=31; evidence unchanged",
+      "UPGRADE_RETENTION_DELIVERY_PASS ledger=31; evidence unchanged",
+      "RECEPTION_UPGRADE_TEARDOWN dbs=0"
+    ]
+  },
+  "test:runtime:db:ci": {
+    "kind": "markers",
+    "lines": [
+      "RUNTIME_DATABASE_ROLE_BOUNDARY_PASS"
+    ]
+  },
+  "test:db:migration-lock:ci": {
+    "kind": "markers",
+    "lines": [
+      "MIGRATION_LOCK_TEST_PASS"
+    ]
+  },
+  "test:media:assigned:mutations:ci": {
+    "kind": "markers",
+    "lines": [
+      "S4B07_MUTATION_COUNTS killed=6 survived=0 normal_failures=0 invalid_apply_failures=0"
+    ]
+  },
+  "mutation:reception": {
+    "kind": "markers",
+    "lines": [
+      "RECEPTION_MUTATION_COUNTS killed=22 survived=0 invalid_apply_failures=0"
+    ]
+  },
+  "mutation:signature-api": {
+    "kind": "markers",
+    "lines": [
+      "SIGNATURE_MUTATION_COUNTS killed=7 survived=0 invalid_apply_failures=0"
+    ]
+  },
+  "mutation:close-api": {
+    "kind": "markers",
+    "lines": [
+      "S306_MUTATION_COUNTS killed=11 survived=0 normal_failures=0"
+    ]
+  },
+  "mutation:reception-queries": {
+    "kind": "markers",
+    "lines": [
+      "S307_MUTATION_COUNTS killed=24 survived=0 normal_failures=0 invalid_apply_failures=0"
+    ]
+  },
+  "mutation:reception-contract": {
+    "kind": "markers",
+    "lines": [
+      "S3C_MUTATION_COUNTS killed=19 survived=0 normal_failures=0 invalid_apply_failures=0"
+    ]
+  },
+  "mutation:inspection": {
+    "kind": "markers",
+    "lines": [
+      "S3I_MUTATION_COUNTS killed=7 survived=0 invalid_apply_failures=0"
+    ]
+  }
+}

@@ -336,12 +336,16 @@ test('mismatch against effectively expired pending create does not disclose/mate
   assert.deepEqual(await snapshot(s), before); assert.equal(await auditCount(s, 'media.upload_session_expired'), 0);
   assert.equal((await create(body)).body.error.code, 'UPLOAD_SESSION_EXPIRED'); assert.equal(await auditCount(s, 'media.upload_session_expired'), 1);
 });
-test('one remaining whole second can issue a bounded PUT; subsecond and past expiry issue no capability', async () => {
-  for (const remaining of ['1800 milliseconds', '800 milliseconds', '-1 second']) {
+test('one remaining whole second can issue a bounded PUT; subsecond and past expiry issue no capability', async t => {
+  // Exact application-clock boundaries, independent of DB/host clock skew and
+  // scheduling delay. Real HTTP, SQL persistence, signing and audits still run.
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ['Date'], now });
+  for (const remaining of [1800, 800, -1000]) {
     const body = payload(), s = await session(body);
-    await h.admin`UPDATE upload_sessions SET expires_at=now()+${remaining}::interval WHERE id=${s.uploadSessionId}`;
+    await h.admin`UPDATE upload_sessions SET expires_at=${new Date(now + remaining)} WHERE id=${s.uploadSessionId}`;
     const result = await create(body);
-    if (remaining === '1800 milliseconds') { assert.equal(result.status, 201); assert.equal(signedExpiry(result.body), 1); }
+    if (remaining === 1800) { assert.equal(result.status, 201); assert.equal(signedExpiry(result.body), 1); }
     else { assert.equal(result.status, 409); assert.equal(result.body.error.code, 'UPLOAD_SESSION_EXPIRED'); assert.equal(result.body.uploadUrl, undefined); }
   }
 });
