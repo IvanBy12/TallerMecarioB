@@ -249,12 +249,15 @@ for (const [type, extension, mime] of [['video', 'mp4', 'video/mp4'], ['video360
     assert.equal((await rows(s)).session_status, 'completed');
   });
 }
-test('expiry during storage validation is rechecked before any activation', async () => {
-  const s = await session();
-  await h.admin`UPDATE upload_sessions SET expires_at=now()+interval '500 milliseconds' WHERE id=${s.uploadSessionId}`;
+test('expiry during storage validation is rechecked before any activation', async t => {
+  const s = await session(), now = Date.now();
+  t.mock.timers.enable({ apis: ['Date'], now });
+  await h.admin`UPDATE upload_sessions SET expires_at=${new Date(now + 5000)} WHERE id=${s.uploadSessionId}`;
   const transport = f.objectFetch(f.png, 'image/png'); let heads = 0;
   globalThis.fetch = async (url, init) => {
-    if (init.method === 'HEAD') { heads++; await new Promise((resolve) => setTimeout(resolve, 600)); }
+    // Cross logical expiry only after Phase A entered external inspection,
+    // while remaining inside the unchanged 10-second inspection deadline.
+    if (init.method === 'HEAD') { heads++; t.mock.timers.tick(6000); }
     return transport(url, init);
   };
   const response = await complete(s); assert.equal(heads, 1); assert.equal(response.json().error.code, 'UPLOAD_SESSION_EXPIRED');

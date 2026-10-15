@@ -27,6 +27,20 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      media-gate-postgres:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/tallermecario_ci
 
@@ -61,9 +75,6 @@ jobs:
 
       - name: Build
         run: npm run build
-
-      - name: R2 presigned PUT security (no R2 credentials)
-        run: npm run test:media:presign:ci
 
       - name: Reception mutation harness portability (LF and CRLF)
         run: npm run test:reception:harness
@@ -145,13 +156,21 @@ jobs:
       - name: Reception create and edit API (S3-03 to S3-04)
         run: npm run test:reception:api:ci
 
-      - name: Media integrity, binding, retention and delete/purge (S4-B02 to S4-B06)
-        run: |
-          npm run test:media:api:ci
-          npm run test:media:upgrade:ci
-          npm run test:media:purge:ci
-          npm run test:media:reconciliation:ci
-          npm run test:media:reconciliation
+      # The full media API suite already includes purge and reconciliation.
+      # Earlier steps supply build/type/lint/foundation/reception evidence.
+      - name: Sprint 4 automated media gate (simulated R2; external evidence pending)
+        env:
+          S4_GATE_DISPOSABLE_DATABASE: '1'
+          DATABASE_URL: postgresql://postgres@127.0.0.1:5433/postgres
+        run: npm run test:s4:quality-gate:ci -- --report "${{ runner.temp }}/s4-b09.json"
+
+      - name: Preserve Sprint 4 automated evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s4-b09-automated-evidence
+          path: ${{ runner.temp }}/s4-b09.json
+          if-no-files-found: warn
 
       - name: Shared runtime database role boundary
         run: npm run test:runtime:db:ci

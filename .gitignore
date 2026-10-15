@@ -162,3 +162,7 @@ docs/*
 !docs/S4-B06-media-delete-purge.md
 !docs/S4-B07-assigned-media-authorization.md
 !docs/S4-B08-media-reconciliation.md
+
+!docs/quality/
+docs/quality/*
+!docs/quality/s4-backend-final-quality-gate.md
