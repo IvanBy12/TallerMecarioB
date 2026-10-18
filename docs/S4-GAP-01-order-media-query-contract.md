@@ -5,7 +5,7 @@ Rama: `task/s4-gap-01-order-media`. Base verificada:
 `47c8fc954a9951775ff7539f7fa02c0bcf39dd80`.
 Worktree: `/Users/ivanby/Documents/Proyectos/TallerMecarioB-worktrees/s4-gap-01-order-media`.
 
-**Estado actual: D01–D07 aprobadas el 2026-10-15; implementación backend S4-GAP-01A verificada; la revisión focalizada F1–F6 se conserva en §15; remediación F1-N1 en §16; corrección CI Linux del PR #21 en §17. Merge BLOCKED hasta revisión independiente del nuevo candidato. Frontend fuera del alcance de 01A.**
+**Estado actual: D01–D07 aprobadas el 2026-10-15; implementación backend S4-GAP-01A verificada; la revisión focalizada F1–F6 se conserva en §15; remediación F1-N1 en §16; corrección CI Linux del PR #21 en §17 y compatibilidad de privacidad del drill en §18. Merge BLOCKED hasta revisión independiente del nuevo candidato. Frontend fuera del alcance de 01A.**
 N§7.23 y el Quality Gate global siguen BLOCKED hasta frontend y aceptación integrada.
 No se consultó Notion ni se modificó el frontend, schema, migraciones o grants. La remediación actual no crea commit, push ni merge; PR #21 existente permanece abierto. Sin almacenamiento real destructivo.
 
@@ -1675,3 +1675,198 @@ tm-pr21-ci-node se retiraron; docker ps quedó vacío. Las dos etiquetas Postgre
 activas. Las imágenes PostgreSQL preexistentes se conservan.
 
 S4-GAP-01A PR21 CI FIX READY FOR REVIEW
+
+
+## 18. PR #21 — contrato de privacidad del drill de staging, 2026-10-18
+
+### 18.1 Causa confirmada y corrección cerrada
+
+HEAD/base del encargo `7c1e6d3e45d676fe06648c9e0261b106719deb53`, rama
+`task/s4-gap-01-order-media`. Los dos jobs validate ya estaban verdes. Se leyeron
+[PR run 39155583329](https://github.com/IvanBy12/TallerMecarioB/actions/runs/39155583329)
+y [push run 39155579779](https://github.com/IvanBy12/TallerMecarioB/actions/runs/39155579779).
+Ambos staging fallaron después de build/migración/ledger/idempotencia/health/auth/smoke
+PASS y antes de CRM E2E, en `scripts/staging-deploy-drill.cjs:341`:
+`assertLogPrivacy(baselineLogs.stdout, [], 0)`.
+
+Reproducción independiente sobre el helper anterior: el JSON real del aviso
+`{level:30,event:'order_media_route_disabled',reason:'cursor_key_missing'}` genera
+ERR_ASSERTION «only a fixed startup/shutdown message is allowed»: campos reales
+[event,level,reason] frente a [level,msg]. No era fallo de requests CRM ni evidencia
+de una fuga; era incompatibilidad entre la emisión nueva y el validador del drill.
+El emisor de `src/api/server.ts:117` se conserva sin cambios.
+
+Corrección mínima en `scripts/staging-crm-e2e.cjs:130`: una única excepción bajo
+la rama de logs sin status_code exige **event exacto, reason exacta, level numérico 30
+y exactamente tres campos event/level/reason**. Un campo adicional, incluso inocuo,
+es rechazado. Las comprobaciones globales de sentinels, autorización, cookies y URL
+cruda se ejecutan antes de la excepción. Las ramas startup/shutdown level+msg,
+diagnostic request_internal_error y completions quedan intactas. Los fallos de
+reason no incluyen el valor recibido en el diagnóstico del validador.
+
+No se abre un allowlist general, no se acepta event/reason arbitrario, no se suprime
+el aviso, no se inyecta una clave ficticia y no se modifica el logger de producción.
+
+### 18.2 Regresiones permanentes y prueba de mutantes
+
+`tests/crm-api/91-staging-log-privacy.test.cjs`:37/37, dos positivos y 35 negativos,
+contra el assertLogPrivacy real. Forma parte del CRM API ejecutado por el workflow
+existente; no se toca `.github/workflows/ci.yml`.
+
+| Matriz | Casos | Resultado |
+| --- | ---: | --- |
+| Aviso exacto; compatibilidad startup/shutdown/diagnostic/completion | 2 | Aceptados |
+| Evento inesperado, dinámico o null | 3 | Rechazados |
+| Reason inesperada, dinámica, vacía, null u objeto | 5 | Rechazadas |
+| Campos extra tenant_id/user_id/membership_id/request_id/cursor/key/token/config/msg/arbitrary | 10 | Rechazados |
+| Nivel50/20/40/60, string30, null o ausente | 7 | Rechazados |
+| Reason ausente | 1 | Rechazada |
+| Completion con cursor/event/arbitrary extra | 3 | Rechazados |
+| Intento de mezclar el aviso con diagnostic/request_id | 1 | Rechazado |
+| Sentinel privado en mensaje ordinario | 1 | Rechazado |
+| Bearer, authorization, cookie y URL con query | 4 | Rechazados |
+
+Copias mutantes exclusivamente bajo `/private/tmp/tm-pr21-staging-privacy/`, retiradas
+después de cada caso; nunca se muta el worktree. Control37/37, sin skips/cancelaciones.
+El runner comprobó que cada fallo fuera ERR_ASSERTION de una regresión permanente,
+con stderr vacío, sin errores de carga/infraestructura.
+
+| Mutante | Negativas que fallan al aceptar datos inválidos | Exit |
+| --- | ---: | ---: |
+| arbitrary_event | 3 | 1 (detectado) |
+| extra_fields | 10 | 1 (detectado) |
+| arbitrary_reason | 5 | 1 (detectado) |
+| wrong_level | 1 | 1 (detectado) |
+
+M27 en `tests/media-api/order-query.test.cjs:615` comprueba la línea de startup real
+con campos/valores exactos y la pasa por el mismo validador; con key ausente la
+galería devuelve404 y los downloads GET/HEAD autorizados devuelven200. Key válida
+habilita galería200 y no emite el aviso. F4 conserva el rechazo de key malformada
+antes de necesitar siquiera una URL de DB utilizable, stdout vacío y diagnóstico
+sanitizado. M27/F4:2/2 PASS; no se cambia código de configuración o criptografía.
+
+### 18.3 Drill desplegado completo
+
+Se ejecutó literalmente `caffeinate -i npm run staging:deploy-drill:ci`, exit 0,
+con Docker Desktop, el Compose/Dockerfile existentes, credenciales sintéticas,
+R2 no enrutable y PostgreSQL propio del drill. No se cambia Compose, Dockerfile,
+workflow ni política de seguridad. Sólo después de su cleanup se inició el único
+PostgreSQL de regresiones. Orquestador Node 22.23.3/macOS ARM64; API/worker y PG
+corren en los contenedores Linux del drill. No se afirma un nuevo run remoto verde.
+
+**35/35 controles PASS**:
+
+| Control real del drill | Resultado |
+| --- | --- |
+| `build` | PASS |
+| `media_recovery_artifact` | PASS |
+| `media_forward_recovery` | PASS |
+| `media_initial_v1_writer` | PASS |
+| `binary_distinct_artifacts` | PASS |
+| `binary_candidate_capability_rejected` | PASS |
+| `binary_candidate_startup_rejected` | PASS |
+| `binary_api_recovery` | PASS |
+| `binary_worker_recovery` | PASS |
+| `binary_media_schema_preserved` | PASS |
+| `binary_data_history_preserved` | PASS |
+| `staging_deploy` | PASS |
+| `migration` | PASS |
+| `migrations` | PASS |
+| `migration_ledger` | PASS |
+| `migration_idempotency` | PASS |
+| `health_live` | PASS |
+| `health_ready` | PASS |
+| `health_readiness` | PASS |
+| `smoke` | PASS |
+| `production_media_auth` | PASS |
+| `crm_e2e` | PASS |
+| `reception_e2e` | PASS |
+| `reception_rbac` | PASS |
+| `reception_exactly_once` | PASS |
+| `production_privacy_fail_closed` | PASS |
+| `tenant_isolation` | PASS |
+| `ownership_history` | PASS |
+| `audit` | PASS |
+| `log_privacy` | PASS |
+| `bad_config` | PASS |
+| `rollback_recovery` | PASS |
+| `rollback_data_preserved` | PASS |
+| `rollback_redeploy` | PASS |
+| `cleanup` | PASS |
+
+CRM:23 requests HTTP, dos tenants, historial microsegundo y fila vehicle preservada;
+audit exacto A7/B3/total10; privacy de23 completions. Recepción:28 requests HTTP,
+TenantContext/RLS/OCC/signature/close/reads/RBAC, exactly-once y correlación de logs.
+Se superó explícitamente el baseline assertLogPrivacy que fallaba remotamente.
+
+Los artefactos GOOD y BAD fueron distintos e incompatibilidad de capability/startup
+fue rechazada; recuperación al GOOD fijado restauró API y worker. Configuración mala
+se rechaza independientemente. Snapshots preservan datos, historial, schema y ledger
+31/31; creación v1 autenticada antes y después de recuperación. IDs desechables:
+
+- GOOD: `sha256:9f3e8f1dea5e5d22cc2eb772ac9c9e20a3a45821651acbc56be53ac11c356f8b`.
+- BAD: `sha256:6ac0de1f71d639f38ccbc6193d2873c49fde3b3ed95448e9ad6e5e475c6cdbea`.
+
+No son artefactos retenidos/certificados para producción. El drill los eliminó junto
+con env sintético, overrides, build contexts, contenedores, redes y volúmenes.
+La comprobación independiente posterior confirmó cero residuos para su proyecto.
+
+### 18.4 Gates sobre fuente final congelada
+
+| Comando | Resultado observado | Exit |
+| --- | --- | ---: |
+| `node --test tests/crm-api/91-staging-log-privacy.test.cjs` | 37/37 | 0 |
+| `npm run test:crm:api:ci` | 112/112 (75 existentes +37 nuevos); incluye logging80 y helper90 | 0 |
+| Media API seleccionada M27/F4 | 2/2 | 0 |
+| `npm run typecheck` | PASS | 0 |
+| `npm run lint` | PASS | 0 |
+| `npm run build` | PASS | 0 |
+| `npm test` | 205/205 | 0 |
+| `npm run test:media:api:ci` | 763/763 | 0 |
+| `node scripts/test-order-media-mutations.cjs` | 11 detectados, cero supervivientes/invalid | 0 |
+| `npm run test:s4:quality-gate -- --report /private/tmp/tm-pr21-staging-privacy/full-gate-report.json` | 27/27 PASS; B07 seis detectados | 0 |
+| Secret scan extendido y `git diff --check` | PASS; archivo nuevo incluido con índice temporal | 0 |
+
+El gate final usa `DATABASE_URL=postgresql://postgres@127.0.0.1:54396/postgres`,
+`S4_GATE_DISPOSABLE_DATABASE=1`, PostgreSQL 18.6 desechable y storage simulated_only.
+Se verifica preflight de clúster virgen. Full backend automated gate PASS;
+N§7.23/Full Sprint 4 BLOCKED y producción NOT_READY siguen vigentes.
+Sin skips/cancelaciones/todos ni pisos reducidos; Media sigue763, generales205,
+harness59. Los37 tests nuevos pertenecen a CRM, no se cuentan como Media/general.
+La admisión1000ms, nueve activos,64 waiters/FIFO, SQL2/2/8 y permisos/firma no cambian.
+
+### 18.5 Fuente, Git y límites de entrega
+
+Fuentes no documentales congeladas (ruta UTF-8 relativa ordenada + NUL + bytes):
+`a8a1583390dde555b0ee2802e97cd4c95fa97e11124c4f53e9adddf9c976160d`, sobre HEAD `7c1e6d3e45d676fe06648c9e0261b106719deb53`.
+
+Inventario completo del parche:
+
+- `scripts/staging-crm-e2e.cjs` (modificado; única corrección funcional del helper).
+- `tests/crm-api/91-staging-log-privacy.test.cjs` (nuevo).
+- `tests/media-api/order-query.test.cjs` (modificado; startup M27).
+- `docs/S4-GAP-01-order-media-query-contract.md` (modificado; este apéndice).
+- `docs/quality/s4-backend-final-quality-gate.md` (modificado; evidencia B09).
+
+Índice real conservado, staging vacío; sin commit/push/merge ni modificación de Actions.
+No cambios en src/, schema/migraciones, RBAC/RLS/grants, cursores, firma/eliminación,
+admisión, purger, R2 DELETE, Phase B ni frontend. Los checkouts principal y frontend
+siguen limpios. Los únicos ignorados preexistentes son dist/ y node_modules/;
+dist se recompiló con el build solicitado. El contrato sigue versionado.
+
+PR #21 e issue #20/F1-N3 permanecen abiertos. El drill completo local demuestra que
+se resolvió su cadena de checks; el parche aún no tiene CI remoto propio porque
+no se autoriza commit/push. Merge BLOCKED hasta revisión y confirmación remota.
+F1-N3 sigue requiriendo staging/RTT y fan-out real antes de producción; no se cierra
+por un ajuste del validador de logs. No hubo nuevos fallos independientes en el
+drill ni en los gates. Los resultados anteriores conservan sus secciones/fechas.
+
+Evidencia sanitizada en `/private/tmp/tm-pr21-staging-privacy/`; se retiran logs
+crudos, copias mutantes y recursos Docker de la tarea al cierre.
+
+El PostgreSQL de regresiones terminó con cero bases temporales y cero otras
+conexiones cliente. Se retiraron su contenedor y el volumen anónimo identificado
+por eventos Docker mount/unmount de ese contenedor. No se hizo prune global ni
+se tocaron volúmenes ajenos; docker ps quedó vacío al cierre.
+
+S4-GAP-01A PR21 STAGING CI FIX READY FOR REVIEW

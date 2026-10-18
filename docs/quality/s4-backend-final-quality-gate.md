@@ -723,3 +723,26 @@ permanecen abiertos. F1-N3 exige staging/RTT y fan-out real antes de producción
 Linux local no demuestra capacidad productiva ni un nuevo run remoto verde.
 Merge BLOCKED hasta revisión/CI; N§7.23/Full Sprint 4 BLOCKED, producción NOT_READY.
 Los resultados históricos de §16 y otros apartados conservan fecha y conteos.
+
+
+## S4-GAP-01A — PR #21, privacidad del drill de staging, 2026-10-18
+
+[Contrato §18](../S4-GAP-01-order-media-query-contract.md) confirma los fallos
+remotos39155583329/39155579779 sobre7c1e6d3: validate verde, staging falla en
+assertLogPrivacy inicial al recibir el aviso estructurado de key ausente.
+Se conserva el emisor y se añade únicamente una excepción cerrada del helper:
+event order_media_route_disabled, reason cursor_key_missing, level 30 y exactamente
+esos tres campos. Los checks de sentinels/raw requests y las ramas existentes no cambian.
+
+37 regresiones focalizadas PASS; cuatro mutantes de apertura detectados. CRM112/112,
+M27/F4 startup2/2, generales205, Media763 y harness59 PASS. El drill desplegado real
+staging:deploy-drill:ci supera el baseline y termina35/35 PASS: CRM23/recepción28 HTTP,
+RBAC/exactly-once, isolation, privacy, audit, mala config, BAD binario, recuperación
+GOOD API/worker y preservación de ledger31/datos/history, cleanup verificado.
+B09 final27/27 PASS con fuente congelada,11 mutantes S4-GAP-01 y6 B07 detectados.
+Sin cambio de pisos, runner, Actions, admisión1000ms, locks o autorizaciones.
+
+El reporte e inventario exactos están en §18. Sin commit/push/merge. PR #21/issue #20
+abiertos; parche pendiente de nuevo CI remoto después de revisión autorizada.
+N§7.23/Full Sprint 4 BLOCKED y producción NOT_READY; F1-N3 no se cierra.
+Se preservan como historia los resultados de las ejecuciones anteriores.

@@ -612,7 +612,7 @@ test('M20: the effective PostgreSQL statement timeout is clamped to the remainin
 function productionConfig(extra={}){return h.load('api/server.js').loadProductionApiConfig({R2_ENDPOINT:f.r2.endpoint,R2_REGION:f.r2.region,
   R2_BUCKET:f.r2.bucket,R2_ACCESS_KEY_ID:f.r2.accessKeyId,R2_SECRET_ACCESS_KEY:f.r2.secretAccessKey,...extra});}
 test('M27: production API registers the configured cursor route and emits only a fixed missing-key startup notice',async()=>{
-  const {order}=await ready(),server=h.load('api/server.js'),output=[],cursorKey=randomBytes(32).toString('base64url');
+  const {order,s}=await ready(),server=h.load('api/server.js'),output=[],cursorKey=randomBytes(32).toString('base64url');
   const keyConfig=JSON.stringify({activeKeyId:'deploy',keys:{deploy:cursorKey}});
   const options={database:h.apiPool,identityProvider:{async verifyRequest(){return {identityProvider:'clerk',externalSubject:a.owner.subject};}},
     logStream:new Writable({write(chunk,_e,done){output.push(chunk.toString());done();}})};
@@ -621,9 +621,14 @@ test('M27: production API registers the configured cursor route and emits only a
   finally{await enabled.close();}
   assert.equal(output.join('').includes('cursor_key_missing'),false);output.length=0;
   const disabled=await server.buildProductionApi(options,productionConfig());
-  try{const r=await disabled.inject({url:url(order),headers:{'x-tenant-id':a.tenantId}});assert.equal(r.statusCode,404);}
+  try{const r=await disabled.inject({url:url(order),headers:{'x-tenant-id':a.tenantId}});assert.equal(r.statusCode,404);
+    for(const method of ['GET','HEAD']){const response=await disabled.inject({method,url:`/api/v1/media/${s.mediaAssetId}/download-url`,headers:{'x-tenant-id':a.tenantId}});assert.equal(response.statusCode,200);}
+  }
   finally{await disabled.close();}
   const text=output.join('');assert.equal(text.split('order_media_route_disabled').length-1,1);
+  const notices=text.trim().split('\n').map(line=>JSON.parse(line)).filter(line=>line.event==='order_media_route_disabled');
+  assert.deepEqual(notices,[{level:30,event:'order_media_route_disabled',reason:'cursor_key_missing'}]);
+  require('../../scripts/staging-crm-e2e.cjs').assertLogPrivacy(text,[cursorKey,keyConfig],3);
   assert.ok(text.includes('cursor_key_missing'));for(const secret of [cursorKey,keyConfig])assert.equal(text.includes(secret),false);
 });
 test('F4: malformed configured cursor fails the actual startup before any usable DB configuration is needed',()=>{
