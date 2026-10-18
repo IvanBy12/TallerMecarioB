@@ -26,6 +26,7 @@ import { registerReceptionRoutes } from '../receptions/routes.js';
 import { registerPrivacyConsentRoutes } from '../privacy/routes.js';
 import { loadR2ConfigFromEnv } from '../media/r2.js';
 import { registerMediaRoutes } from '../media/routes.js';
+import { loadOrderMediaCursor } from '../media/order-query-cursor.js';
 import { assertMediaIntegritySchema } from '../media/deployment.js';
 
 /**
@@ -60,7 +61,7 @@ export function loadProductionApiConfig(env: NodeJS.ProcessEnv = process.env) {
     : null;
   // S1-04: any invitation variable present => token secret + accept URL + sender are mandatory.
   const invitationConfig = invitationsConfigured(env) ? loadInvitationApiConfig(env) : null;
-  return { r2, wompi, clerk, invitationConfig, corsAllowedOrigins: parseCorsAllowedOrigins(env) };
+  return { r2, wompi, clerk, invitationConfig, orderMediaCursor: loadOrderMediaCursor(env), corsAllowedOrigins: parseCorsAllowedOrigins(env) };
 }
 
 export type ProductionApiConfig = ReturnType<typeof loadProductionApiConfig>;
@@ -70,8 +71,8 @@ export async function buildProductionApi(
   config: ProductionApiConfig,
 ) {
   const { database } = options;
-  const { r2, wompi, clerk, invitationConfig, corsAllowedOrigins } = config;
-  return buildApi({
+  const { r2, wompi, clerk, invitationConfig, orderMediaCursor, corsAllowedOrigins } = config;
+  const app = await buildApi({
     ...options,
     corsAllowedOrigins,
     registerPublicRoutes(server) {
@@ -103,7 +104,7 @@ export async function buildProductionApi(
       // Privacy reads and capture share the production catalog and controller configuration.
       registerPrivacyConsentRoutes(server);
       registerReceptionRoutes(server);
-      registerMediaRoutes(server, r2);
+      registerMediaRoutes(server, r2, orderMediaCursor);
       // Deploy-smoke-test only: proves the full protected-route pipeline
       // (rate limit -> auth -> TenantContext transaction -> RBAC) is wired
       // end to end in the deployed artifact. Not a product endpoint.
@@ -113,7 +114,8 @@ export async function buildProductionApi(
       });
     },
   });
-
+  if (!orderMediaCursor) app.log.info({ event: 'order_media_route_disabled', reason: 'cursor_key_missing' });
+  return app;
 }
 
 async function main(): Promise<void> {

@@ -33,8 +33,8 @@ const iso = (value: string) => `to_char((${value}) AT TIME ZONE 'UTC', 'YYYY-MM-
 
 /** Complete B01/B04 inventory. Every join includes tenant identity. Discovery
  * never takes a child lock. Binding is authorization evidence, not association. */
-async function links(sql: postgres.ReservedSql, tenantId: string, ids: string[]): Promise<Link[]> {
-  return sql.unsafe<Link[]>(`
+async function links(sql: postgres.ReservedSql, tenantId: string, ids: string[], maxRows?: number): Promise<Link[]> {
+  const query = `
     SELECT 'reception_media' kind, rm.reception_id id, r.id reception_id, NULL::uuid damage_id,
       o.id order_id, NULL::uuid item_id FROM public.reception_media rm
       JOIN public.receptions r ON r.tenant_id=rm.tenant_id AND r.id=rm.reception_id
@@ -85,7 +85,20 @@ async function links(sql: postgres.ReservedSql, tenantId: string, ids: string[])
       FROM public.media_upload_bindings b JOIN public.upload_sessions us
         ON us.tenant_id=b.tenant_id AND us.id=b.upload_session_id
       WHERE b.tenant_id=$1 AND us.media_asset_id=ANY($2::uuid[])
-  `, [tenantId, ids]);
+  `;
+  // UNION ALL and LEFT joins count every raw reference, including broken lineage,
+  // before any application array is materialized. Existing callers retain UNION.
+  const inventory = maxRows === undefined ? query : query.replace(/\n    UNION\n/g, '\n    UNION ALL\n')
+    .replace(/(?<!LEFT )JOIN public\./g, 'LEFT JOIN public.');
+  const rows = await sql.unsafe<Link[]>(`SELECT * FROM (${inventory}) inventory ${maxRows === undefined ? '' : 'LIMIT $3'}`,
+    maxRows === undefined ? [tenantId, ids] : [tenantId, ids, maxRows + 1]);
+  enforceReadBudget(maxRows, rows.length);
+  return rows;
+}
+
+function enforceReadBudget(maxRows: number | undefined, count: number): void {
+  if (maxRows !== undefined && count > maxRows)
+    throw new MediaError(503, 'MEDIA_QUERY_LIMIT_EXCEEDED', 'The media query exceeds its safe work budget.');
 }
 
 // An opaque in-process proof: callers cannot skip parent discovery by supplying
@@ -94,7 +107,7 @@ declare const lockBrand: unique symbol;
 export interface MediaRetentionLock { readonly [lockBrand]: true }
 interface LockState {
   sql: postgres.ReservedSql; tenantId: string; ids: string[]; receptions: Set<string>;
-  damages: Set<string>; orders: Set<string>; sessions: Set<string>; transaction: string;
+  damages: Set<string>; orders: Set<string>; sessions: Set<string>; transaction: string; maxRows?: number;
 }
 const locks = new WeakMap<MediaRetentionLock, LockState>();
 const distinct = (values: (string | null)[]) => [...new Set(values.filter((v): v is string => v !== null))].sort();
@@ -104,9 +117,11 @@ const distinct = (values: (string | null)[]) => [...new Set(values.filter((v): v
  * Order-terminal commands acquire their complete graph here BEFORE updating the
  * order. All IDs in each tier are sorted, including batch recalculations. */
 export async function lockMediaRetention(sql: postgres.ReservedSql, tenantId: string, assetIds: string[],
-  additionalParents: { receptionIds?: string[]; damageIds?: string[]; orderIds?: string[] } = {}): Promise<MediaRetentionLock> {
+  additionalParents: { receptionIds?: string[]; damageIds?: string[]; orderIds?: string[] } = {},
+  maxRows?: number): Promise<MediaRetentionLock> {
+  if (maxRows !== undefined && (!Number.isSafeInteger(maxRows) || maxRows < 1)) throw new Error('MEDIA_READ_BUDGET_INVALID');
   const ids = distinct(assetIds.map((id) => id.toLowerCase()));
-  const discovered = await links(sql, tenantId, ids);
+  const discovered = await links(sql, tenantId, ids, maxRows);
   const extraOrders = await sql<{ id: string; reception_id: string }[]>`SELECT id,reception_id
     FROM public.service_orders WHERE tenant_id=${tenantId} AND id=ANY(${additionalParents.orderIds ?? []}::uuid[])`;
   const extraDamages = await sql<{ id: string; reception_id: string }[]>`SELECT id,reception_id
@@ -114,9 +129,21 @@ export async function lockMediaRetention(sql: postgres.ReservedSql, tenantId: st
   const receptions = distinct([...discovered.map((l) => l.reception_id), ...extraDamages.map((d) => d.reception_id),
     ...extraOrders.map((o) => o.reception_id), ...(additionalParents.receptionIds ?? []).map((id) => id.toLowerCase())]);
   const damages = distinct([...discovered.map((l) => l.damage_id), ...extraDamages.map((d) => d.id)]);
+  const knownOrders = distinct([...discovered.map((l) => l.order_id), ...extraOrders.map((o) => o.id)]);
+  const knownRows = discovered.length + receptions.length + damages.length + knownOrders.length;
+  enforceReadBudget(maxRows, knownRows);
   const receptionOrders = await sql<{ id: string }[]>`SELECT id FROM public.service_orders
-    WHERE tenant_id=${tenantId} AND reception_id=ANY(${receptions}::uuid[])`;
-  const orders = distinct([...discovered.map((l) => l.order_id), ...extraOrders.map((o) => o.id), ...receptionOrders.map((o) => o.id)]);
+    WHERE tenant_id=${tenantId} AND reception_id=ANY(${receptions}::uuid[]) AND NOT (id=ANY(${knownOrders}::uuid[]))
+    LIMIT ${maxRows === undefined ? 2147483647 : maxRows - knownRows + 1}`;
+  enforceReadBudget(maxRows, knownRows + receptionOrders.length);
+  const orders = distinct([...knownOrders, ...receptionOrders.map((o) => o.id)]);
+  const parentRows = receptions.length + damages.length + orders.length;
+  enforceReadBudget(maxRows, discovered.length + parentRows);
+  const remaining = maxRows === undefined ? undefined : maxRows - discovered.length - parentRows;
+  const discoveredSessions = remaining === undefined ? undefined : await sql<{ id: string }[]>`
+    SELECT id FROM public.upload_sessions WHERE tenant_id=${tenantId} AND media_asset_id=ANY(${ids}::uuid[])
+    ORDER BY id LIMIT ${remaining + 1}`;
+  enforceReadBudget(remaining, discoveredSessions?.length ?? 0);
   await sql`SELECT id FROM public.receptions WHERE tenant_id=${tenantId} AND id=ANY(${receptions}::uuid[])
     ORDER BY id FOR NO KEY UPDATE`;
   await sql`SELECT id FROM public.vehicle_damages WHERE tenant_id=${tenantId} AND id=ANY(${damages}::uuid[])
@@ -124,14 +151,16 @@ export async function lockMediaRetention(sql: postgres.ReservedSql, tenantId: st
   await sql`SELECT id FROM public.service_orders WHERE tenant_id=${tenantId} AND id=ANY(${orders}::uuid[])
     ORDER BY id FOR NO KEY UPDATE`;
   const sessions = await sql<{ id: string }[]>`SELECT id FROM public.upload_sessions
-    WHERE tenant_id=${tenantId} AND media_asset_id=ANY(${ids}::uuid[]) ORDER BY id FOR UPDATE`;
+    WHERE tenant_id=${tenantId} AND media_asset_id=ANY(${ids}::uuid[])
+      AND (${discoveredSessions === undefined} OR id=ANY(${discoveredSessions?.map(s => s.id) ?? []}::uuid[]))
+    ORDER BY id FOR UPDATE`;
   const assets = await sql<{ id: string }[]>`SELECT id FROM public.media_assets
     WHERE tenant_id=${tenantId} AND id=ANY(${ids}::uuid[]) ORDER BY id FOR UPDATE`;
   if (assets.length !== ids.length) throw missing();
   const [tx] = await sql<{ transaction: string }[]>`SELECT pg_catalog.pg_current_xact_id()::text AS transaction`;
   const token = Object.freeze({}) as MediaRetentionLock;
   locks.set(token, { sql, tenantId, ids, receptions: new Set(receptions), damages: new Set(damages),
-    orders: new Set(orders), sessions: new Set(sessions.map((s) => s.id)), transaction: tx.transaction });
+    orders: new Set(orders), sessions: new Set(sessions.map((s) => s.id)), transaction: tx.transaction, maxRows });
   await state(token);
   return token;
 }
@@ -140,19 +169,27 @@ async function state(token: MediaRetentionLock): Promise<LockState> {
   if (!locked) throw new Error('MEDIA_RETENTION_LOCK_REQUIRED');
   const [tx] = await locked.sql<{ transaction: string }[]>`SELECT pg_catalog.pg_current_xact_id()::text AS transaction`;
   if (tx.transaction !== locked.transaction) throw new Error('MEDIA_RETENTION_TRANSACTION_MISMATCH');
-  const current = await links(locked.sql, locked.tenantId, locked.ids);
+  const current = await links(locked.sql, locked.tenantId, locked.ids, locked.maxRows);
   // An attach could commit between discovery and asset lock. Abort and retry
   // the ENTIRE transaction; never acquire an unknown parent after the asset.
   if (current.some((l) => (l.reception_id && !locked.receptions.has(l.reception_id))
     || (l.damage_id && !locked.damages.has(l.damage_id)) || (l.order_id && !locked.orders.has(l.order_id)))) throw retry();
   const orders = await locked.sql<{ id: string }[]>`SELECT id FROM public.service_orders
-    WHERE tenant_id=${locked.tenantId} AND reception_id=ANY(${[...locked.receptions]}::uuid[])`;
-  if (orders.some((o) => !locked.orders.has(o.id))) throw retry();
+    WHERE tenant_id=${locked.tenantId} AND reception_id=ANY(${[...locked.receptions]}::uuid[])
+      AND NOT (id=ANY(${[...locked.orders]}::uuid[])) LIMIT 1`;
+  if (orders.length) throw retry();
+  const knownRows = current.length + locked.receptions.size + locked.damages.size + locked.orders.size;
+  enforceReadBudget(locked.maxRows, knownRows);
   const sessions = await locked.sql<{ id: string }[]>`SELECT id FROM public.upload_sessions
-    WHERE tenant_id=${locked.tenantId} AND media_asset_id=ANY(${locked.ids}::uuid[])`;
+    WHERE tenant_id=${locked.tenantId} AND media_asset_id=ANY(${locked.ids}::uuid[])
+    LIMIT ${locked.maxRows === undefined ? 2147483647 : locked.maxRows - knownRows + 1}`;
+  enforceReadBudget(locked.maxRows, knownRows + sessions.length);
   if (sessions.some((s) => !locked.sessions.has(s.id))) throw retry();
   return locked;
 }
+
+/** A read checks the same proof without calculating or persisting retention. */
+export async function revalidateMediaReadGraph(token: MediaRetentionLock): Promise<void> { await state(token); }
 
 /** Safe only for the current locked transaction. This is an eligibility
  * decision for B06, not authorization for an external DELETE after COMMIT. */
@@ -212,7 +249,13 @@ export async function recalculateMediaRetention(sql: postgres.ReservedSql, tenan
   return recalculateLockedMediaRetention(await lockMediaRetention(sql, tenantId, [assetId]), assetId);
 }
 
-/** Future terminal command: prepare this scope before changing order status,
+/** Future terminal command: prepare this scope BEFORE locking/updating an
+ * order row. B05 locks receptions -> damages -> orders -> sessions -> assets
+ * (sorted within each tier); readers use that same hierarchy. An order-first
+ * writer can deadlock with a reader holding its reception. If authorization
+ * needs the owner-set/membership gate, take it before these domain tiers too.
+ * Never use a 40P01 response as a substitute for following this protocol.
+ * Prepare this scope before changing order status,
  * then recalculate its assets using the same token in that transaction. No
  * delivered/cancelled business command is introduced here. */
 export async function lockOrderMediaRetention(sql: postgres.ReservedSql, tenantId: string,

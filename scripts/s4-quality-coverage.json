@@ -81,7 +81,7 @@
   "test:media:api:ci": {
     "kind": "tap",
     "floors": [
-      621
+      761
     ]
   },
   "test:media:upgrade:ci": {

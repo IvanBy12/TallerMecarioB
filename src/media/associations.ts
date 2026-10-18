@@ -25,26 +25,26 @@ async function validateTarget(sql: postgres.ReservedSql, tenantId: string, targe
 
 // Public projection only. Keep PostgreSQL timestamp precision; storage and
 // retention internals never enter the DTO. The same projection serves replay.
-const projection = `m.id AS "mediaAssetId", m.media_type AS "mediaType", m.mime_type AS "mimeType",
+export const mediaDtoProjection = `m.id AS "mediaAssetId", m.media_type AS "mediaType", m.mime_type AS "mimeType",
   m.size_bytes::double precision AS "sizeBytes",
   to_char(m.captured_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "capturedAt",
   to_char(m.uploaded_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "uploadedAt",
   l.purpose, l.sort_order AS "sortOrder"`;
-interface AssociationDto {
+export interface MediaDto {
   mediaAssetId: string; mediaType: string; mimeType: string; sizeBytes: number | null;
   capturedAt: string | null; uploadedAt: string | null; purpose: string; sortOrder: number;
 }
 async function read(sql: postgres.ReservedSql, tenantId: string, target: AssociationTarget,
-  assetId?: string): Promise<AssociationDto[]> {
+  assetId?: string): Promise<MediaDto[]> {
   const d = definition(target);
-  return sql.unsafe<AssociationDto[]>(`SELECT ${projection} FROM public.${d.table} l
+  return sql.unsafe<MediaDto[]>(`SELECT ${mediaDtoProjection} FROM public.${d.table} l
     JOIN public.media_assets m ON m.tenant_id=l.tenant_id AND m.id=l.media_asset_id
     WHERE l.tenant_id=$1 AND l.${d.column}=$2
     AND m.status<>'deleted' AND m.deletion_requested_at IS NULL AND m.deleted_at IS NULL AND m.purged_at IS NULL ${assetId ? 'AND l.media_asset_id=$3' : ''}
     ORDER BY l.sort_order ASC,l.media_asset_id ASC,l.purpose ASC`, assetId ? [tenantId,d.id,assetId] : [tenantId,d.id]);
 }
 export async function listAssociatedMedia(sql: postgres.ReservedSql, tenantId: string,
-  target: AssociationTarget): Promise<AssociationDto[]> {
+  target: AssociationTarget): Promise<MediaDto[]> {
   await validateTarget(sql, tenantId, target, false);
   return read(sql, tenantId, target);
 }
@@ -52,7 +52,7 @@ export async function listAssociatedMedia(sql: postgres.ReservedSql, tenantId: s
 /** The caller owns the verified tenant transaction and whole-transaction retry.
  * No storage I/O here. Every validation is repeated under B05's graph locks. */
 export async function attachMedia(sql: postgres.ReservedSql, tenantId: string,
-  target: AssociationTarget, input: { mediaAssetId: string; sortOrder?: number }): Promise<AssociationDto> {
+  target: AssociationTarget, input: { mediaAssetId: string; sortOrder?: number }): Promise<MediaDto> {
   const assetId = input.mediaAssetId.toLowerCase(), sort = input.sortOrder ?? 0;
   await validateTarget(sql, tenantId, target, true);
   const token = await lockMediaRetention(sql, tenantId, [assetId], {

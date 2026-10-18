@@ -60,27 +60,28 @@ test('plans exclude live flow and redundant focused DB wrappers; CI includes all
 });
 
 const api = plan().find(s => s.args[1] === 'test:media:api:ci');
+const apiFloor = api.evidence.floors[0];
 for (const [name, stdout] of [
-  ['34/621 exit-zero partial API', summary(34)], ['zero tests', summary(0)],
-  ['absent summary', ''], ['missing field', summary(621).replace('# cancelled 0\n','')],
-  ['inconsistent pass', summary(621,{pass:620})], ['failures', summary(621,{fail:1})],
-  ['skipped critical test', summary(621,{skipped:1})], ['cancelled critical test', summary(621,{cancelled:1})],
-  ['todo critical test', summary(621,{todo:1})], ['duplicate summary', summary(621)+summary(621)],
-  ['custom/spec reporter', summary(621).replaceAll('#','ℹ')],
-  ['malformed integer', summary(621).replace('tests 621','tests 621x')],
-  ['unordered summary', summary(621).replace('# tests 621\n','')+'# tests 621\n'],
+  [`34/${apiFloor} exit-zero partial API`, summary(34)], ['zero tests', summary(0)],
+  ['absent summary', ''], ['missing field', summary(apiFloor).replace('# cancelled 0\n','')],
+  ['inconsistent pass', summary(apiFloor,{pass:apiFloor-1})], ['failures', summary(apiFloor,{fail:1})],
+  ['skipped critical test', summary(apiFloor,{skipped:1})], ['cancelled critical test', summary(apiFloor,{cancelled:1})],
+  ['todo critical test', summary(apiFloor,{todo:1})], ['duplicate summary', summary(apiFloor)+summary(apiFloor)],
+  ['custom/spec reporter', summary(apiFloor).replaceAll('#','ℹ')],
+  ['malformed integer', summary(apiFloor).replace(`tests ${apiFloor}`,`tests ${apiFloor}x`)],
+  ['unordered summary', summary(apiFloor).replace(`# tests ${apiFloor}\n`,'')+`# tests ${apiFloor}\n`],
 ]) test(`coverage fails closed: ${name}`, () => {
   const report = runGate([api], () => ({status:0,stdout}), {profile:'full'});
   assert.equal(report.scopeAutomatedGate,'FAIL'); assert.equal(report.backendAutomatedGate,'FAIL');
   assert.equal(report.exitCode,1); assert.ok(report.results[0].evidenceError);
 });
-for (const count of [621,622,800]) test(`coverage floor allows ${count} successful API tests`, () => {
+for (const count of [apiFloor,apiFloor+1,apiFloor+179]) test(`coverage floor allows ${count} successful API tests`, () => {
   assert.equal(validateEvidence(api,{stdout:summary(count)}).counts[0].tests,count);
 });
-test('CRLF TAP accepted explicitly', () => assert.equal(validateEvidence(api,{stdout:summary(621).replaceAll('\n','\r\n')}).counts[0].pass,621));
+test('CRLF TAP accepted explicitly', () => assert.equal(validateEvidence(api,{stdout:summary(apiFloor).replaceAll('\n','\r\n')}).counts[0].pass,apiFloor));
 test('custom runners require their strict evidence, never synthetic TAP', () => {
   for (const s of plan().filter(s=>s.evidence.kind==='markers')) {
-    assert.throws(()=>validateEvidence(s,{stdout:summary(621)}));
+    assert.throws(()=>validateEvidence(s,{stdout:summary(apiFloor)}));
     assert.doesNotThrow(()=>validateEvidence(s,success(s)));
     assert.throws(()=>validateEvidence(s,{stdout:success(s).stdout+success(s).stdout}));
   }
@@ -193,4 +194,16 @@ test('URL query overrides, remote hosts and invalid protocols fail before connec
     'https://localhost/postgres','postgresql://localhost/postgres#override','invalid'])
     assert.throws(()=>localDatabaseUrl(url),{message:'LOCAL_DATABASE_REQUIRED'});
   assert.equal(localDatabaseUrl('postgresql://postgres@127.0.0.1:55439/postgres').port,'55439');
+});
+
+test('independent reviewed media baseline is at least 725',()=>assert.ok(apiFloor>=725));
+for(const floor of [724,621])test(`independent floor rejects configured JSON ${floor}`,()=>{
+  const coverage=require('../../scripts/s4-quality-coverage.json'),entry=coverage['test:media:api:ci'],before=entry.floors;
+  try{entry.floors=[floor];assert.throws(()=>plan(),/MEDIA_API_COVERAGE_FLOOR_INVALID/);}
+  finally{entry.floors=before;}
+});
+test('independent floor permits a legitimate increased test count',()=>{
+  const coverage=require('../../scripts/s4-quality-coverage.json'),entry=coverage['test:media:api:ci'],before=entry.floors;
+  try{entry.floors=[apiFloor+1];assert.equal(plan().find(s=>s.args[1]==='test:media:api:ci').evidence.floors[0],apiFloor+1);}
+  finally{entry.floors=before;}
 });

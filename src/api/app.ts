@@ -1,3 +1,4 @@
+import { startOrderMediaRequest } from '../media/order-query-limits.js';
 import fastify, {
   LogController,
   type FastifyInstance,
@@ -237,8 +238,12 @@ export async function buildApi(options: BuildApiOptions): Promise<FastifyInstanc
     },
   });
 
-  app.addHook('onRequest', async (request) => {
+  app.addHook('onRequest', async (request, reply) => {
     requestStart.set(request, performance.now());
+    if (['/api/v1/orders/:orderId/media', '/api/v1/media/:id/download-url'].includes(request.routeOptions.url ?? '')) {
+      reply.header('cache-control', 'no-store');
+      if (request.routeOptions.url === '/api/v1/orders/:orderId/media') startOrderMediaRequest(request);
+    }
   });
   // Direct 4xx replies (including plugin replies) do not reach the error
   // handler. Read only the stable code from their own response, never log it.

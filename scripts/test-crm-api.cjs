@@ -33,6 +33,7 @@ const { applyCloseMutation } = require('./close-api-mutations.cjs');
 const { applyReceptionQueriesMutation } = require('./reception-queries-mutations.cjs');
 const { applyReceptionContractMutation } = require('./reception-contract-mutations.cjs');
 const { applyInspectionMutation } = require('./inspection-mutations.cjs');
+const { applyOrderMediaMutation } = require('./order-media-mutations.cjs');
 const { applyMediaAssignmentMutation } = require('./media-assignment-mutations.cjs');
 
 const CANONICAL_ROLES = [
@@ -154,7 +155,7 @@ async function main() {
     await applyMutation('js', { compiledRoot });
     await applyVehicleMutation('js', { compiledRoot });
     await applyOwnershipMutation('js', { compiledRoot });
-    if (process.env.TEST_SUITE_DIR === 'media-api') applyMediaAssignmentMutation(compiledRoot);
+    if (process.env.TEST_SUITE_DIR === 'media-api') { applyMediaAssignmentMutation(compiledRoot); applyOrderMediaMutation(compiledRoot); }
     if (process.env.TEST_SUITE_DIR === 'reception-api') {
       applySignatureMutation(compiledRoot);
       applyCloseMutation(compiledRoot);

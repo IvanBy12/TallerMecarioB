@@ -1,3 +1,7 @@
+import { orderMediaDeadline } from './order-query-limits.js';
+import { authorizeTenantDownload } from './download-authorization.js';
+import { listOrderMedia } from './order-query.js';
+import type { OrderMediaCursor } from './order-query-cursor.js';
 import { listAssignedMedia, authorizeAssignedDownload } from './assigned-authorization.js';
 import { removeUnattachedMedia } from './deletion.js';
 import { attachMedia, listAssociatedMedia, type AssociationTarget } from './associations.js';
@@ -23,7 +27,20 @@ function sendMediaError(request: { id: string }, reply: { code: (n: number) => {
   });
 }
 
-export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
+export function registerMediaRoutes(app: FastifyInstance, r2: R2Config, orderMediaCursor?: OrderMediaCursor): void {
+  if (orderMediaCursor) app.get('/api/v1/orders/:orderId/media', {
+    config: { permission: 'media.read', permissionScope: 'resource' }, bodyLimit: 2048,
+  }, async (request, reply) => {
+    try {
+      return reply.send(await listOrderMedia(getTenantRequestContext(request),
+        (request.params as { orderId: string }).orderId, request.query,
+        request.body !== undefined || Number(request.headers['content-length'] ?? 0) > 0
+          || request.headers['transfer-encoding'] !== undefined ? null : undefined, orderMediaCursor, orderMediaDeadline(request)));
+    } catch (error) {
+      if (error instanceof MediaError) return sendMediaError(request, reply, error);
+      throw error;
+    }
+  });
   app.post('/api/v1/media/:mediaAssetId/remove-unattached', {
     config: { permission: 'media.remove_unattached' }, bodyLimit: 2048,
     onRequest: async (_request, reply) => { reply.header('cache-control', 'no-store'); },
@@ -207,6 +224,7 @@ export function registerMediaRoutes(app: FastifyInstance, r2: R2Config): void {
       const mediaId = parseCanonicalUuid(id);
       if (!mediaId) throw new MediaError(404, 'MEDIA_ASSET_NOT_FOUND', 'Media asset not found.');
       if (context.resourceAuthorization.grantedScopes.size > 0) await authorizeAssignedDownload(context, mediaId);
+      else await authorizeTenantDownload(context, mediaId);
       const result = await getMediaDownloadUrl(context.sql, r2, context.tenant.tenantId, mediaId);
       return reply.send(result);
     } catch (error) {

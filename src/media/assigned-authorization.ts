@@ -10,9 +10,9 @@ const missing = () => new MediaError(404, 'MEDIA_ASSET_NOT_FOUND', 'Media asset 
 /** Serialize with the existing role/status command protocol, before domain locks.
  * Re-read the actual grant after waiting: request-start RBAC is not fresh proof.
  * No added privileges or authorization inferred from a role name. */
-async function lockReader(context: TenantRequestContext): Promise<void> {
+export async function lockReader(context: TenantRequestContext, tenantWide = false): Promise<void> {
   const { sql, tenant, resourceAuthorization } = context;
-  if (resourceAuthorization.permission !== 'media.read' || !resourceAuthorization.grantedScopes.has('assigned')) throw missing();
+  if (resourceAuthorization.permission !== 'media.read' || (!tenantWide && !resourceAuthorization.grantedScopes.has('assigned'))) throw missing();
   await lockCurrentTenantOwnerSet(sql);
   const [membership] = await sql`SELECT id FROM public.memberships
     WHERE tenant_id=${tenant.tenantId} AND id=${tenant.membershipId}
@@ -22,14 +22,15 @@ async function lockReader(context: TenantRequestContext): Promise<void> {
     JOIN public.role_permissions rp ON rp.role_id=mr.role_id
     JOIN public.permissions p ON p.id=rp.permission_id
     WHERE mr.tenant_id=${tenant.tenantId} AND mr.membership_id=${tenant.membershipId}
-      AND p.code='media.read' AND rp.resource_scope IN ('tenant','assigned')`;
+      AND p.code='media.read' AND rp.resource_scope IN ('tenant','assigned')
+      AND (${!tenantWide} OR rp.resource_scope='tenant')`;
   if (!grant) throw missing();
 }
 
 /** Called after the sorted B05 parent/order/session/asset tiers. SHARE blocks
  * UPDATE released_at/type/member/order until capability issuance commits.
  * Revocation that wins the lock is re-evaluated by PostgreSQL, never stale JS. */
-async function assignedReception(context: TenantRequestContext, receptionId: string): Promise<boolean> {
+export async function assignedReception(context: TenantRequestContext, receptionId: string): Promise<boolean> {
   const { sql, tenant } = context;
   const orders = await sql<{ id: string }[]>`SELECT o.id FROM public.service_orders o
     JOIN public.receptions r ON r.tenant_id=o.tenant_id AND r.id=o.reception_id
@@ -50,7 +51,7 @@ interface Link { reception_id: string | null; damage_id: string | null; valid: b
  * approved read contract here; future families fail closed. LEFT joins retain
  * broken lineage as a denial rather than silently discarding an association.
  * Caller holds the full B05 graph locks; B06 reference guards share asset locks. */
-async function eligibleGraph(context: TenantRequestContext, assetId: string): Promise<boolean> {
+export async function eligibleGraph(context: TenantRequestContext, assetId: string, tenantWideLegacy = false): Promise<boolean> {
   const { sql, tenant } = context;
   const [asset] = await sql`SELECT id FROM public.media_assets
     WHERE tenant_id=${tenant.tenantId} AND id=${assetId} AND status='active'
@@ -79,8 +80,8 @@ async function eligibleGraph(context: TenantRequestContext, assetId: string): Pr
   if (!links.length || links.some(l => !l.valid || !l.reception_id)) return false;
   // Immutable upload evidence never authorizes an unattached asset. Every
   // session must prove the exact final target and historical consent lineage.
-  const sessions = await sql<{ reception_id: string | null; damage_id: string | null; valid: boolean }[]>`
-    SELECT b.reception_id, b.damage_id,
+  const sessions = await sql<{ reception_id: string | null; damage_id: string | null; valid: boolean; binding_id: string | null; session_status: string; completed_at: Date | null }[]>`
+    SELECT b.reception_id, b.damage_id, b.upload_session_id AS binding_id, us.status AS session_status, us.completed_at,
       (us.status='completed' AND us.completed_at IS NOT NULL AND b.upload_session_id IS NOT NULL
         AND c.id IS NOT NULL AND r.id IS NOT NULL AND c.customer_id=r.customer_id
         AND c.purpose_code='service_provision' AND c.created_at<=b.authorized_at
@@ -92,10 +93,15 @@ async function eligibleGraph(context: TenantRequestContext, assetId: string): Pr
     LEFT JOIN public.vehicle_damages d ON d.tenant_id=b.tenant_id AND d.id=b.damage_id AND d.reception_id=b.reception_id
     LEFT JOIN public.privacy_consents c ON c.tenant_id=b.tenant_id AND c.id=b.privacy_consent_id
     WHERE us.tenant_id=${tenant.tenantId} AND us.media_asset_id=${assetId}`;
+  // D05: only the order gallery's tenant-wide path accepts genuinely unbound
+  // historical evidence. Mixed or incomplete proof never uses this exception.
+  if (tenantWideLegacy && links.length === 1 && sessions.every(s => s.binding_id === null
+    && s.session_status === 'completed' && s.completed_at !== null)) return true;
   if (!sessions.length || sessions.some(s => s.reception_id !== sessions[0].reception_id || s.damage_id !== sessions[0].damage_id)
     || sessions.some(s => s.valid !== true
     || !links.some(l => l.reception_id === s.reception_id && l.damage_id === s.damage_id))
     || links.some(l => !sessions.some(s => s.reception_id === l.reception_id && s.damage_id === l.damage_id))) return false;
+  if (tenantWideLegacy) return true;
   for (const receptionId of [...new Set(links.map(l => l.reception_id!))].sort()) {
     if (!await assignedReception(context, receptionId)) return false;
   }
