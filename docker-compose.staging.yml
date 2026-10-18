@@ -72,3 +72,6 @@ services:
     depends_on:
       provision-runtime-login:
         condition: service_completed_successfully
+
+# MEDIA_ORDER_CURSOR_KEY is omitted in this drill: order gallery disabled.
+# Real deployments inject its secret-store value; see staging.env.example.

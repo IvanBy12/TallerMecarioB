@@ -1,3 +1,6 @@
+import { assertOrderMediaDeadline, awaitOrderMediaStep, orderMediaDeadline, orderMediaSql, mediaQueryRetry } from '../media/order-query-limits.js';
+import { mediaDownloadSql, reserveMediaDownload } from '../media/download-limits.js';
+import { MediaError } from '../media/errors.js';
 import { MediaLineageChangedError } from '../media/errors.js';
 /**
  * S1-02 tenant request lifecycle (Fastify integration of the TenantContext
@@ -120,12 +123,44 @@ interface TenantRequestState {
   readonly context: TenantRequestContext;
   readonly reopen?: () => Promise<TenantRequestState>;
   status: 'open' | 'closing' | 'closed';
+  /** Unwrapped connection: rollback must remain possible after a read deadline. */
+  cleanupSql?: postgres.ReservedSql;
+  releaseAdmission?: () => void;
   durableOutcome?: { readonly code: DurableTenantOutcomeCode; readonly statusCode: number };
   /** Set at preValidation: from then on route code may be using `sql`. */
   routeStarted: boolean;
 }
 
 const tenantRequestStates = new WeakMap<FastifyRequest, TenantRequestState>();
+const downloadCancellations = new WeakMap<FastifyRequest, { signal: AbortSignal; cleanup: () => void }>();
+function isMediaDownload(request: FastifyRequest): boolean {
+  return ['GET', 'HEAD'].includes(request.method) && request.routeOptions.url === '/api/v1/media/:id/download-url';
+}
+function trackDownloadCancellation(request: FastifyRequest, reply: FastifyReply): AbortSignal {
+  const controller = new AbortController();
+  const aborted = () => {
+    controller.abort();
+    const state = tenantRequestStates.get(request);
+    // Before preValidation no route can own SQL. Otherwise its in-flight
+    // bounded query must settle before its normal error path rolls back.
+    if (state?.status === 'open' && !state.routeStarted) {
+      void rollbackTenantRequest(request).finally(() => downloadCancellations.get(request)?.cleanup());
+    }
+  };
+  // IncomingMessage 'close' also means a fully received healthy GET; use the
+  // response close event and writableFinished to distinguish a disconnected peer.
+  const closed = () => { if (!reply.raw.writableFinished) aborted(); };
+  const cleanup = () => {
+    request.raw.off('aborted', aborted);
+    reply.raw.off('close', closed);
+    downloadCancellations.delete(request);
+  };
+  request.raw.once('aborted', aborted);
+  reply.raw.once('close', closed);
+  downloadCancellations.set(request, { signal: controller.signal, cleanup });
+  if (request.raw.aborted || reply.raw.destroyed) aborted();
+  return controller.signal;
+}
 
 /** Logging may read only IDs from the server-validated tenant context, even
  * after the transaction has closed. Never resolve these from request input. */
@@ -236,45 +271,55 @@ async function openTenantRequest(
   request: FastifyRequest,
   identity: VerifiedIdentity,
   requirement: PermissionRequirement,
+  signal?: AbortSignal,
 ): Promise<TenantRequestState> {
-  const candidates = await discoverActiveMemberships(database, identity);
-  // Raw Fastify value (string | string[] | undefined): the parser is the only
-  // format authority — no trim/split/lowercase here.
-  const selection = parseTenantSelection(request.headers['x-tenant-id']);
-  const selected = selectTenantCandidate(candidates, selection);
-  const candidate = candidates.find((row) =>
-    row.tenantId === selected.tenantId && row.membershipId === selected.membershipId);
-  if (candidate === undefined) throw new TenantCandidateInvalidError();
-
-  // Discovery is not proof. From here on, ONE connection and ONE transaction.
-  const sql = await database.reserve();
+  const deadline = orderMediaDeadline(request);
+  let raw: postgres.ReservedSql | undefined;
+  let releaseAdmission: (() => void) | undefined;
+  const download = isMediaDownload(request);
   try {
-    await sql.unsafe('BEGIN');
+    // Gallery reserves before bootstrap to apply its front-door deadline.
+    // Downloads reserve under separate admission/SQL budgets, without that
+    // operation deadline. Candidate discovery never grants authority.
+    if (deadline !== undefined) {
+      raw = await awaitOrderMediaStep(database.reserve(), deadline, late => late.release());
+      assertOrderMediaDeadline(deadline);
+      await raw.unsafe('BEGIN');
+    }
+    if (download) {
+      ({ sql: raw, releaseAdmission } = await reserveMediaDownload(database, signal));
+      await raw.unsafe('BEGIN');
+    }
+    const discovery = raw && deadline !== undefined ? orderMediaSql(raw, deadline)
+      : raw && download ? await mediaDownloadSql(raw, signal) : database;
+    if (raw && !download) await discovery.unsafe("SET LOCAL lock_timeout='2s'");
+    const candidates = await discoverActiveMemberships(discovery, identity);
+    // Raw header parsing and selected-candidate verification are unchanged.
+    const selection = parseTenantSelection(request.headers['x-tenant-id']);
+    const selected = selectTenantCandidate(candidates, selection);
+    const candidate = candidates.find((row) =>
+      row.tenantId === selected.tenantId && row.membershipId === selected.membershipId);
+    if (candidate === undefined) throw new TenantCandidateInvalidError();
+
+    if (!raw) { raw = await database.reserve(); await raw.unsafe('BEGIN'); }
+    const sql = deadline === undefined && !download ? raw : discovery as postgres.ReservedSql;
     const validation = await validateActiveMembership(sql, identity, candidate);
     if (!validation.ok) throw new TenantAccessDeniedError();
     const bound = await bindTenantContext(sql, validation.membership, { requestId: request.id });
     const authorization = await loadMembershipAuthorization(sql, bound);
     if (!authorization.ok) throw new TenantAccessDeniedError();
-
-    // Roles are informative; authorization reads only `permissions`.
     const tenant = createTenantContext({
-      tenantId: bound.tenantId,
-      userId: bound.userId,
-      membershipId: bound.membershipId,
-      roleCodes: authorization.roles,
-      permissionRows: authorization.grants,
-      requestId: bound.requestId,
+      tenantId: bound.tenantId, userId: bound.userId, membershipId: bound.membershipId,
+      roleCodes: authorization.roles, permissionRows: authorization.grants, requestId: bound.requestId,
     });
     const resourceAuthorization = authorizeRoute(tenant, requirement);
-
-    return {
-      status: 'open',
-      routeStarted: false,
-      context: Object.freeze({ tenant, sql, permission: requirement, resourceAuthorization }),
-    };
+    if (signal?.aborted) throw mediaQueryRetry();
+    return { status: 'open', routeStarted: false, cleanupSql: raw, releaseAdmission,
+      context: Object.freeze({ tenant, sql, permission: requirement, resourceAuthorization }) };
   } catch (error) {
-    await sql.unsafe('ROLLBACK').catch(() => undefined);
-    sql.release();
+    if (raw) { await raw.unsafe('ROLLBACK').catch(() => undefined); raw.release(); }
+    releaseAdmission?.();
+    if (error instanceof MediaError) throw new ApiError(error.statusCode, error.code, error.message);
     throw error;
   }
 }
@@ -288,10 +333,11 @@ async function endTransaction(state: TenantRequestState, action: 'COMMIT' | 'ROL
   if (state.status !== 'open') return;
   state.status = 'closing';
   try {
-    await state.context.sql.unsafe(action);
+    await (state.cleanupSql ?? state.context.sql).unsafe(action);
   } finally {
     state.status = 'closed';
-    state.context.sql.release();
+    (state.cleanupSql ?? state.context.sql).release();
+    state.releaseAdmission?.();
   }
 }
 
@@ -379,6 +425,11 @@ async function finalizeTenantTransaction(
 
   const { resourceAuthorization } = state.context;
   if (reply.statusCode >= 200 && reply.statusCode < 300) {
+    const deadline = orderMediaDeadline(request);
+    if (deadline !== undefined) {
+      try { assertOrderMediaDeadline(deadline); }
+      catch (error) { const failure = error as MediaError; throw new ApiError(failure.statusCode, failure.code, failure.message); }
+    }
     assertResourceAuthorizationComplete(resourceAuthorization);
     await endTransaction(state, 'COMMIT');
   } else if (reply.statusCode >= 400 && reply.statusCode < 500
@@ -413,20 +464,37 @@ export function registerTenantRequestLifecycle(
     routeOptions.onSend = [...routeHooks, finalizeTenantTransaction];
   });
 
-  app.addHook('onRequest', async (request) => {
-    const identity = await options.authenticate(request);
-    const requirement = routeRequirement(request.routeOptions.config);
-    const state = await openTenantRequest(options.database, request, identity, requirement);
-    const reopen = async () => {
-      const nextIdentity = await options.authenticate(request);
-      if (nextIdentity.identityProvider !== identity.identityProvider
-        || nextIdentity.externalSubject !== identity.externalSubject) throw new TenantAccessDeniedError();
-      return openTenantRequest(options.database, request, nextIdentity, requirement);
-    };
-    tenantRequestStates.set(request, { ...state, reopen });
+  app.addHook('onRequest', async (request, reply) => {
+    const signal = isMediaDownload(request) ? trackDownloadCancellation(request, reply) : undefined;
+    try {
+      const deadline = orderMediaDeadline(request);
+      let identity: VerifiedIdentity;
+      try {
+        identity = deadline === undefined ? await options.authenticate(request)
+          : await awaitOrderMediaStep(options.authenticate(request), deadline);
+      } catch (error) {
+        if (error instanceof MediaError) throw new ApiError(error.statusCode, error.code, error.message);
+        throw error;
+      }
+      if (signal?.aborted) throw new ApiError(503, 'MEDIA_QUERY_RETRY', 'The media query could not be completed. Please try again.');
+      const requirement = routeRequirement(request.routeOptions.config);
+      const state = await openTenantRequest(options.database, request, identity, requirement, signal);
+      if (signal?.aborted) {
+        await endTransaction(state, 'ROLLBACK');
+        throw new ApiError(503, 'MEDIA_QUERY_RETRY', 'The media query could not be completed. Please try again.');
+      }
+      const reopen = async () => {
+        const nextIdentity = await options.authenticate(request);
+        if (nextIdentity.identityProvider !== identity.identityProvider
+          || nextIdentity.externalSubject !== identity.externalSubject) throw new TenantAccessDeniedError();
+        return openTenantRequest(options.database, request, nextIdentity, requirement, signal);
+      };
+      tenantRequestStates.set(request, { ...state, reopen });
+    } catch (error) { downloadCancellations.get(request)?.cleanup(); throw error; }
   });
 
   app.addHook('preValidation', async (request) => {
+    if (downloadCancellations.get(request)?.signal.aborted) throw new ApiError(503, 'MEDIA_QUERY_RETRY', 'The media query could not be completed. Please try again.');
     const state = tenantRequestStates.get(request);
     if (state) state.routeStarted = true;
   });
@@ -436,9 +504,11 @@ export function registerTenantRequestLifecycle(
   // that ends the response without passing through the final onSend hook.
   app.addHook('onError', async (request) => {
     await rollbackTenantRequest(request);
+    downloadCancellations.get(request)?.cleanup();
   });
   app.addHook('onResponse', async (request) => {
     await rollbackTenantRequest(request);
+    downloadCancellations.get(request)?.cleanup();
   });
 
   // Client gone while the body was still uploading: no route code can be

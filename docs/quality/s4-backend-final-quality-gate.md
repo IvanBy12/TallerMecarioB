@@ -616,3 +616,133 @@ No source dependency on those logs or helper files remains. Worktree retained
 because it contains the requested uncommitted review patch.
 
 S4-B09 READY FOR TARGETED RE-REVIEW
+
+
+## S4-GAP-01A — 2026-10-17: media por orden, sin cierre de N§7.23
+
+El responsable del producto aprobó D01–D07 el 2026-10-15, según el encargo expreso
+aportado por el usuario; no se consultó Notion. [Contrato y evidencia 01A](../S4-GAP-01-order-media-query-contract.md),
+§§0 y 14, registran alcance, procedencia y decisiones nuevas. M01–M04 permanecen
+sin aprobación; no se habilitan familias futuras, uploads técnicos ni purga física.
+
+El backend implementa GET /api/v1/orders/:orderId/media (media.read resource),
+recepción/daños exclusivamente, source discriminado, paginación contextual cifrada,
+validación por asset y presupuesto 1000/2s/8s/15s. Se reproduce y corrige por separado
+la emisión tenant-wide sin locks frente a un tombstone concurrente, preservando
+las descargas históricas permitidas. Ambos ganadores de carrera tienen pruebas.
+
+Gate completo local de 27 pasos: **PASS, exit 0** en PostgreSQL 18.6 desechable y
+storage simulado. `npm test`: 205; media API: **725/725**, incluidos 104 casos nuevos;
+B07: seis mutaciones detectadas; todas las mutaciones de regresión S3: PASS.
+El piso API del contrato de cobertura pasa **621 → 725** después de verificar el
+conteo completo, y vuelve a pasar dentro del gate completo. No se rebajan pisos
+ni se suprimen skips/failures. Typecheck/lint/build, multitenant/runtime/permisos,
+upgrades, secret scan y diff checks pasan; detalle/comandos en contrato §14.5.
+
+La fila histórica #23 de §2 describe el baseline B09 anterior a esta aprobación.
+Estado vigente: contrato backend aprobado e implementación local verificada;
+**aceptación N§7.23 todavía BLOCKED**, pendiente frontend y aceptación integrada.
+Full Sprint 4 sigue BLOCKED y producción NOT_READY; el runner conserva expresamente
+ese bloqueo. Los demás pendientes de B01–B09 no se cierran por este cambio.
+Sin modificación frontend/schema/migraciones/grants, commit, push, PR o R2 DELETE real.
+
+
+## S4-GAP-01A — remediación F1–F6 tras revisión adversarial
+
+[Contrato §15](../S4-GAP-01-order-media-query-contract.md) conserva hallazgos,
+criterios, tiempos, resultados negativos y la matriz final de 27 pasos. F1 conserva
+locks tenant-wide y aplica adquisición 2 s, lock 2 s, sentencia 8 s y admisión
+por pool a GET/HEAD. ROLLBACK precede a release; reservas tardías no abren tx.
+F2 clasifica 40P01 real como 503 sin retries y documenta el protocolo B05.
+
+F3: ocho guards retirados en compilados temporales produjeron los fallos previstos
+(M03/M15/M16/M20/M27/M29/M34b/M34c); cero supervivientes o inválidos. F4: templates
+sin material y aviso fijo de ruta deshabilitada; clave inválida falla pre-pool.
+F5: desfase +1 ms sigue fallando cerrado, TTL exacto 15 min; UTC sincronizado es
+requisito operativo. Se rechazan JSON ambiguo y claves de bytes repetidos.
+F6: piso independiente >=725; copias JSON 724/621 fallan el harness, mientras
+se permiten aumentos legítimos. No se rebajan otros requisitos de cobertura.
+
+Gate FINAL sobre fuentes congeladas: **27/27 PASS, exit 0**. Media API **747/747**
+(22 regresiones nuevas de remediación; piso 725 → 734 → 747 tras conteos completos),
+harness **59/59**, unit **205**, B07 **6 mutaciones detectadas**, mutaciones S3 PASS.
+Un intento F1/F2 fue invalidado por reposo y luego repetido con éxito; el gate
+intermedio 734/734 y el final 747/747 tienen reportes separados. Sin omisiones,
+skips, cancelaciones o ampliación de umbrales para pasar.
+
+**S4-GAP-01A READY FOR TARGETED RE-REVIEW.** N§7.23/Full Sprint 4 BLOCKED y
+producción NOT_READY continúan. Sin commit/push/PR, frontend/schema/migraciones/grants,
+nuevos propósitos, duración de video inventada, purga productiva o B07 Phase B.
+
+
+## S4-GAP-01A — F1-N1 disponibilidad final, 2026-10-18
+
+[Contrato §16](../S4-GAP-01-order-media-query-contract.md) registra reproducción,
+diseño, límites, matrices y digest final. El baseline inmediato era 747/205/59,
+8 mutantes focalizados, 6 B07 y 27 pasos; 621/725 se conservan como historia.
+La admisión mantiene pool.max−1 activos, añade 64 esperas FIFO de hasta500ms sin
+conexión mientras se espera y conserva adquisición2s/lock2s/sentencia8s. Cancelación
+y entregas tardías limpian sus recursos; SQL en vuelo termina antes de ROLLBACK/release.
+
+Ráfagas sanas reales: 672/672 HTTP200 tras el cambio frente a 270 HTTP200 / 402 HTTP503 antes,
+incluyendo 10/12/20/40 GET y HEAD, mezclas y dos tenants, tres repeticiones. E1
+retiene workshop/recepción/asset por separado; E2 demuestra progreso de clientes y
+galería B con A bloqueado. La cola global no es una cuota por tenant: otras
+descargas pueden expirar cuando un tenant ocupa todos los activos. No se promete SLA.
+
+Regresiones nuevas: 14 media API sobre747 → **761/761**, piso aumentado tras conteo
+completo y confirmado en gate final. Generales **205**, harness **59/59**, gate
+**27/27 PASS, exit0**. Mutantes focalizados **10/10** (incluye rechazo inmediato y
+rollback omitido); CI los invoca explícitamente con timeout5min, sin ejecución remota.
+B07 **6/6**; S3 completo PASS. Tests, fuentes congeladas, comandos e inventario en §16.
+
+**Merge BLOCKED hasta revisión independiente del nuevo candidato.** N§7.23/Full
+Sprint4 siguen BLOCKED y producción NOT_READY. Sin commit/push/PR, frontend,
+schema/migraciones/grants, nuevos propósitos/duraciones, purga ni B07 PhaseB.
+
+
+## S4-GAP-01A — PR #21, corrección de CI Linux, 2026-10-18
+
+[Contrato §17](../S4-GAP-01-order-media-query-contract.md) registra los dos runs
+remotos fallidos del HEAD 0a654cf, reproducción Linux, mediciones de fases y matrices.
+La serialización de workshop más scheduling/SQL agotaba admisión500ms; en Linux
+controlado,49 rechazos coinciden con49 expiraciones de admisión, cero adquisición/SQL.
+Cambiar sólo el presupuesto a1000ms conserva nueve activos,64 waiters FIFO y
+adquisición2s/lock2s/sentencia8s. Mismo perfil:623/672 →672/672200; candidato con
+workerCPU896/896200. Clientes/galería B siguen progresando; una descarga B puede
+esperar1s y fallar503 bajo A saturado (F1-N2 residual, documentado).
+
+Piso761 →763 sólo tras suite completo763/763. Nuevas regresiones de CPU/frontera;
+mutante500ms detectado. Focalizados11/11, B07 seis detectados, generales205,
+harness 59. Full27/27 PASS y CI-media4/4 PASS en Linux ARM64/Node 22.23.3/PG18.6,
+fuente congelada y clúster virgen por gate. Sin skips/cancelados ni timeouts del
+runner ampliados. Matriz completa, comandos, digest y archivos en §17.
+
+GitHub Actions del parche aún pendiente: no commit/push/merge. PR #21 e issue 20
+permanecen abiertos. F1-N3 exige staging/RTT y fan-out real antes de producción;
+Linux local no demuestra capacidad productiva ni un nuevo run remoto verde.
+Merge BLOCKED hasta revisión/CI; N§7.23/Full Sprint 4 BLOCKED, producción NOT_READY.
+Los resultados históricos de §16 y otros apartados conservan fecha y conteos.
+
+
+## S4-GAP-01A — PR #21, privacidad del drill de staging, 2026-10-18
+
+[Contrato §18](../S4-GAP-01-order-media-query-contract.md) confirma los fallos
+remotos39155583329/39155579779 sobre7c1e6d3: validate verde, staging falla en
+assertLogPrivacy inicial al recibir el aviso estructurado de key ausente.
+Se conserva el emisor y se añade únicamente una excepción cerrada del helper:
+event order_media_route_disabled, reason cursor_key_missing, level 30 y exactamente
+esos tres campos. Los checks de sentinels/raw requests y las ramas existentes no cambian.
+
+37 regresiones focalizadas PASS; cuatro mutantes de apertura detectados. CRM112/112,
+M27/F4 startup2/2, generales205, Media763 y harness59 PASS. El drill desplegado real
+staging:deploy-drill:ci supera el baseline y termina35/35 PASS: CRM23/recepción28 HTTP,
+RBAC/exactly-once, isolation, privacy, audit, mala config, BAD binario, recuperación
+GOOD API/worker y preservación de ledger31/datos/history, cleanup verificado.
+B09 final27/27 PASS con fuente congelada,11 mutantes S4-GAP-01 y6 B07 detectados.
+Sin cambio de pisos, runner, Actions, admisión1000ms, locks o autorizaciones.
+
+El reporte e inventario exactos están en §18. Sin commit/push/merge. PR #21/issue #20
+abiertos; parche pendiente de nuevo CI remoto después de revisión autorizada.
+N§7.23/Full Sprint 4 BLOCKED y producción NOT_READY; F1-N3 no se cierra.
+Se preservan como historia los resultados de las ejecuciones anteriores.

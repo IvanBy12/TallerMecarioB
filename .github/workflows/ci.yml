@@ -255,6 +255,10 @@ jobs:
       - name: Assigned media authorization mutations (S4-B07)
         run: npm run test:media:assigned:mutations:ci
 
+      - name: Order media authorization and lifecycle mutations (S4-GAP-01A)
+        timeout-minutes: 5
+        run: node scripts/test-order-media-mutations.cjs
+
       - name: CRM customer API mutations
         run: npm run test:crm:api:mutations:ci
 

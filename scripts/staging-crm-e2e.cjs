@@ -127,7 +127,11 @@ function assertLogPrivacy(raw, sentinels, minimumCompletions, expectedErrors = [
       const fields = Object.keys(line).sort();
       if (line.diagnostic === 'request_internal_error')
         assert.deepEqual(fields, ['diagnostic', 'level', 'request_id']);
-      else assert.deepEqual(fields, ['level', 'msg'], 'only a fixed startup/shutdown message is allowed');
+      else if (line.event === 'order_media_route_disabled') {
+        assert.deepEqual(fields, ['event', 'level', 'reason'], 'only the fixed order-media startup event fields are allowed');
+        must(line.level === 30, 'LOG_ORDER_MEDIA_DISABLED_LEVEL');
+        must(line.reason === 'cursor_key_missing', 'LOG_ORDER_MEDIA_DISABLED_REASON');
+      } else assert.deepEqual(fields, ['level', 'msg'], 'only a fixed startup/shutdown message is allowed');
       continue;
     }
     const keys = ['request_id', 'method', 'route', 'status_code', 'duration_ms'];

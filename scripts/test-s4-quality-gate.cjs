@@ -9,7 +9,7 @@ const COVERAGE = require('./s4-quality-coverage.json');
 const PENDING = Object.freeze([
   'Approved numerical video duration limit and trusted measurement rule (B01/B02)',
   'Order-bound technician upload contract and implementation (B07 Phase B)',
-  'Approved order-specific media query/view contract and implementation (N7.23)',
+  'Order-specific frontend gallery and integrated acceptance (N7.23; backend S4-GAP-01A alone does not close it)',
   'Reserved quote/document/privacy 36-month retention clocks (B01/B05)',
   'Frontend browser reception + video + photos E2E on matching final SHAs',
   'Live R2 privacy, identities, PUT/HEAD/GET/LIST, expiry and browser CORS',
@@ -17,7 +17,15 @@ const PENDING = Object.freeze([
   'B06 production activation, late-hold/recovery policy and safe hold command',
   'B08 deployed canary, credentials, load limits and production alert routing',
 ]);
-const npm = name => ({ command: 'npm', args: ['run', name], evidence: COVERAGE[name] });
+// Independent baseline: changing the JSON must never reduce B09 below the
+// reviewed 725 tests. Higher observed counts remain configurable in the JSON.
+const npm = name => {
+  const evidence = COVERAGE[name];
+  if (name === 'test:media:api:ci' && (evidence?.kind !== 'tap'
+    || evidence.floors?.length !== 1 || !Number.isSafeInteger(evidence.floors[0]) || evidence.floors[0] < 725))
+    throw Error('MEDIA_API_COVERAGE_FLOOR_INVALID');
+  return { command: 'npm', args: ['run', name], evidence };
+};
 const node = (...args) => ({ command: process.execPath, args });
 function plan(mediaOnly = false) {
   const media = ['r2-network', 'r2-transport', 'reconciliation', 'reconciliation-r2'];
@@ -27,7 +35,7 @@ function plan(mediaOnly = false) {
     ... (mediaOnly ? [npm('build')] : []),
     { ...node('--test', ...media.map(name => `tests/media/${name}.test.cjs`),
       'tests/media-harness/assignment-mutations.test.cjs', 'tests/media-harness/quality-gate.test.cjs'),
-      evidence: { kind: 'tap', floors: [mediaOnly ? 224 : 143, 55] } },
+      evidence: { kind: 'tap', floors: [mediaOnly ? 224 : 143, 59] } },
     ...(!mediaOnly ? ['test:db:sprint0:ci', 'test:authz:db:ci', 'test:tenant-context:db:ci',
       'test:api:multitenant:ci', 'test:tenant-context:api:ci', 'test:api:security:ci',
       'test:cross-tenant:final:ci', 'test:reception:db:ci', 'test:reception:upgrade:ci',
