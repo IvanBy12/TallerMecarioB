@@ -5,9 +5,9 @@ Rama: `task/s4-gap-01-order-media`. Base verificada:
 `47c8fc954a9951775ff7539f7fa02c0bcf39dd80`.
 Worktree: `/Users/ivanby/Documents/Proyectos/TallerMecarioB-worktrees/s4-gap-01-order-media`.
 
-**Estado actual: D01–D07 aprobadas el 2026-10-15; implementación backend S4-GAP-01A verificada; la revisión focalizada F1–F6 se conserva en §15; remediación F1-N1 en §16. Merge BLOCKED hasta revisión independiente del nuevo candidato. Frontend fuera del alcance de 01A.**
+**Estado actual: D01–D07 aprobadas el 2026-10-15; implementación backend S4-GAP-01A verificada; la revisión focalizada F1–F6 se conserva en §15; remediación F1-N1 en §16; corrección CI Linux del PR #21 en §17. Merge BLOCKED hasta revisión independiente del nuevo candidato. Frontend fuera del alcance de 01A.**
 N§7.23 y el Quality Gate global siguen BLOCKED hasta frontend y aceptación integrada.
-No se consultó Notion ni se modificó el frontend, schema, migraciones o grants. Sin commit, push, PR ni almacenamiento real destructivo.
+No se consultó Notion ni se modificó el frontend, schema, migraciones o grants. La remediación actual no crea commit, push ni merge; PR #21 existente permanece abierto. Sin almacenamiento real destructivo.
 
 ## 0. Aprobación expresa y trazabilidad — 2026-10-15
 
@@ -1420,3 +1420,258 @@ registró también cero bases de pruebas y cero conexiones residuales. Se conser
 únicamente los resúmenes y resultados sanitizados; se retiran copias y logs crudos.
 
 S4-GAP-01A F1-N1 READY FOR FINAL RE-REVIEW
+
+
+## 17. PR #21 — remediación de CI Linux, 2026-10-18
+
+### 17.1 Evidencia remota y causa raíz
+
+PR #21 abierto, rama `task/s4-gap-01-order-media`, HEAD afectado
+`0a654cfe3f2790575aa57fb4ff06ad1ee3e5a127`. Se leyeron ambos runs remotos:
+
+- [PR run 39148556323](https://github.com/IvanBy12/TallerMecarioB/actions/runs/39148556323):
+  failure, evento pull_request, inicio 2026-10-18T17:13:11Z, mismo HEAD;
+  760/761 media API PASS. GET40 repetición3 tuvo38/2 y HEAD40 repetición3 tuvo39/1
+  HTTP200/503. La matriz completa registra669/3 sobre672 solicitudes.
+- [Push run 39148478485](https://github.com/IvanBy12/TallerMecarioB/actions/runs/39148478485):
+  failure, evento push, inicio 2026-10-18T17:12:09Z, mismo HEAD;
+  760/761 media API PASS. Los nueve lotes40 tuvieron9–11 rechazos por lote;
+  matriz total584/88 sobre672. Ambos fallaron validate / Sprint 4 automated media
+  gate; mutations y staging no se ejecutaron por dependencia de validate.
+
+El origen es `src/media/download-limits.ts`, constante
+`MEDIA_DOWNLOAD_ADMISSION_WAIT_MS`, ahora línea9; la aserción original estaba en
+`tests/media-api/download-contention.test.cjs:256`. El presupuesto500ms se basaba
+sólo en macOS local y no absorbía las variaciones observadas de scheduling/SQL.
+Las solicitudes de un mismo tenant se serializan deliberadamente en
+`lock_current_tenant_owner_set()` (workshop FOR NO KEY UPDATE) hasta COMMIT.
+No se elimina ni reordena ese lock: protege el protocolo de membresías/RBAC y firma.
+
+Los logs remotos anteriores no distinguían fases. No se afirma haber instrumentado
+retroactivamente GitHub Actions. La atribución se confirmó en reproducción Linux:
+49 HTTP503 coincidieron exactamente con49 rechazos de admisión; cero fallos de
+adquisición y cero errores SQL. Las expiraciones ocurrieron alrededor de500ms.
+La instrumentación de prueba mide cola antes de llamar reserve, adquisición,
+26 sentencias por descarga (SQL acumulado incluye espera), espera en owner-lock, turno desde ese lock hasta commit
+y duración HTTP. Emite sólo conteos/tiempos/códigos, nunca SQL, parámetros, usuarios,
+configuración, cursores, llaves ni URLs firmadas.
+
+### 17.2 Entorno y controles de diagnóstico
+
+Linux ARM64 mediante Docker Desktop, Node 22.23.3, PostgreSQL 18.6-alpine, R2 simulado,
+pool postgres.js real max10 y roles API NOBYPASSRLS. La copia temporal contiene el
+HEAD real y su historial Git, más las mismas seis fuentes modificadas/nuevas del
+worktree; se verifican bytes y digest antes y después de los gates. No usa la DB
+ordinaria, credenciales de producción ni R2 real. No hay locks artificiales en las
+matrices sanas; E1/E2 son escenarios separados.
+
+Perfiles controlados, sin inferir equivalencia exacta con hardware GitHub:
+
+- Original sin instrumentar, Linux2CPU/2CPU:672/672, máximo349ms,500ms de admisión.
+- Instrumentado, Node1CPU / PG1CPU:672/672, máximo269ms, cola máxima196.01ms.
+- Node0.5CPU / PG0.5CPU:672/672, máximo457ms, cola353.54ms.
+- Perfil que reproduce CI: Node0.5CPU / PG0.3CPU, ambos antes/después.
+  Antes:623/672200,49/672503; cola máxima501.94ms. Después:672/672200,
+  cero503; cola594.82ms, HTTP máximo908ms, adquisición máxima67.66ms,
+  SQL acumulado máximo781.40ms por solicitud y espera owner-lock máxima692.68ms.
+- Candidato final bajo el mismo perfil, más un worker de CPU5ms/20ms para una
+  vuelta adicional de la matriz:896/896200, cero503; cola581.21ms y HTTP773ms.
+  El worker se termina en finally.
+
+No se declara saludable la DB sólo por ausencia de blockers artificiales:
+se observan tiempos SQL/lock, errores, adquisición y limpieza. Cada lote empieza
+con admisión0/cola0 y sin transacciones API abiertas, y termina sin conexiones
+prestadas ni transacciones residuales. Las fixtures son únicas por ejecución;
+compartir workshop/asset dentro del lote es intencional y reproduce el fan-out
+que serializa el protocolo existente. La espera natural entre lectores no es
+contaminación de datos. No hubo timeout SQL, lock2s ni adquisición2s en estas matrices.
+
+### 17.3 Corrección mínima y presupuesto
+
+Único cambio funcional: admisión500 → **1000ms**. Se mantienen nueve activos
+(pool.max−1),64 waiters FIFO, no bypass, ninguna conexión mientras se espera,
+adquisición2s, lock2s, sentencia8s, clasificación503 MEDIA_QUERY_RETRY y ausencia
+de retries ilimitados. No se modifican locks, firmas, permisos, RLS, estados,
+migraciones, roles ni grants.
+
+1000ms es una decisión de ingeniería contrastada con cola observada ~595ms y
+variación de CPU, no un requisito de Notion ni SLO. Añade500ms al máximo de espera
+previo a adquirir conexión; no convierte la ruta en una operación con deadline
+HTTP total de1s, ni amplía los presupuestos SQL. Una cola llena rechaza enseguida;
+una carga sostenida sigue agotando el presupuesto y falla cerrada.
+
+El muestreo de ráfagas pasa de un bucle setImmediate continuo a intervalos5ms,
+para no convertir la medición en carga de CPU constante. Antes/después instrumentados
+usan exactamente ese mismo muestreo. La aserción sigue exigiendo todas las respuestas
+200 y no acepta503 arbitrarios ni impone un máximo irrealista de tiempo HTTP total.
+La prueba independiente de CPU aporta variación explícita en vez de depender del
+sobrecoste accidental del muestreo.
+
+### 17.4 Matriz sana antes/después
+
+Celdas: HTTP200 / HTTP503; rango de duración total por lote. Antes/después: cada
+forma ×3. Final: las tres vueltas normales y una con workerCPU, ×4. Mismo perfil
+Linux Node0.5CPU / PG0.3CPU; snapshots y distribuciones completas en measurements.json.
+
+| Forma | Antes500ms ×3 | Después1000ms ×3 | Final1000ms ×4 |
+| --- | --- | --- | --- |
+| GET 10 | 30 / 0; 205–984 ms | 30 / 0; 202–682 ms | 40 / 0; 185–773 ms |
+| GET 12 | 36 / 0; 201–224 ms | 36 / 0; 228–276 ms | 48 / 0; 137–282 ms |
+| GET 20 | 60 / 0; 378–478 ms | 60 / 0; 325–461 ms | 80 / 0; 295–413 ms |
+| GET 40 | 107 / 13; 694–701 ms | 120 / 0; 730–768 ms | 160 / 0; 707–766 ms |
+| HEAD 10 | 30 / 0; 133–206 ms | 30 / 0; 132–189 ms | 40 / 0; 132–193 ms |
+| HEAD 12 | 36 / 0; 263–477 ms | 36 / 0; 199–211 ms | 48 / 0; 186–263 ms |
+| HEAD 20 | 60 / 0; 329–511 ms | 60 / 0; 329–385 ms | 80 / 0; 317–383 ms |
+| HEAD 40 | 101 / 19; 679–694 ms | 120 / 0; 634–687 ms | 160 / 0; 587–696 ms |
+| mixed 40 | 103 / 17; 684–811 ms | 120 / 0; 700–765 ms | 160 / 0; 604–715 ms |
+| two-tenants 20 | 60 / 0; 414–491 ms | 60 / 0; 382–908 ms | 80 / 0; 301–472 ms |
+
+Máximos de nueve activos,31 waiters en lotes40,64 en overflow. El total HTTP
+incluye bootstrap/SQL/commit y puede superar el presupuesto de cola sin ser error.
+No se extrapolan estas mediciones a producción ni a todos los runners Linux.
+
+### 17.5 E1/E2, recursos y seguridad sobre fuente final
+
+- E1 workshops:503 a2016ms, firmas0; rollback y retry autorizado200 después de liberar el blocker.
+- E1 receptions:503 a2014ms, firmas0; rollback y retry autorizado200 después de liberar el blocker.
+- E1 media_assets:503 a2017ms, firmas0; rollback y retry autorizado200 después de liberar el blocker.
+- E2 GET:12 descargas A; clientes B32ms, galería B30ms (ambas200); descarga B1002ms/HTTP503. Pool10, pico activos9/cola4; recuperación4022ms. Retry B autorizado200 tras liberar.
+- E2 HEAD:12 descargas A; clientes B33ms, galería B31ms (ambas200); descarga B1000ms/HTTP503. Pool10, pico activos9/cola4; recuperación4015ms. Retry B autorizado200 tras liberar.
+
+**F1-N2 residual explícito:** los slots de descarga son globales. Si A ocupa los
+nueve, una descarga de B también puede esperar1s y terminar503, frente a500ms antes.
+La reserva de una conexión protege clientes/galería, no da prioridad a descargas B.
+No se afirma fairness por tenant ni disponibilidad indefinida. E2 no mostró regresión
+material del progreso de clientes/galería; el mayor wait de descarga se documenta.
+No se añade un scheduler general ni se usa el slot reservado para aumentar descargas.
+
+Overflow65 solicitudes/64 waiters, timeout real, FIFO, cancelación en cola,
+adquisición y handoff, liberación idempotente y entrega tardía pasan. Los casos
+malformed/non-member conservan rollback, cero idle-in-transaction y timeouts locales
+limpios. El test de frontera mueve sólo el reloj monotónico de admisión:
+999ms admite;1000/1001ms rechazan antes del timer y sin adquirir SQL. El timer real
+se verifica por separado. Esto evita una carrera de scheduling en la aserción.
+
+La suite completa vuelve a ejecutar deletion-wins (cero URLs), reader-wins
+(eliminación espera), downgrade/revocación, historial signature/document/quote-PDF,
+assigned lead/support, QC-only denegado, RLS y permisos frescos. TTL 300s y B07 Phase B
+denegada siguen vigentes. No nuevas migraciones/roles/grants ni purger/R2 DELETE real.
+
+### 17.6 Regresiones, mutaciones y gates finales
+
+Baseline inmediato de este encargo:761 media API,205 generales,59 harness,
+10 mutantes focalizados y6 B07. Los resultados747/725/621 previos conservan sus
+fechas y no se reescriben. Dos tests nuevos (CPU y frontera) elevan media a763;
+el piso761 →763 se actualizó sólo después del suite763/763 completo observado.
+No se cambian timeouts del runner, filtros del gate, controles de skips/cancelados
+ni pisos de otras suites. Las selecciones focalizadas son ejecuciones adicionales;
+los gates finales ejecutan suites completas sin omisiones.
+
+También se ejecutaron literalmente `npm run typecheck`, `npm run lint`,
+`npm run build`, `npm test` y `npm run security:secret-scan` en Linux:
+todos exit 0; npm test 205/205. Detalle en linux-explicit-checks.json.
+
+`node scripts/test-order-media-mutations.cjs`: exit 0,11 detectados, cero
+supervivientes o inválidos. N1CI restituye500ms sólo en el JS compilado bajo el tmp
+del harness; el test permanente de 999ms falla con ERR_ASSERTION. Los otros10
+mutantes siguen detectados, incluidos rechazo inmediato y omisión de rollback.
+Se conserva la invocación CI explícita y su timeout5min; no se modifica el workflow.
+
+Comandos Linux con `DATABASE_URL=postgresql://postgres@127.0.0.1:5432/postgres` y
+`S4_GATE_DISPOSABLE_DATABASE=1` dentro de contenedores efímeros, clúster virgen por gate:
+
+- `npm run test:media:api:ci`:763/763, exit 0.
+- `node scripts/test-order-media-mutations.cjs`:11/11 detectados, exit 0.
+- `npm run test:s4:quality-gate -- --report /evidence/linux-full-gate-report.json`:
+ 27/27 PASS, exit 0, fuente final congelada.
+
+| Comando real | Evidencia | Exit |
+| --- | --- | --- |
+| `npm run security:secret-scan` | PASS — 1 marcadores | 0 |
+| `npm run typecheck` | PASS | 0 |
+| `npm run lint` | PASS | 0 |
+| `npm run build` | PASS | 0 |
+| `npm run test` | PASS — 26/26, 78/78, 20/20, 5/5, 76/76 | 0 |
+| `node --test tests/media/r2-network.test.cjs tests/media/r2-transport.test.cjs tests/media/reconciliation.test.cjs tests/media/reconciliation-r2.test.cjs tests/media-harness/assignment-mutations.test.cjs tests/media-harness/quality-gate.test.cjs` | PASS — 143/143, 59/59 | 0 |
+| `npm run test:db:sprint0:ci` | PASS — 65/65 | 0 |
+| `npm run test:authz:db:ci` | PASS — 4/4 | 0 |
+| `npm run test:tenant-context:db:ci` | PASS — 27/27 | 0 |
+| `npm run test:api:multitenant:ci` | PASS — 4/4 | 0 |
+| `npm run test:tenant-context:api:ci` | PASS — 75/75 | 0 |
+| `npm run test:api:security:ci` | PASS — 12/12 | 0 |
+| `npm run test:cross-tenant:final:ci` | PASS — 25/25 | 0 |
+| `npm run test:reception:db:ci` | PASS — 24/24 | 0 |
+| `npm run test:reception:upgrade:ci` | PASS — 20 marcadores | 0 |
+| `npm run test:reception:api:ci` | PASS — 123/123 | 0 |
+| `npm run test:runtime:db:ci` | PASS — 1 marcadores | 0 |
+| `npm run test:db:migration-lock:ci` | PASS — 1 marcadores | 0 |
+| `npm run test:media:api:ci` | PASS — 763/763 | 0 |
+| `npm run test:media:upgrade:ci` | PASS — 22 marcadores | 0 |
+| `npm run test:media:assigned:mutations:ci` | PASS — 1 marcadores | 0 |
+| `node scripts/test-reception-mutations.cjs` | PASS — 1 marcadores | 0 |
+| `node scripts/test-signature-api-mutations.cjs` | PASS — 1 marcadores | 0 |
+| `node scripts/test-close-api-mutations.cjs` | PASS — 1 marcadores | 0 |
+| `node scripts/test-reception-queries-mutations.cjs` | PASS — 1 marcadores | 0 |
+| `node scripts/test-reception-contract-mutations.cjs` | PASS — 1 marcadores | 0 |
+| `node scripts/test-inspection-mutations.cjs` | PASS — 1 marcadores | 0 |
+
+Invocación idéntica a la que fallaba en validate:
+`npm run test:s4:quality-gate:ci -- --report /evidence/linux-ci-gate-report.json`:
+4/4 PASS, exit 0, fuente final idéntica, PostgreSQL virgen independiente.
+
+| Comando real | Evidencia | Exit |
+| --- | --- | --- |
+| `npm run build` | PASS | 0 |
+| `node --test tests/media/r2-network.test.cjs tests/media/r2-transport.test.cjs tests/media/reconciliation.test.cjs tests/media/reconciliation-r2.test.cjs tests/media/r2-presign.test.cjs tests/media/content.test.cjs tests/media/r2-integrity.test.cjs tests/media/idempotency.test.cjs tests/media-harness/assignment-mutations.test.cjs tests/media-harness/quality-gate.test.cjs` | PASS — 224/224, 59/59 | 0 |
+| `npm run test:media:api:ci` | PASS — 763/763 | 0 |
+| `npm run test:media:upgrade:ci` | PASS — 22 marcadores | 0 |
+
+Generales 205; media 763; harness 59; B07 seis mutantes detectados. Sin failures,
+skips, cancelados ni todos en suites completas. Los gates tienen plataformaLinux,
+arch ARM64, versión PostgreSQL180006 y storage simulated_only en sus reportes JSON.
+
+### 17.7 F1-N3, alcance de validación y entrega
+
+[Issue 20/F1-N3](https://github.com/IvanBy12/TallerMecarioB/issues/20) permanece
+**OPEN / MUST-VERIFY antes de producción**. Ampliar admisión absorbe variación medida;
+no elimina la serialización ni el coste de cada RTT entre API y PostgreSQL mientras
+se retiene workshop. Mayor RTT o carga sostenida aún pueden consumir1s. Staging debe
+medir RTT, colas, locks, p95/p99 y fan-out real frontend antes de decidir capacidad,
+canary y aceptación. No se cierra el issue ni se interpreta Linux local como PROD_READY.
+
+No hubo commit, push, merge, nuevo PR ni ejecución remota del parche. PR #21 permanece
+abierto. Docker Linux ARM64 local no reproduce exactamente Ubuntu/AMD64 de Actions;
+los dos runs remotos fallidos siguen siendo la evidencia remota actual. Se requiere
+CI remoto verde después de revisión y push autorizado para confirmar GitHub Actions.
+**Merge BLOCKED** mientras tanto. N§7.23/Full Sprint 4 BLOCKED; producción NOT_READY.
+
+HEAD/base de esta remediación: `0a654cfe3f2790575aa57fb4ff06ad1ee3e5a127`. SHA-256 de las seis fuentes
+no documentales modificadas/nuevas (ruta UTF-8 relativa ordenada + NUL + bytes):
+`425845701b5f655b6282e63f8dd246722776e71dc4d10533e132fbc9ad959ca3`. Se confirma igualdad de fuentes worktree/copia Linux
+y conservación del índice real (staging0) al cierre.
+
+Inventario completo del parche:
+
+- `scripts/order-media-mutations.cjs` (modificado)
+- `scripts/s4-quality-coverage.json` (modificado)
+- `scripts/test-order-media-mutations.cjs` (modificado)
+- `src/media/download-limits.ts` (modificado)
+- `tests/media-api/download-contention.test.cjs` (modificado)
+- `tests/media-api/download-probe.cjs` (nuevo)
+- `docs/S4-GAP-01-order-media-query-contract.md` (modificado)
+- `docs/quality/s4-backend-final-quality-gate.md` (modificado)
+
+El contrato ya está versionado en el HEAD 0a654cf, aunque docs/* esté ignorado para
+nuevos documentos. No se cambia .gitignore ni se retira ese archivo del índice.
+Ignorados preexistentes: dist/ y node_modules/, sin nuevos artefactos de auditoría
+en el repositorio. La evidencia sanitizada local queda en
+`/private/tmp/tm-pr21-ci-remediation/`; las copias, logs crudos y clústeres desechables
+se eliminan al cierre tras verificar cero DBs/conexiones de pruebas residuales.
+El backend principal y frontend no reciben cambios. Los inventarios posteriores a
+diagnóstico, gate completo y gate CI verificaron cero bases de prueba y cero otras
+conexiones cliente. Los contenedores de esta tarea y la imagen temporal
+tm-pr21-ci-node se retiraron; docker ps quedó vacío. Las dos etiquetas PostgreSQL
+18-alpine/18.6-alpine que muestran el mismo Image ID son una imagen, no dos DBs
+activas. Las imágenes PostgreSQL preexistentes se conservan.
+
+S4-GAP-01A PR21 CI FIX READY FOR REVIEW

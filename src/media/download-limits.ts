@@ -3,8 +3,10 @@ import { mediaQueryRetry } from './order-query-limits.js';
 
 // Operational bounds, verified by the healthy-burst and contention matrix.
 // These are not product limits or additional authorization inputs.
+// 1s absorbs measured Linux scheduling/tenant-lock turns; 64 waiters and the
+// pool.max - 1 active cap still bound load. It is not a production latency SLO.
 export const MEDIA_DOWNLOAD_MAX_WAITERS = 64;
-export const MEDIA_DOWNLOAD_ADMISSION_WAIT_MS = 500;
+export const MEDIA_DOWNLOAD_ADMISSION_WAIT_MS = 1000;
 interface Waiter {
   deadline: number;
   signal?: AbortSignal;

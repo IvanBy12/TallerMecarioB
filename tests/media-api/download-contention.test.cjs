@@ -113,13 +113,13 @@ for(const table of ['workshops','receptions','media_assets'])test(`E1 ${table}: 
 });
 for(const method of ['GET','HEAD'])test(`E2 ${method}: twelve tenant A downloads cannot occupy all ten real API pool connections or starve tenant B`,async()=>{
   assert.equal(h.apiPool.options.max,10);
-  const {s}=await ready(),{order:bOrder}=await ready('reception','lead_technician',b);
+  const {s}=await ready(),{order:bOrder,s:bMedia}=await ready('reception','lead_technician',b);
   const gallery=await buildApi({database:h.apiPool,identityProvider:{async verifyRequest(request){const subject=request.headers.authorization?.slice(7);return subject?{identityProvider:'clerk',externalSubject:subject}:null;}},
     logStream:new Writable({write(_c,_e,done){done();}}),registerRoutes(server){registerMediaRoutes(server,f.r2,codec);}});
   await gallery.listen({host:'127.0.0.1',port:0});const galleryPort=gallery.server.address().port;
   const hold=await holder(),before=signedGets,started=performance.now();
   let release;const safety=setTimeout(()=>{release=hold.sql`ROLLBACK`.execute();},10000);
-  let results,other,bMs,bGalleryMs,bGallery,waiters,settled=0,queuePeak=0,activePeak=0,samplingDone=false;const timings=[];
+  let results,other,bMs,bGalleryMs,bGallery,bDownload,bDownloadMs,waiters,settled=0,queuePeak=0,activePeak=0,samplingDone=false;const timings=[];
   const sampling=(async()=>{while(!samplingDone){const state=snapshot();queuePeak=Math.max(queuePeak,state.waiting);activePeak=Math.max(activePeak,state.active);await yieldTurn();}})();
   // Observe native acquisitions/releases; every operation still uses the real
   // postgres.js pool and real NOBYPASSRLS API connections, without a mock pool.
@@ -134,21 +134,25 @@ for(const method of ['GET','HEAD'])test(`E2 ${method}: twelve tenant A downloads
       WHERE datname=current_database() AND wait_event_type='Lock'
       AND query LIKE '%lock_current_tenant_owner_set%'`)[0].n;return waiters>=9;});
     const bStart=performance.now();
-    [other,bGallery]=await Promise.all([
+    [other,bGallery,bDownload]=await Promise.all([
       call('/api/v1/customers',undefined,'GET',b).then(result=>{bMs=performance.now()-bStart;return result;}),
       call(url(bOrder),undefined,'GET',b,b.owner,galleryPort).then(result=>{bGalleryMs=performance.now()-bStart;return result;}),
+      call(`/api/v1/media/${bMedia.mediaAssetId}/download-url`,undefined,method,b).then(result=>{bDownloadMs=performance.now()-bStart;return result;}),
     ]);
     results=await Promise.all(pending);
   }finally{clearTimeout(safety);await (release??hold.sql`ROLLBACK`);hold.sql.release();await Promise.all(pending);h.apiPool.reserve=nativeReserve;samplingDone=true;await sampling;await gallery.close();}
   const recovery=performance.now()-started;
-  console.log('E2 metrics '+JSON.stringify({method,poolMax:10,requests:12,waiters,settled,tenantBMs:Math.round(bMs),tenantBGalleryMs:Math.round(bGalleryMs),queuePeak,activePeak,recoveryMs:Math.round(recovery),downloadMs:timings,reservations}));
+  console.log('E2 metrics '+JSON.stringify({method,poolMax:10,requests:12,waiters,settled,tenantBMs:Math.round(bMs),tenantBGalleryMs:Math.round(bGalleryMs),tenantBDownloadMs:Math.round(bDownloadMs),tenantBDownloadStatus:bDownload.status,queuePeak,activePeak,recoveryMs:Math.round(recovery),downloadMs:timings,reservations}));
   assert.equal(other.status,200);assert.equal(bGallery.status,200);assert.ok(bMs<1000&&bGalleryMs<1000,'one pool slot stays available; unrelated B customers/gallery complete within 1s');
+  assert.equal(bDownload.status,503);assert.equal(bDownload.headers['cache-control'],'no-store');
+  assert.ok(bDownloadMs>=admission.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS-50&&bDownloadMs<admission.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS+1000,'B downloads share the finite global wait, without borrowing the reserved pool headroom');
   assert.ok(queuePeak>0&&queuePeak<=admission.MEDIA_DOWNLOAD_MAX_WAITERS);assert.equal(activePeak,9);
   for(const result of results){if(method==='HEAD'){assert.equal(result.status,503);assert.equal(result.headers['cache-control'],'no-store');}
     else error(result,503,'MEDIA_QUERY_RETRY');}
   assert.ok(recovery<9500,'8s statement budget plus 1.5s scheduling margin; lock_timeout restarts for each lock');assert.equal(signedGets,before);
   await until(noDownloadTransactions);assert.equal((await download(s.mediaAssetId)).status,200);
   assert.equal((await call('/api/v1/customers',undefined,'GET',b)).status,200);
+  assert.equal((await download(bMedia.mediaAssetId,b)).status,200);await until(noDownloadTransactions);
 });
 test('real exhausted pool: 2s acquisition bound retains admission until late release, without opening transactions',async()=>{
   const {s}=await ready(),held=await Promise.all(Array.from({length:10},()=>h.apiPool.reserve()));
@@ -160,7 +164,7 @@ test('real exhausted pool: 2s acquisition bound retains admission until late rel
     assert.ok(elapsed>=1800&&elapsed<3500);assert.equal(signedGets,before);
     const again=performance.now();
     for(const r of await Promise.all(Array.from({length:12},()=>download(s.mediaAssetId))))error(r,503,'MEDIA_QUERY_RETRY');
-    assert.ok(performance.now()-again>=450&&performance.now()-again<1000,'late native reservations retain admission; new callers expire in the bounded admission queue');
+    assert.ok(performance.now()-again>=admission.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS-50&&performance.now()-again<admission.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS+1000,'late native reservations retain admission; new callers expire in the bounded admission queue');
     console.log('acquisition metrics '+JSON.stringify({requests:24,firstBurstMs:Math.round(elapsed),rejectedRetryBurstMs:Math.round(performance.now()-again)}));
   }finally{for(const sql of held)sql.release();}
   // Native postgres.js reservations drain on real pool release. None begins a
@@ -234,27 +238,35 @@ for(const wins of ['writer','reader'])test(`B05 ordered lifecycle primitive: ${w
 });
 
 
-test('N1 healthy bursts: repeated GET/HEAD fan-out, including forty downloads, never fails admission',async()=>{
+async function healthyBursts(repetitions=3,profile='normal'){
   const own=await ready(),other=await ready('reception','lead_technician',b),limits=h.load('media/download-limits.js'),rows=[];
   const shapes=[...['GET','HEAD'].flatMap(method=>[10,12,20,40].map(count=>({method,count}))),{method:'mixed',count:40},{method:'two-tenants',count:20}];
-  for(let repetition=1;repetition<=3;repetition++)for(const shape of shapes){
-    let inUse=0,maxInUse=0,activePeak=0,queuePeak=0,finished=false;const nativeReserve=h.apiPool.reserve;
-    h.apiPool.reserve=async()=>{const sql=await nativeReserve(),release=sql.release;inUse++;maxInUse=Math.max(maxInUse,inUse);
-      sql.release=()=>{inUse--;release();};return sql;};
+  for(let repetition=1;repetition<=repetitions;repetition++)for(const shape of shapes){
+    assert.deepEqual(limits.mediaDownloadAdmissionSnapshot(h.apiPool),{active:0,waiting:0});
+    assert.equal(await noDownloadTransactions(),true);
+    const probe=require('./download-probe.cjs').installDownloadProbe(h.apiPool,limits);
+    let activePeak=0,queuePeak=0,finished=false,phases;
     const sample=async()=>{while(!finished){const state=limits.mediaDownloadAdmissionSnapshot?.(h.apiPool);
-      if(state){activePeak=Math.max(activePeak,state.active);queuePeak=Math.max(queuePeak,state.waiting);}await yieldTurn();}};
+      if(state){activePeak=Math.max(activePeak,state.active);queuePeak=Math.max(queuePeak,state.waiting);}await new Promise(resolve=>setTimeout(resolve,5));}};
     const sampling=sample(),started=performance.now(),latencies=[];let responses;
     try{responses=await Promise.all(Array.from({length:shape.count},(_,i)=>{
       const tenant=shape.method==='two-tenants'&&i>=10?b:a,asset=tenant===a?own.s.mediaAssetId:other.s.mediaAssetId;
       const method=shape.method==='HEAD'?'HEAD':shape.method==='mixed'&&i%2?'HEAD':'GET',start=performance.now();
       return call(`/api/v1/media/${asset}/download-url`,undefined,method,tenant).then(result=>{latencies.push(performance.now()-start);return result;});
-    }));}finally{finished=true;await sampling;h.apiPool.reserve=nativeReserve;}
+    }));}finally{finished=true;await sampling;phases=probe.finish();}
     latencies.sort((x,y)=>x-y);const statuses={};for(const result of responses)statuses[result.status]=(statuses[result.status]??0)+1;
-    const row={...shape,repetition,statuses,elapsedMs:Math.round(performance.now()-started),p50Ms:Math.round(latencies[Math.floor(latencies.length/2)]),maxMs:Math.round(latencies.at(-1)),activePeak:activePeak||maxInUse,queuePeak,poolPeak:maxInUse};
-    rows.push(row);console.log('N1_BURST '+JSON.stringify(row));assert.equal(inUse,0);assert.ok(maxInUse<=9);
+    const row={...shape,repetition,profile,statuses,elapsedMs:Math.round(performance.now()-started),p50Ms:Math.round(latencies[Math.floor(latencies.length/2)]),maxMs:Math.round(latencies.at(-1)),activePeak:activePeak||phases.poolPeak,queuePeak,poolPeak:phases.poolPeak,phases};
+    rows.push(row);console.log('N1_BURST '+JSON.stringify(row));assert.equal(phases.inUse,0);assert.ok(phases.poolPeak<=9);assert.deepEqual(phases.sqlErrors,[]);assert.equal(phases.failedAcquisition,0);
   }
   assert.ok(rows.every(row=>row.statuses[200]===row.count&&Object.keys(row.statuses).length===1),'every healthy burst must complete without arbitrary admission 503');
   await until(noDownloadTransactions);
+}
+test('N1 healthy bursts: repeated GET/HEAD fan-out, including forty downloads, never fails admission',()=>healthyBursts());
+test('N1 scheduled bursts: GET/HEAD fan-out remains healthy with a competing CPU worker',async()=>{
+  const {Worker}=require('node:worker_threads'),stop=new SharedArrayBuffer(4);
+  const worker=new Worker("const {workerData}=require('node:worker_threads');const stop=new Int32Array(workerData);(async()=>{while(!Atomics.load(stop,0)){const end=performance.now()+5;while(performance.now()<end){}await new Promise(resolve=>setTimeout(resolve,15));}})();",{eval:true,workerData:stop});
+  try{await new Promise((resolve,reject)=>{worker.once('online',resolve);worker.once('error',reject);});await healthyBursts(1,'cpu-worker-25-percent');}
+  finally{Atomics.store(new Int32Array(stop),0,1);await worker.terminate();}
 });
 
 const admission=h.load('media/download-limits.js');
@@ -293,7 +305,7 @@ test('N1 queued timeout: expires within the admission budget, without allocating
   h.apiPool.reserve=(...args)=>{calls++;return nativeReserve(...args);};
   try{
     const start=performance.now();await assert.rejects(admission.reserveMediaDownload(h.apiPool,controller.signal),e=>e.code==='MEDIA_QUERY_RETRY');
-    const elapsed=performance.now()-start;assert.ok(elapsed>=450&&elapsed<1000);assert.equal(calls,0);
+    const elapsed=performance.now()-start;assert.ok(elapsed>=admission.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS-50&&elapsed<admission.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS+1000);assert.equal(calls,0);
     assert.deepEqual(snapshot(),{active:9,waiting:0});assert.equal(getEventListeners(controller.signal,'abort').length,0);
     console.log('N1_TIMEOUT '+JSON.stringify({elapsedMs:Math.round(elapsed),nativeReservations:calls,...snapshot()}));
   }finally{h.apiPool.reserve=nativeReserve;for(const value of held)releaseLease(value);}
@@ -310,7 +322,7 @@ test('N1 queue full: a finite HTTP waiting queue rejects overflow, expires clean
     }));
     assert.equal(peak,admission.MEDIA_DOWNLOAD_MAX_WAITERS);assert.equal(calls,0);assert.equal(signedGets,signs);
     assert.ok(responses.every(r=>r.status===503));assert.ok(Math.min(...times)<300,'a genuinely full queue rejects overflow before its wait budget');
-    assert.ok(Math.max(...times)>=450&&Math.max(...times)<1100);assert.deepEqual(snapshot(),{active:9,waiting:0});
+    assert.ok(Math.max(...times)>=admission.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS-50&&Math.max(...times)<admission.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS+1000);assert.deepEqual(snapshot(),{active:9,waiting:0});
     console.log('N1_FULL '+JSON.stringify({requests:responses.length,queuePeak:peak,nativeReservations:calls,fastestMs:Math.round(Math.min(...times)),slowestMs:Math.round(Math.max(...times)),statuses:{503:responses.length}}));
   }finally{finished=true;await sampling;h.apiPool.reserve=nativeReserve;for(const value of held)releaseLease(value);}
   assert.equal((await download(s.mediaAssetId)).status,200);await until(noDownloadTransactions);assert.deepEqual(snapshot(),{active:0,waiting:0});
@@ -385,4 +397,26 @@ test('N1 bootstrap disconnect: cancellation during openTenantRequest rolls back 
     assert.equal(signedGets,signs);assert.deepEqual(snapshot(),{active:0,waiting:0});
   }finally{await sql`ROLLBACK`.catch(()=>{});sql.release();if(client)await client.response;}
   assert.equal((await download(s.mediaAssetId)).status,200);
+});
+
+// Move only the admission clock across the boundary; DB acquisition remains real.
+// No wall-clock race between a near-deadline release and a slow CI scheduler.
+test('N1 deadline boundary: 999ms handoff succeeds; 1000/1001ms fail closed even before the timer runs',async(t)=>{
+  for(const elapsed of [999,1000,1001]){
+    const held=await holdAdmissions(),nativeReserve=h.apiPool.reserve,controller=new AbortController();
+    let calls=0,pending,value,clock=10000;
+    h.apiPool.reserve=(...args)=>{calls++;return nativeReserve(...args);};
+    const now=t.mock.method(performance,'now',()=>clock);
+    try{
+      pending=admission.reserveMediaDownload(h.apiPool,controller.signal).then(value=>({value}),error=>({error}));
+      assert.deepEqual(snapshot(),{active:9,waiting:1});clock+=elapsed;
+      releaseLease(held.shift());now.mock.restore();
+      const result=await pending;value=result.value;
+      if(elapsed===999){assert.ok(value,'the approved 1s queue must admit a still-valid 999ms waiter');assert.equal(calls,1);}
+      else{assert.equal(result.error?.code,'MEDIA_QUERY_RETRY');assert.equal(calls,0,'expired handoff must not borrow SQL');}
+      assert.equal(require('node:events').getEventListeners(controller.signal,'abort').length,0);
+      assert.equal(snapshot().waiting,0);
+    }finally{now.mock.restore();h.apiPool.reserve=nativeReserve;if(value)releaseLease(value);for(const lease of held)releaseLease(lease);if(pending)await pending;}
+    assert.deepEqual(snapshot(),{active:0,waiting:0});
+  }
 });

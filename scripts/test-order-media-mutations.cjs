@@ -27,7 +27,7 @@ function main(){
   run({TEST_FILE_FILTER:'order-query.test.cjs',TEST_NAME_PATTERN:'^M(03|15|16|20|27|34)'});
   run({TEST_FILE_FILTER:'order-query-deadline.test.cjs',TEST_NAME_PATTERN:'^M29:'});
   run({TEST_FILE_FILTER:'download-contention.test.cjs',TEST_NAME_PATTERN:'^F3N1'});
-  run({TEST_FILE_FILTER:'download-contention.test.cjs',TEST_NAME_PATTERN:'^N1 healthy'});
+  run({TEST_FILE_FILTER:'download-contention.test.cjs',TEST_NAME_PATTERN:'^N1 (healthy|deadline boundary)'});
   process.stdout.write('S4GAP_NORMAL_BASELINE_PASS\n');
   for(const [name,c] of Object.entries(CASES)){run({S4GAP_MUTATION:name,TEST_FILE_FILTER:c.testFile,TEST_NAME_PATTERN:c.pattern});process.stdout.write(`S4GAP_MUTANT_KILLED ${name}\n`);}
   process.stdout.write(`S4GAP_MUTATION_COUNTS killed=${Object.keys(CASES).length} survived=0 invalid=0\n`);

@@ -3,6 +3,7 @@ const {readFileSync,writeFileSync}=require('node:fs');
 const {resolve,relative,isAbsolute,basename}=require('node:path');
 const {tmpdir}=require('node:os');
 const CASES=Object.freeze({
+  N1CI:{file:'media/download-limits.js',anchor:'exports.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS = 1000;',value:'exports.MEDIA_DOWNLOAD_ADMISSION_WAIT_MS = 500;',pattern:'^N1 deadline boundary:',testFile:'download-contention.test.cjs'},
   N1:{file:'media/download-limits.js',anchor:'if (state.waiters.length >= exports.MEDIA_DOWNLOAD_MAX_WAITERS)',value:'if (state.active >= state.capacity)',pattern:'^N1 healthy',testFile:'download-contention.test.cjs'},
   F3N1:{file:'api/tenant-request.js',within:'async function openTenantRequest(',anchor:"await raw.unsafe('ROLLBACK').catch(() => undefined);",value:'void raw;',pattern:'^F3N1 malformed:',testFile:'download-contention.test.cjs'},
   M03:{file:'media/assigned-authorization.js',anchor:'if (!grant)',value:'if (false && !grant)',pattern:'^M03 gallery:',testFile:'order-query.test.cjs'},

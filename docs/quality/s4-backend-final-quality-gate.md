@@ -699,3 +699,27 @@ B07 **6/6**; S3 completo PASS. Tests, fuentes congeladas, comandos e inventario 
 **Merge BLOCKED hasta revisión independiente del nuevo candidato.** N§7.23/Full
 Sprint4 siguen BLOCKED y producción NOT_READY. Sin commit/push/PR, frontend,
 schema/migraciones/grants, nuevos propósitos/duraciones, purga ni B07 PhaseB.
+
+
+## S4-GAP-01A — PR #21, corrección de CI Linux, 2026-10-18
+
+[Contrato §17](../S4-GAP-01-order-media-query-contract.md) registra los dos runs
+remotos fallidos del HEAD 0a654cf, reproducción Linux, mediciones de fases y matrices.
+La serialización de workshop más scheduling/SQL agotaba admisión500ms; en Linux
+controlado,49 rechazos coinciden con49 expiraciones de admisión, cero adquisición/SQL.
+Cambiar sólo el presupuesto a1000ms conserva nueve activos,64 waiters FIFO y
+adquisición2s/lock2s/sentencia8s. Mismo perfil:623/672 →672/672200; candidato con
+workerCPU896/896200. Clientes/galería B siguen progresando; una descarga B puede
+esperar1s y fallar503 bajo A saturado (F1-N2 residual, documentado).
+
+Piso761 →763 sólo tras suite completo763/763. Nuevas regresiones de CPU/frontera;
+mutante500ms detectado. Focalizados11/11, B07 seis detectados, generales205,
+harness 59. Full27/27 PASS y CI-media4/4 PASS en Linux ARM64/Node 22.23.3/PG18.6,
+fuente congelada y clúster virgen por gate. Sin skips/cancelados ni timeouts del
+runner ampliados. Matriz completa, comandos, digest y archivos en §17.
+
+GitHub Actions del parche aún pendiente: no commit/push/merge. PR #21 e issue 20
+permanecen abiertos. F1-N3 exige staging/RTT y fan-out real antes de producción;
+Linux local no demuestra capacidad productiva ni un nuevo run remoto verde.
+Merge BLOCKED hasta revisión/CI; N§7.23/Full Sprint 4 BLOCKED, producción NOT_READY.
+Los resultados históricos de §16 y otros apartados conservan fecha y conteos.
